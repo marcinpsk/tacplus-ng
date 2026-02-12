@@ -545,9 +545,9 @@ while True:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Vault error.")
 			continue
 
-		# User not found in Vault — pass to next module in chain
+		# User not found in Vault — Vault is the terminal backend, return final
 		if vault_pw is None:
-			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+			D.write(MAVIS_FINAL, AV_V_RESULT_NOTFOUND, None)
 			continue
 
 		# Coerce to str so .encode() is safe if Vault returns a non-string value
@@ -564,10 +564,11 @@ while True:
 		D.av_pairs[AV_A_IDENTITY_SOURCE] = "vault"
 		D.remember_password(False)  # noqa: FBT003
 
-		# Sanitize group names — reject those with double quotes or backslashes
+		# Sanitize group names — reject those with quotes, backslashes, or
+		# non-printable/control characters to prevent malformed tacmember strings.
 		sanitized = []
 		for g in vault_groups:
-			if '"' in g or "\\" in g:
+			if '"' in g or "\\" in g or not g.isprintable():
 				print(
 					"mavis_tacplus_vault: skipping group with unsafe chars: " + repr(g),
 					file=sys.stderr,
@@ -584,7 +585,7 @@ while True:
 	except Exception:
 		traceback.print_exc()
 		try:
-			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, None)
 		except Exception:
 			pass
 
