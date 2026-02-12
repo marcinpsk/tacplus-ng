@@ -74,10 +74,12 @@ VAULT_REDIS_CACHE_TTL
 	Default: 600
 """
 
+import hmac
 import json
 import os
 import sys
 import time
+import urllib.parse
 
 try:
 	import redis
@@ -255,17 +257,18 @@ _vault_login()
 # Simple dict keyed by username. Each entry: {"password": ..., "groups": ...,
 # "fetched_at": monotonic_time}. Each forked worker has its own cache.
 _user_cache = {}
+_CACHE_MISS = object()
 
 
 def _cache_get_user(username):
-	"""Return (password, groups) from in-process cache, or (None, None) if
+	"""Return (password, groups) from in-process cache, or _CACHE_MISS if
 	expired or missing."""
 	entry = _user_cache.get(username)
 	if entry is None:
-		return None, None
+		return _CACHE_MISS
 	if time.monotonic() - entry["fetched_at"] > VAULT_CACHE_TTL:
 		del _user_cache[username]
-		return None, None
+		return _CACHE_MISS
 	return entry["password"], entry["groups"]
 
 
@@ -286,14 +289,14 @@ def _vault_read_user(username):
 	does not exist, or raises RuntimeError on Vault errors.
 	"""
 	# Check in-process cache first
-	cached_pw, cached_groups = _cache_get_user(username)
-	if cached_pw is not None:
-		return cached_pw, cached_groups
+	cached = _cache_get_user(username)
+	if cached is not _CACHE_MISS:
+		return cached
 
 	if not _vault_ensure_token():
 		raise RuntimeError("Unable to authenticate to Vault")
 
-	url = VAULT_KV_URL + username
+	url = VAULT_KV_URL + urllib.parse.quote(username, safe="")
 	try:
 		resp = http.get(
 			url,
@@ -354,6 +357,19 @@ _REDIS_BACKOFF_SECONDS = 10
 _CACHE_KEY_PREFIX = "tacplus:vault:" + VAULT_PATH_PREFIX.replace("/", ":") + ":"
 
 
+def _sanitize_redis_url(url):
+	"""Remove credentials from a Redis URL for safe logging."""
+	try:
+		p = urllib.parse.urlparse(url)
+		if p.password:
+			host = p.hostname + (":" + str(p.port) if p.port else "")
+			userinfo = (p.username + ":***@") if p.username else "***@"
+			return p.scheme + "://" + userinfo + host + p.path
+	except Exception:
+		pass
+	return url
+
+
 def _get_redis():
 	"""Return a Redis client, reconnecting only when _redis_client is None."""
 	global _redis_client, _redis_fail_count, _last_redis_attempt
@@ -374,7 +390,8 @@ def _get_redis():
 		_redis_client = client
 		_redis_fail_count = 0
 		print(
-			"mavis_tacplus_vault: connected to Redis at " + REDIS_URL,
+			"mavis_tacplus_vault: connected to Redis at "
+			+ _sanitize_redis_url(REDIS_URL),
 			file=sys.stderr,
 		)
 		return _redis_client
@@ -510,7 +527,7 @@ while True:
 		continue
 
 	# Password mismatch — this is a final deny (user exists in Vault)
-	if D.password != vault_pw:
+	if not hmac.compare_digest(D.password.encode(), vault_pw.encode()):
 		D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Permission denied.")
 		continue
 
