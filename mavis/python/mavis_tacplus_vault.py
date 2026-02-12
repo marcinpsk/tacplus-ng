@@ -105,6 +105,8 @@ from mavis import (
 
 
 # Environment variable helpers ################################################
+# Uses "or" so an explicitly empty env var (VAR="") is treated the same as
+# unset — both fall back to the default. env_int inherits this behavior.
 def env(var, default=None):
 	return os.getenv(var) or default
 
@@ -248,8 +250,11 @@ def _vault_ensure_token():
 					_vault_token_expires_at = time.monotonic() + 300
 				print("mavis_tacplus_vault: Vault token renewed", file=sys.stderr)
 				return True
-		except (RequestException, json.JSONDecodeError, ValueError):
-			pass
+		except (RequestException, json.JSONDecodeError, ValueError) as e:
+			print(
+				"mavis_tacplus_vault: Vault token renewal failed: " + str(e),
+				file=sys.stderr,
+			)
 		# Renewal failed — fall through to fresh login
 	return _vault_login()
 
@@ -356,8 +361,10 @@ def _vault_read_user(username):
 	else:
 		groups = []
 
-	# Store in in-process cache
-	_cache_put_user(username, password, groups)
+	# Only cache when password is present — a missing-password entry would
+	# stick around until TTL expires, hiding a Vault secret fix.
+	if password is not None:
+		_cache_put_user(username, password, groups)
 	return password, groups
 
 
