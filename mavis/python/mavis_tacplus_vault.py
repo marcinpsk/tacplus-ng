@@ -539,6 +539,10 @@ while True:
 			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
 			continue
 
+		# Coerce to str so .encode() is safe if Vault returns a non-string value
+		if not isinstance(vault_pw, str):
+			vault_pw = str(vault_pw)
+
 		# Password mismatch — this is a final deny (user exists in Vault)
 		if not hmac.compare_digest(D.password.encode(), vault_pw.encode()):
 			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Permission denied.")
