@@ -133,7 +133,6 @@ if VAULT_TIMEOUT <= 0:
 		"Invalid VAULT_TIMEOUT value: must be a positive integer"
 	)
 VAULT_CACHE_TTL = env_int("VAULT_CACHE_TTL", 300)
-VAULT_CACHE_TTL = env_int("VAULT_CACHE_TTL", 300)
 if VAULT_CACHE_TTL <= 0:
 	raise RuntimeError(
 		"Invalid VAULT_CACHE_TTL value: must be a positive integer"
@@ -397,7 +396,7 @@ def _get_redis():
 	_last_redis_attempt = now
 	try:
 		client = redis.Redis.from_url(
-			REDIS_URL, decode_responses=True, socket_timeout=2
+			REDIS_URL, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
 		)
 		client.ping()
 		_redis_client = client
