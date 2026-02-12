@@ -378,7 +378,7 @@ def _sanitize_redis_url(url):
 			userinfo = (p.username + ":***@") if p.username else "***@"
 			return p.scheme + "://" + userinfo + host + p.path
 	except Exception:
-		pass
+		return "<redis-url-parse-error>"
 	return url
 
 
