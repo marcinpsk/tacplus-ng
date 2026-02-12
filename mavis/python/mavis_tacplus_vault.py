@@ -268,6 +268,7 @@ _vault_login()
 # "fetched_at": monotonic_time}. Each forked worker has its own cache.
 _user_cache = {}
 _CACHE_MISS = object()
+_MAX_USER_CACHE_SIZE = 128
 
 
 def _cache_get_user(username):
@@ -283,7 +284,10 @@ def _cache_get_user(username):
 
 
 def _cache_put_user(username, password, groups):
-	"""Store user data in in-process cache."""
+	"""Store user data in in-process cache. Evicts the oldest entry when full."""
+	if username not in _user_cache and len(_user_cache) >= _MAX_USER_CACHE_SIZE:
+		oldest_key = min(_user_cache, key=lambda k: _user_cache[k]["fetched_at"])
+		del _user_cache[oldest_key]
 	_user_cache[username] = {
 		"password": password,
 		"groups": groups,
