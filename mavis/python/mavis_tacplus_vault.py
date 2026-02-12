@@ -127,6 +127,11 @@ VAULT_MOUNT = env("VAULT_MOUNT", "secret")
 VAULT_PATH_PREFIX = env("VAULT_PATH_PREFIX", "tacacs/users").strip("/")
 VAULT_VERIFY_TLS = env("VAULT_VERIFY_TLS", "1") != "0"
 VAULT_TIMEOUT = env_int("VAULT_TIMEOUT", 5)
+if VAULT_TIMEOUT <= 0:
+	raise RuntimeError(
+		"Invalid VAULT_TIMEOUT value: must be a positive integer"
+	)
+VAULT_CACHE_TTL = env_int("VAULT_CACHE_TTL", 300)
 VAULT_CACHE_TTL = env_int("VAULT_CACHE_TTL", 300)
 if VAULT_CACHE_TTL <= 0:
 	raise RuntimeError(
