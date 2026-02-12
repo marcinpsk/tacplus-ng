@@ -541,11 +541,17 @@ while True:
 		try:
 			vault_pw, vault_groups = _vault_read_user(D.user)
 		except RuntimeError as e:
+			# MAVIS chaining: return ERROR so "action error = continue"
+			# can pass the request to the next module if Vault is not the
+			# last backend. When Vault IS last, ERROR is terminal anyway.
 			print("mavis_tacplus_vault: " + str(e), file=sys.stderr)
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Vault error.")
 			continue
 
-		# User not found in Vault — Vault is the terminal backend, return final
+		# User not found in Vault. NOTFOUND with the default
+		# "action not-found = continue" lets the chain pass to the next
+		# module (e.g. Keycloak). This makes Vault usable in any position
+		# in the module chain — not just as the terminal backend.
 		if vault_pw is None:
 			D.write(MAVIS_FINAL, AV_V_RESULT_NOTFOUND, None)
 			continue
@@ -554,7 +560,13 @@ while True:
 		if not isinstance(vault_pw, str):
 			vault_pw = str(vault_pw)
 
-		# Password mismatch — this is a final deny (user exists in Vault)
+		# Password mismatch — definitive FAIL (not ERROR).
+		# Unlike Keycloak's "invalid_grant" (which conflates wrong-password
+		# with user-not-found), Vault CAN distinguish the two cases: the
+		# user secret exists, so the user is positively identified here.
+		# A wrong password for a known Vault user must be denied outright —
+		# FAIL is always terminal in MAVIS (no "action fail" override
+		# exists), which is the correct behavior.
 		if not hmac.compare_digest(D.password.encode(), vault_pw.encode()):
 			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Permission denied.")
 			continue

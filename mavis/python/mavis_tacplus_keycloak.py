@@ -396,7 +396,22 @@ while True:
 			error_code = ""
 			detail = "HTTP " + str(resp.status_code)
 		if error_code == "invalid_grant":
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Permission denied.")
+			# MAVIS chaining: return ERROR, not FAIL.
+			#
+			# Keycloak's ROPC endpoint returns "invalid_grant" for BOTH
+			# non-existent users and wrong passwords — we cannot distinguish
+			# the two. FAIL (NAK) is always terminal in MAVIS (there is no
+			# "action fail = continue" directive), so returning FAIL would
+			# block any downstream module from handling the user.
+			#
+			# By returning ERROR, the tac_plus-ng config directive
+			# "action error = continue" on this module converts the verdict
+			# to MAVIS_DOWN, allowing the next module in the chain (e.g.
+			# Vault break-glass) to attempt authentication. When this is
+			# the only/last module, ERROR is terminal — same end result.
+			#
+			# See mavis_glue.c:fixup_result() for the framework semantics.
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Permission denied.")
 		else:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Keycloak error: " + detail)
 		continue
@@ -425,7 +440,12 @@ while True:
 		continue
 	groups = extract_groups(claims)
 
-	# Enforce required group membership
+	# Enforce required group membership.
+	# This is a definitive FAIL (not ERROR) because Keycloak positively
+	# authenticated the user — they exist and the password is correct, but
+	# they lack the required group. This should NOT fall through to the
+	# next module: the user's identity is confirmed, only authorization
+	# is denied. FAIL is always terminal in MAVIS (no override exists).
 	if KEYCLOAK_REQUIRE_GROUP and KEYCLOAK_REQUIRE_GROUP not in groups:
 		D.write(
 			MAVIS_FINAL,
