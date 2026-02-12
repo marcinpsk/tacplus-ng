@@ -341,9 +341,16 @@ def _vault_read_user(username):
 		raise RuntimeError("Vault returned non-JSON response: " + str(e)) from e
 
 	password = data.get("password")
+	if password is None:
+		print(
+			"mavis_tacplus_vault: secret for user '" + username
+			+ "' at " + VAULT_PATH_PREFIX + "/" + username
+			+ " has no 'password' key; treating as not found",
+			file=sys.stderr,
+		)
 	groups_raw = data.get("groups", "")
 	if isinstance(groups_raw, list):
-		groups = groups_raw
+		groups = [g.strip() for g in groups_raw if isinstance(g, str) and g.strip()]
 	elif isinstance(groups_raw, str) and groups_raw:
 		groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
 	else:
@@ -483,7 +490,7 @@ while True:
 	# an upstream bug: it passes self.av_pairs (a dict) as the verdict arg to
 	# D.write(), producing garbage output. This is a deliberate workaround.
 	if D.av_pairs.get(AV_A_TYPE) != AV_V_TYPE_TACPLUS:
-		D.write(MAVIS_DOWN, None, None)
+		D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
 		continue
 
 	if not D.valid():
