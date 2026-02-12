@@ -436,7 +436,7 @@ else:
 	_get_redis()
 
 
-def cache_put(username, groups, dn):
+def _cache_put(username, groups, dn):
 	"""Store user groups in Redis. Non-fatal on failure."""
 	r = _get_redis()
 	if r is None:
@@ -455,7 +455,7 @@ def cache_put(username, groups, dn):
 		)
 
 
-def cache_get(username):
+def _cache_get(username):
 	"""Retrieve cached groups from Redis. Returns (groups, dn) or (None, None)."""
 	r = _get_redis()
 	if r is None:
@@ -513,7 +513,7 @@ while True:
 
 		# Handle authorization (INFO) and host authorization (HOST) from cache.
 		if D.is_tacplus_authz or D.is_tacplus_host:
-			cached_groups, cached_dn = cache_get(D.user)
+			cached_groups, cached_dn = _cache_get(D.user)
 			if cached_groups is None:
 				# No cached session — user must authenticate first
 				D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
@@ -567,7 +567,7 @@ while True:
 			D.set_tacmember('"' + '","'.join(sanitized) + '"')
 
 		# Cache sanitized groups so INFO/HOST reads don't need re-sanitization
-		cache_put(D.user, sanitized, D.user)
+		_cache_put(D.user, sanitized, D.user)
 		D.write(MAVIS_FINAL, AV_V_RESULT_OK, None)
 
 	except Exception:
