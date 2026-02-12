@@ -79,6 +79,7 @@ import json
 import os
 import sys
 import time
+import traceback
 import urllib.parse
 
 try:
@@ -486,83 +487,91 @@ def cache_get(username):
 while True:
 	D = Mavis()
 
-	# Check AV_A_TYPE directly instead of calling Mavis.is_tacplus() which has
-	# an upstream bug: it passes self.av_pairs (a dict) as the verdict arg to
-	# D.write(), producing garbage output. This is a deliberate workaround.
-	if D.av_pairs.get(AV_A_TYPE) != AV_V_TYPE_TACPLUS:
-		D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
-		continue
-
-	if not D.valid():
-		continue
-
-	# Unsupported request type (e.g. DACL) — pass to next module
-	if not D.is_tacplus_authc and not D.is_tacplus_authz and not D.is_tacplus_host:
-		D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
-		continue
-
-	# Password changes are not supported
-	if D.is_tacplus_chpw:
-		D.write(
-			MAVIS_FINAL,
-			AV_V_RESULT_FAIL,
-			"Password change is not supported via Vault backend.",
-		)
-		continue
-
-	# Handle authorization (INFO) and host authorization (HOST) from cache.
-	if D.is_tacplus_authz or D.is_tacplus_host:
-		cached_groups, cached_dn = cache_get(D.user)
-		if cached_groups is None:
-			# No cached session — user must authenticate first
+	try:
+		# Check AV_A_TYPE directly instead of calling Mavis.is_tacplus() which
+		# has an upstream bug: it passes self.av_pairs (a dict) as the verdict
+		# arg to D.write(), producing garbage output.
+		if D.av_pairs.get(AV_A_TYPE) != AV_V_TYPE_TACPLUS:
 			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
 			continue
-		D.av_pairs[AV_A_IDENTITY_SOURCE] = "vault"
-		D.set_dn(cached_dn)
-		# Groups are stored pre-sanitized by the AUTH path
-		if cached_groups:
-			D.set_tacmember('"' + '","'.join(cached_groups) + '"')
-		D.write(MAVIS_FINAL, AV_V_RESULT_OK, None)
-		continue
 
-	# Authenticate via Vault KV v2 #############################################
-	try:
-		vault_pw, vault_groups = _vault_read_user(D.user)
-	except RuntimeError as e:
-		print("mavis_tacplus_vault: " + str(e), file=sys.stderr)
-		D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Vault error.")
-		continue
+		if not D.valid():
+			continue
 
-	# User not found in Vault — pass to next module in chain
-	if vault_pw is None:
-		D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
-		continue
+		# Unsupported request type (e.g. DACL) — pass to next module
+		if not D.is_tacplus_authc and not D.is_tacplus_authz and not D.is_tacplus_host:
+			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+			continue
 
-	# Password mismatch — this is a final deny (user exists in Vault)
-	if not hmac.compare_digest(D.password.encode(), vault_pw.encode()):
-		D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Permission denied.")
-		continue
-
-	# Authentication success ###################################################
-	D.set_dn(D.user)
-	D.av_pairs[AV_A_IDENTITY_SOURCE] = "vault"
-	D.remember_password(False)  # noqa: FBT003
-
-	# Sanitize group names — reject those with double quotes or backslashes
-	sanitized = []
-	for g in vault_groups:
-		if '"' in g or "\\" in g:
-			print(
-				"mavis_tacplus_vault: skipping group with unsafe chars: " + repr(g),
-				file=sys.stderr,
+		# Password changes are not supported
+		if D.is_tacplus_chpw:
+			D.write(
+				MAVIS_FINAL,
+				AV_V_RESULT_FAIL,
+				"Password change is not supported via Vault backend.",
 			)
 			continue
-		sanitized.append(g)
-	if sanitized:
-		D.set_tacmember('"' + '","'.join(sanitized) + '"')
 
-	# Cache sanitized groups so INFO/HOST reads don't need re-sanitization
-	cache_put(D.user, sanitized, D.user)
-	D.write(MAVIS_FINAL, AV_V_RESULT_OK, None)
+		# Handle authorization (INFO) and host authorization (HOST) from cache.
+		if D.is_tacplus_authz or D.is_tacplus_host:
+			cached_groups, cached_dn = cache_get(D.user)
+			if cached_groups is None:
+				# No cached session — user must authenticate first
+				D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+				continue
+			D.av_pairs[AV_A_IDENTITY_SOURCE] = "vault"
+			D.set_dn(cached_dn)
+			# Groups are stored pre-sanitized by the AUTH path
+			if cached_groups:
+				D.set_tacmember('"' + '","'.join(cached_groups) + '"')
+			D.write(MAVIS_FINAL, AV_V_RESULT_OK, None)
+			continue
+
+		# Authenticate via Vault KV v2 #########################################
+		try:
+			vault_pw, vault_groups = _vault_read_user(D.user)
+		except RuntimeError as e:
+			print("mavis_tacplus_vault: " + str(e), file=sys.stderr)
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Vault error.")
+			continue
+
+		# User not found in Vault — pass to next module in chain
+		if vault_pw is None:
+			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+			continue
+
+		# Password mismatch — this is a final deny (user exists in Vault)
+		if not hmac.compare_digest(D.password.encode(), vault_pw.encode()):
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Permission denied.")
+			continue
+
+		# Authentication success ###############################################
+		D.set_dn(D.user)
+		D.av_pairs[AV_A_IDENTITY_SOURCE] = "vault"
+		D.remember_password(False)  # noqa: FBT003
+
+		# Sanitize group names — reject those with double quotes or backslashes
+		sanitized = []
+		for g in vault_groups:
+			if '"' in g or "\\" in g:
+				print(
+					"mavis_tacplus_vault: skipping group with unsafe chars: " + repr(g),
+					file=sys.stderr,
+				)
+				continue
+			sanitized.append(g)
+		if sanitized:
+			D.set_tacmember('"' + '","'.join(sanitized) + '"')
+
+		# Cache sanitized groups so INFO/HOST reads don't need re-sanitization
+		cache_put(D.user, sanitized, D.user)
+		D.write(MAVIS_FINAL, AV_V_RESULT_OK, None)
+
+	except Exception:
+		traceback.print_exc()
+		try:
+			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+		except Exception:
+			pass
 
 # End
