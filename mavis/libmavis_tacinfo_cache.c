@@ -42,12 +42,13 @@ static const char rcsid[] __attribute__((used)) = "$Id$";
 		uid_t uid;		\
 		gid_t gid;		\
 		uid_t euid;		\
-		gid_t egid;
+		gid_t egid;		\
+		uint64_t hashbits;
 
 #include "mavis.h"
 
 #define HAVE_mavis_init_in
-static int mavis_init_in(mavis_ctx * mcx)
+static int mavis_init_in(mavis_ctx *mcx)
 {
     DebugIn(DEBUG_MAVIS);
 
@@ -112,11 +113,14 @@ static int mavis_init_in(mavis_ctx * mcx)
 }
 
 #define HAVE_mavis_parse_in
-static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
+static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 {
     DebugIn(DEBUG_MAVIS);
     mcx->device_cache_timeout = 60;
     mcx->dacl_cache_timeout = 60;
+    mcx->hashbits =
+	(1ULL << AV_A_USER) | (1ULL << AV_A_IPADDR) | (1ULL << AV_A_REALM) | (1ULL << AV_A_SERVERIP) | (1ULL << AV_A_CERTSUBJ) | (1ULL << AV_A_CERTDATA);
+
     while (1) {
 	switch (sym->code) {
 	case S_script:
@@ -134,13 +138,6 @@ static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
 	    strset(&mcx->hashdir, sym->buf);
 	    sym_get(sym);
 	    continue;
-	case S_eof:
-	case S_closebra:
-	    DebugOut(DEBUG_MAVIS);
-	    return MAVIS_CONF_OK;
-	case S_action:
-	    mavis_module_parse_action(mcx, sym);
-	    continue;
 	case S_device:
 	    sym_get(sym);
 	    parse(sym, S_cache);
@@ -155,6 +152,25 @@ static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
 	    parse(sym, S_equal);
 	    mcx->dacl_cache_timeout = parse_int(sym);
 	    continue;
+	case S_hash:
+	    sym_get(sym);
+	    parse(sym, S_equal);
+	    mcx->hashbits = 0;
+	    do {
+		int i = av_attr_token_to_i(sym);
+		if (i < 0)
+		    parse_error(sym, "%s is not a recognized MAVIS attribute", sym->buf);
+		sym_get(sym);
+		mcx->hashbits |= (1ULL << i);
+	    } while (parse_comma(sym));
+	    continue;
+	case S_eof:
+	case S_closebra:
+	    DebugOut(DEBUG_MAVIS);
+	    return MAVIS_CONF_OK;
+	case S_action:
+	    mavis_module_parse_action(mcx, sym);
+	    continue;
 	default:
 	    parse_error_expect(sym, S_script, S_userid, S_groupid, S_directory, S_action, S_closebra, S_unknown);
 	}
@@ -163,33 +179,28 @@ static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
 }
 
 #define HAVE_mavis_drop_in
-static void mavis_drop_in(mavis_ctx * mcx)
+static void mavis_drop_in(mavis_ctx *mcx)
 {
     Xfree(&mcx->hashdir);
     Xfree(&mcx->hashfile);
     Xfree(&mcx->hashfile_tmp);
 }
 
-static void get_hash(av_ctx * ac, char *buf)
+static void get_hash(mavis_ctx *mcx, av_ctx *ac, char *buf)
 {
     u_char u[16];
-    char *t;
     myMD5_CTX m;
     DebugIn(DEBUG_MAVIS);
     myMD5Init(&m);
-    if ((t = av_get(ac, AV_A_USER)))
-	myMD5Update(&m, (u_char *) t, strlen(t));
-    if ((t = av_get(ac, AV_A_SERVERIP)))
-	myMD5Update(&m, (u_char *) t, strlen(t));
-    if ((t = av_get(ac, AV_A_IPADDR)))
-	myMD5Update(&m, (u_char *) t, strlen(t));
-    if ((t = av_get(ac, AV_A_REALM)))
-	myMD5Update(&m, (u_char *) t, strlen(t));
-    if ((t = av_get(ac, AV_A_CERTSUBJ)))
-	myMD5Update(&m, (u_char *) t, strlen(t));
-    if ((t = av_get(ac, AV_A_CERTDATA)))
-	myMD5Update(&m, (u_char *) t, strlen(t));
-
+    uint64_t hashbits = mcx->hashbits;
+    for (int i = 0; i < AV_A_ARRAYSIZE; i++) {
+	char *t;
+	if ((hashbits & 1) && (t = av_get(ac, i))) {
+	    myMD5Update(&m, (u_char *) t, strlen(t));
+	    myMD5Update(&m, (u_char *) " ", 1);
+	}
+	hashbits >>= 1;
+    }
     myMD5Final(u, &m);
     tohex(u, 16, buf);
     DebugOut(DEBUG_MAVIS);
@@ -201,7 +212,7 @@ static int keep[] = { AV_A_TACPROFILE, AV_A_TACCLIENT, AV_A_TACMEMBER, AV_A_UID,
 };
 
 #define HAVE_mavis_send_in
-static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
+static int mavis_send_in(mavis_ctx *mcx, av_ctx **ac)
 {
     int fn;
 
@@ -215,7 +226,7 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
     if (!t || (strcmp(t, AV_V_TACTYPE_INFO) && strcmp(t, AV_V_TACTYPE_HOST) && strcmp(t, AV_V_TACTYPE_DACL)))
 	return MAVIS_DOWN;
 
-    get_hash(*ac, mcx->hashfile + mcx->hashfile_offset + 3);
+    get_hash(mcx, *ac, mcx->hashfile + mcx->hashfile_offset + 3);
     mcx->hashfile[mcx->hashfile_offset] = mcx->hashfile[mcx->hashfile_offset + 3];
     mcx->hashfile[mcx->hashfile_offset + 1] = mcx->hashfile[mcx->hashfile_offset + 4];
     UNUSED_RESULT(setegid(mcx->gid));
@@ -228,12 +239,12 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
 	av_ctx *a = av_new(NULL, NULL);
 	fstat(fn, &st);
 	if (!strcmp(t, AV_V_TACTYPE_HOST) && (st.st_mtime + mcx->device_cache_timeout < io_now.tv_sec)) {
-		DebugOut(DEBUG_MAVIS);
-		return MAVIS_DOWN;
+	    DebugOut(DEBUG_MAVIS);
+	    return MAVIS_DOWN;
 	}
 	if (!strcmp(t, AV_V_TACTYPE_DACL) && (st.st_mtime + mcx->dacl_cache_timeout < io_now.tv_sec)) {
-		DebugOut(DEBUG_MAVIS);
-		return MAVIS_DOWN;
+	    DebugOut(DEBUG_MAVIS);
+	    return MAVIS_DOWN;
 	}
 	char *c = alloca(st.st_size + 1);
 	c[st.st_size] = 0;
@@ -254,7 +265,7 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
     return MAVIS_DOWN;
 }
 
-static int write_av(av_ctx * ac, int fn, int attr)
+static int write_av(av_ctx *ac, int fn, int attr)
 {
     int res = 0;
     char *t = av_get(ac, attr);
@@ -271,7 +282,7 @@ static int write_av(av_ctx * ac, int fn, int attr)
 }
 
 #define HAVE_mavis_recv_out
-static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
+static int mavis_recv_out(mavis_ctx *mcx, av_ctx **ac)
 {
     if (mcx->skip_recv_out) {
 	mcx->skip_recv_out = 0;
@@ -293,7 +304,7 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
     if (!t || strcmp(t, AV_V_RESULT_OK))
 	return MAVIS_DOWN;
 
-    get_hash(*ac, mcx->hashfile + mcx->hashfile_offset + 3);
+    get_hash(mcx, *ac, mcx->hashfile + mcx->hashfile_offset + 3);
     mcx->hashfile[mcx->hashfile_offset] = mcx->hashfile[mcx->hashfile_offset + 3];
     mcx->hashfile[mcx->hashfile_offset + 1] = mcx->hashfile[mcx->hashfile_offset + 4];
     mcx->hashfile_tmp[mcx->hashfile_offset] = mcx->hashfile[mcx->hashfile_offset + 3];
