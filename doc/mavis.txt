@@ -779,7 +779,7 @@ session  required       pam_opendirectory.so
        and user will be rejected. Defaults: blacklist period =
        900, blacklist count = 5.
      * hash = MAVIS_Attributes
-       Specifies the MAVIS attributes use for calculating the
+       Specifies the MAVIS attributes used for calculating the
        backlist file names. Default: hash = USER,IPADDR,REALM
      * directory = Directory
        Specifies the directory to use for caching blacklist data.
@@ -813,6 +813,10 @@ session  required       pam_opendirectory.so
      * device cache timeout = seconds
        Sets the number of seconds device info should be cached.
        Default: 60s.
+     * hash = MAVIS_Attributes
+       Specifies the MAVIS attributes used for calculating the
+       cache file names. Default: hash =
+       USER,IPADDR,REALM,SERVERIP,CERTSUBJ,CERTDATA
      __________________________________________________________
 
 5.2.13.2. Example
