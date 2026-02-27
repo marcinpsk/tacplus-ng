@@ -38,18 +38,18 @@ static const char rcsid[] __attribute__((used)) = "$Id$";
 		char *hashfile_tmp;	\
 		off_t hashfile_offset;	\
 		int skip_recv_out;	\
+		u_int blacklist_count;	\
+		time_t blacklist_period; \
 		uid_t uid;		\
 		gid_t gid;		\
 		uid_t euid;		\
 		gid_t egid;		\
-		uint64_t hashbits;	\
-		u_int blacklist_count;	\
-		time_t blacklist_period;
+		uint64_t hashbits;
 
 #include "mavis.h"
 
 #define HAVE_mavis_init_in
-static int mavis_init_in(mavis_ctx * mcx)
+static int mavis_init_in(mavis_ctx *mcx)
 {
     DebugIn(DEBUG_MAVIS);
 
@@ -114,12 +114,12 @@ static int mavis_init_in(mavis_ctx * mcx)
 }
 
 #define HAVE_mavis_parse_in
-static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
+static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 {
     DebugIn(DEBUG_MAVIS);
     mcx->blacklist_period = (time_t) 15 *60;
     mcx->blacklist_count = (u_int) 5;
-    mcx->hashbits = (1 << AV_A_USER) | (1 << AV_A_IPADDR) | (1 << AV_A_REALM);
+    mcx->hashbits = (1ULL << AV_A_USER) | (1ULL << AV_A_IPADDR) | (1ULL << AV_A_REALM);
 
     while (1) {
 	switch (sym->code) {
@@ -164,7 +164,7 @@ static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
 		if (i < 0)
 		    parse_error(sym, "%s is not a recognized MAVIS attribute", sym->buf);
 		sym_get(sym);
-		mcx->hashbits |= (1 << i);
+		mcx->hashbits |= (1ULL << i);
 	    } while (parse_comma(sym));
 	    continue;
 	case S_eof:
@@ -182,14 +182,14 @@ static int mavis_parse_in(mavis_ctx * mcx, struct sym *sym)
 }
 
 #define HAVE_mavis_drop_in
-static void mavis_drop_in(mavis_ctx * mcx)
+static void mavis_drop_in(mavis_ctx *mcx)
 {
     Xfree(&mcx->hashdir);
     Xfree(&mcx->hashfile);
     Xfree(&mcx->hashfile_tmp);
 }
 
-static void get_hash(mavis_ctx * mcx, av_ctx * ac, char *buf)
+static void get_hash(mavis_ctx *mcx, av_ctx *ac, char *buf)
 {
     u_char u[16];
     myMD5_CTX m;
@@ -210,7 +210,7 @@ static void get_hash(mavis_ctx * mcx, av_ctx * ac, char *buf)
 }
 
 #define HAVE_mavis_send_in
-static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
+static int mavis_send_in(mavis_ctx *mcx, av_ctx **ac)
 {
     int fn;
 
@@ -261,7 +261,7 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
 }
 
 #define HAVE_mavis_recv_out
-static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
+static int mavis_recv_out(mavis_ctx *mcx, av_ctx **ac)
 {
     if (mcx->skip_recv_out) {
 	mcx->skip_recv_out = 0;

@@ -34,7 +34,7 @@ ifeq ($(WITH_PAM),1)
 	INSTALL_MAVIS_PRG += install_pammavis
 	ifeq ($(WITH_PTHREAD),1)
 		MAVIS_PRG += pammavis-mt
-		MAVIS_PAMMAVIS_INSTALL += install_pammavis-mt
+		INSTALL_MAVIS_PRG += install_pammavis-mt
 	endif
 endif
 
