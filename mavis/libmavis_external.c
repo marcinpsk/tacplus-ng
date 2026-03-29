@@ -266,8 +266,10 @@ static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 	    }
 	case S_setenv:{
 		sym_get(sym);
-		char env_name[strlen(sym->buf) + 1];
-		strcpy(env_name, sym->buf);
+		size_t l = strlen(sym->buf);
+		char env_name[l + 1];
+		memcpy(env_name, sym->buf, l);
+		env_name[l] = 0;
 		struct sym mysym = *sym;
 		mysym.noescape = 1;
 		sym_get(&mysym);
@@ -299,10 +301,15 @@ static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 #define S "$CONFDIR/"
 		if (!strncmp(buf, S, sizeof(S) - 1)) {
 		    char *slash = buf + sizeof(S) - 2;
-		    size_t total_len = strlen(common_data.confdir) + strlen(slash) + 1;
+		    size_t confdir_len = strlen(common_data.confdir);
+		    size_t slash_len = strlen(slash);
+		    size_t total_len = confdir_len + slash_len + 1;
+		    if (sizeof(buf) < total_len)
+			parse_error(sym, "Path too long.");
 		    char buf_tmp[total_len];
-		    strncpy(buf_tmp, common_data.confdir, total_len);
-		    strncat(buf_tmp, slash, total_len);
+		    memcpy(buf_tmp, common_data.confdir, confdir_len);
+		    memcpy(buf_tmp + confdir_len, slash, slash_len);
+		    buf_tmp[confdir_len + slash_len] = 0;
 		    memcpy(buf, buf_tmp, total_len);
 		}
 #undef S
@@ -784,8 +791,9 @@ static void start_query(struct context *ctx)
 	ctx->b_in_len = ctx->b_in_off = ctx->b_out_len = ctx->b_out_off = 0;
 	l = av_array_to_char(ctx->ac, ctx->b_out, sizeof(ctx->b_out) - 3, NULL);
 	if (l > -1) {
-	    strcpy(ctx->b_out + l, "=\n");
-	    ctx->b_out_len = l + 2;
+	    ctx->b_out[l++] = '=';
+	    ctx->b_out[l++] = '\n';
+	    ctx->b_out_len = l;
 	    write_to_child(ctx, ctx->fd_out);
 	} else
 	    logmsg("%s: query too long, ignoring", MAVIS_name);

@@ -35,7 +35,8 @@ static int pem_phrase_cb(char *buf, int size, int rwflag __attribute__((unused))
 	return 0;
     }
 
-    strcpy(buf, (char *) userdata);
+    memcpy(buf, (char *) userdata, i);
+    buf[i] = 0;
     Debug((DEBUG_PROC, "- %s == %d\n", __func__, i));
     return i;
 }
@@ -60,7 +61,7 @@ SSL_CTX *ssl_init(char *cert_file, char *key_file, char *pem_phrase, char *ciphe
     /* potentially breaks more than it's worth */
     SSL_CTX_set_quiet_shutdown(ctx, 1);
 #endif
-    SSL_CTX_set_options(ctx, SSL_OP_ALL);
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_CIPHER_SERVER_PREFERENCE);
     if (ciphers && !SSL_CTX_set_cipher_list(ctx, ciphers))
 	logssl("SSL_CTX_set_cipher_list");
     if (pem_phrase) {

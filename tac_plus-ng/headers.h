@@ -408,9 +408,11 @@ struct realm {
 	TRISTATE(mavis_noauthcache);	/* don't do backend password caching */
 	TRISTATE(mavis_pap);
 	TRISTATE(mavis_login);
+	TRISTATE(mavis_chap);
 	TRISTATE(mavis_mschap);
 	TRISTATE(mavis_pap_prefetch);
 	TRISTATE(mavis_login_prefetch);
+	TRISTATE(mavis_chap_prefetch);
 	TRISTATE(mavis_mschap_prefetch);
 	TRISTATE(script_profile_parent_first);
 	TRISTATE(script_host_parent_first);
@@ -863,6 +865,7 @@ void resume_session(tac_session *, int);
 void get_pkt_data(tac_session *, struct authen_start *, struct author *);
 
 enum token tac_script_eval_r(tac_session *, struct mavis_action *);
+void tac_script_parse(struct sym *sym, struct mavis_action **p, mem_t *mem, tac_realm *realm, tac_user *user);
 void tac_script_expire_exec_context(struct context *);
 void tac_script_set_exec_context(tac_session *, char *);
 char *tac_script_get_exec_context(tac_session *);

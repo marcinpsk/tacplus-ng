@@ -219,14 +219,16 @@ static char *confdir_strdup(char *in)
     size_t in_len = strlen(in);
     size_t cd_len = strlen(common_data.conffile);
     char b[in_len + cd_len];
-    strcpy(b, common_data.conffile);
+    memcpy(b, common_data.conffile, cd_len);
+    b[cd_len] = 0;
     char *r = strrchr(b, '/');
-    if (r)
-	*r = 0;
-    else
-	strcpy(b, "./");
-    strcpy(b + strlen(b), in + sizeof(S) - 2);
-    return strdup(b);
+    if (!r) {
+	r = b + cd_len;
+	*r++ = '.';
+	*r++ = '/';
+    }
+    memcpy(r, in + sizeof(S) - 2, in_len - sizeof(S) - 2);
+    return strndup(b, r - b + in_len - sizeof(S) - 2);
 #undef S
 }
 
@@ -265,6 +267,7 @@ void complete_realm(tac_realm *r)
 	RS(mavis_noauthcache, TRISTATE_DUNNO);
 	RS(mavis_pap, TRISTATE_DUNNO);
 	RS(mavis_login, TRISTATE_DUNNO);
+	RS(mavis_chap, TRISTATE_DUNNO);
 	RS(mavis_mschap, TRISTATE_DUNNO);
 	RS(mavis_pap_prefetch, TRISTATE_DUNNO);
 	RS(mavis_login_prefetch, TRISTATE_DUNNO);
@@ -288,8 +291,7 @@ void complete_realm(tac_realm *r)
 	RS(tls_sni_required, TRISTATE_DUNNO);
 	RS(tls_autodetect, TRISTATE_DUNNO);
 	RS(alpn_vec, NULL);
-	if (!r->alpn_vec_len)
-	    r->alpn_vec_len = rp->alpn_vec_len;
+	RS(alpn_vec_len, 0);
 	RS(tls_accept_expired, TRISTATE_DUNNO);
 	RS(default_host->tls_peer_cert_validation, S_unknown);
 	RS(tls_psk_hint, NULL);
@@ -1305,6 +1307,23 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		parse_error_expect(sym, S_backend, S_login, S_unknown);
 	    }
 	    continue;
+	case S_chap:
+	    sym_get(sym);
+	    switch (sym->code) {
+	    case S_backend:
+		sym_get(sym);
+		parse(sym, S_equal);
+		parse(sym, S_mavis);
+		if (sym->code == S_prefetch)
+		    sym_get(sym);	// just skip
+		r->mavis_chap_prefetch = TRISTATE_YES;	// this is mandatory
+		r->mavis_chap = TRISTATE_YES;
+		r->mavis_userdb = TRISTATE_YES;
+		break;
+	    default:
+		parse_error_expect(sym, S_backend, S_unknown);
+	    }
+	    continue;
 	case S_mschap:
 	    sym_get(sym);
 	    switch (sym->code) {
@@ -2018,7 +2037,7 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 	    parse_error_expect(sym, S_password, S_pap, S_login, S_accounting, S_authentication, S_access, S_authorization, S_warning,
 			       S_connection, S_dns, S_cache, S_log, S_umask, S_retire, S_user, S_group, S_profile, S_acl, S_mavis,
 			       S_enable, S_net, S_parent, S_ruleset, S_time, S_realm, S_trace, S_debug, S_dacl,
-			       S_anonenable, S_mschap,
+			       S_anonenable, S_mschap, S_chap,
 			       S_key, S_motd, S_welcome, S_reject, S_permit, S_bug, S_augmented_enable, S_singleconnection, S_context,
 			       S_script, S_message, S_session, S_maxrounds, S_host, S_device, S_syslog, S_proctitle, S_coredump, S_alias,
 			       S_script_order, S_skip, S_aaa_protocol_allowed, S_dscp,
@@ -2582,9 +2601,10 @@ static struct pwdat *parse_pw(struct sym *sym, mem_t *mem, int cry)
     if (c7 && c7decode(sym->buf))
 	parse_error(sym, "type 7 password is malformed");
 
-    struct pwdat *pp = mem_alloc(mem, sizeof(struct pwdat) + strlen(sym->buf));
+    size_t sb_len = strlen(sym->buf);
+    struct pwdat *pp = mem_alloc(mem, sizeof(struct pwdat) + sb_len);
     pp->type = sc;
-    strcpy(pp->value, sym->buf);
+    memcpy(pp->value, sym->buf, sb_len);
     sym_get(sym);
     return pp;
 }
@@ -2979,16 +2999,15 @@ static void parse_sshkey(struct sym *sym, tac_user *user)
 	int len = -1;
 	int pad = 0;
 	char *p = sym->buf;
-	static char *begin_marker = "---- BEGIN SSH2 PUBLIC KEY ----";
-	static char *end_marker = "---- END SSH2 PUBLIC KEY ----";
-	static size_t begin_marker_len = 0;
-	static size_t end_marker_len = 0;
+#define S "---- BEGIN SSH2 PUBLIC KEY ----"
+	const char *begin_marker = S;
+	const size_t begin_marker_len = sizeof(S) - 1;
+#undef S
+#define S "---- END SSH2 PUBLIC KEY ----"
+	const char *end_marker = S;
+	const size_t end_marker_len = sizeof(S) - 1;;
+#undef S
 	int is_rfc4716 = 0;
-
-	if (!begin_marker_len) {
-	    begin_marker_len = strlen(begin_marker);
-	    end_marker_len = strlen(end_marker);
-	}
 
 	if (!strncmp(p, begin_marker, begin_marker_len)) {
 	    char n[slen];
@@ -3066,16 +3085,21 @@ static void parse_sshkey(struct sym *sym, tac_user *user)
 	else {
 	    int l = slen;
 	    char ck[slen + 200];
-	    *ck = 0;
-	    strcat(ck, begin_marker);
-	    strcat(ck, "\n");
+	    char *t = ck;
+	    memcpy(t, begin_marker, begin_marker_len);
+	    t += begin_marker_len;
+	    *t++ = '\n';
 	    while (l > 0) {
-		strncat(ck, p, 72);
+		strncpy(t, p, 72);
+		while (*t)
+		    t++;
+		*t++ = '\n';
 		l -= 72;
-		strcat(ck, "\n");
 	    }
-	    strcat(ck, end_marker);
-	    strcat(ck, "\n");
+	    memcpy(t, end_marker, end_marker_len);
+	    t += end_marker_len;
+	    *t++ = '\n';
+	    *t = 0;
 	    key = mem_strdup(user->mem, ck);
 	}
 	(*ssh_key)->key = key;
@@ -3401,6 +3425,7 @@ static void parse_host_attr(struct sym *sym, tac_realm *r, tac_host *host)
 	case S_permit:
 	case S_bug:
 	case S_pap:
+	case S_chap:
 	case S_mschap:
 	case S_key:
 	case S_radius_key:
@@ -5416,7 +5441,6 @@ int rad_attr_add_dacl(tac_session *session, struct rad_dacl *dacl, uint32_t *i)
 enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 {
     enum token r;
-    char *v;
     if (!m)
 	return S_unknown;
     switch (m->code) {
@@ -5490,17 +5514,20 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
     case S_add:
     case S_set:
     case S_optional:
-	session->eval_log_raw = 1;
-	v = eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, NULL);
-	session->eval_log_raw = 0;
-	if (m->code == S_set)
-	    attr_add(session, &session->attrs_m, &session->cnt_m, v, strlen(v));
-	else if (m->code == S_add)
-	    attr_add(session, &session->attrs_a, &session->cnt_a, v, strlen(v));
-	else			// S_optional
-	    attr_add(session, &session->attrs_o, &session->cnt_o, v, strlen(v));
-	report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, v ? v : "");
-	break;
+	{
+	    session->eval_log_raw = 1;
+	    size_t v_len = 0;
+	    char *v = eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, &v_len);
+	    session->eval_log_raw = 0;
+	    if (m->code == S_set)
+		attr_add(session, &session->attrs_m, &session->cnt_m, v, v_len);
+	    else if (m->code == S_add)
+		attr_add(session, &session->attrs_a, &session->cnt_a, v, v_len);
+	    else		// S_optional
+		attr_add(session, &session->attrs_o, &session->cnt_o, v, v_len);
+	    report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, v);
+	    break;
+	}
     case S_if:
 	if (tac_script_cond_eval(session, m->a.c)) {
 	    r = tac_script_eval_r(session, m->b.a);
@@ -5882,21 +5909,28 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t i
 {
     struct context *ctx = SSL_get_app_data(ssl);
     if (!ctx) {
-	report(NULL, LOG_ERR, ~0, "%s:%d io_get_ctx()", __FILE__, __LINE__);
+	report(NULL, LOG_ERR, ~0, "%s:%d SSL_get_app_data", __FILE__, __LINE__);
 	return 0;
     }
+    if (!identity || !identity_len) {
+	report(NULL, LOG_ERR, ~0, "%s:%d identity unset", __FILE__, __LINE__);
+	return 0;
+    }
+    char id[identity_len + 1];
+    memcpy(id, identity, identity_len);
+    id[identity_len] = 0;
 
-    if (strlen((char *) identity) != identity_len) {
-	report(NULL, LOG_ERR, ~0, "%s:%d identity length mismatch (got=%lu expected=%lu)", __FILE__, __LINE__, strlen((char *) identity), identity_len);
+    if (strlen(id) != identity_len) {
+	report(NULL, LOG_ERR, ~0, "%s:%d identity length mismatch (got=%lu expected=%lu)", __FILE__, __LINE__, strlen(id), identity_len);
 	return 0;
     }
 
     u_char *key;
     size_t key_len;
-    if (cfg_get_tls_psk(ctx, (char *) identity, &key, &key_len)) {
-	char *t = (char *) identity;
+    if (cfg_get_tls_psk(ctx, id, &key, &key_len)) {
+	char *t = id;
 	for (; *t && isprint(*t); t++);
-	report(NULL, LOG_ERR, ~0, "%s:%d psk for identity '%s' not found", __FILE__, __LINE__, *t ? "invalid" : (char *) identity);
+	report(NULL, LOG_ERR, ~0, "%s:%d psk for identity '%s' not found", __FILE__, __LINE__, *t ? "invalid" : id);
 	return 0;
     }
 
@@ -5953,7 +5987,7 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t i
 
     *sess = nsession;
 
-    str_set(&ctx->tls_psk_identity, mem_strdup(ctx->mem, (char *) identity), 0);
+    str_set(&ctx->tls_psk_identity, mem_strdup(ctx->mem, id), 0);
 
     return 1;
 }
@@ -5994,7 +6028,7 @@ static int ssl_pem_phrase_cb(char *buf, int size, int rwflag __attribute__((unus
 	report(NULL, LOG_ERR, ~0, "ssl_pem_phrase_cb");
 	return 0;
     }
-    strcpy(buf, (char *) userdata);
+    memcpy(buf, (char *) userdata, i + 1);
     return i;
 }
 
