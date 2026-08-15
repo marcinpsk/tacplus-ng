@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <openssl/ssl.h>
 #include "misc/net.h"
 #include "mavis/token.h"
 
@@ -33,6 +34,9 @@ struct conn {
     u_char *alpn;
     u_int alpn_len;
     char *peer_cafile;
+    char *tls_cipher_suites;
+    char *tls_psk_dhe_groups;
+    enum token tls_psk_key_exchange;
     sockaddr_union su_local;
     sockaddr_union su_peer;
     SSL *ssl;
@@ -63,13 +67,16 @@ void conn_set_tls_alpn(struct conn *, char *alpn);
 void conn_set_tls_peer_cn(struct conn *, char *cn);
 void conn_set_tls_peer_san(struct conn *, char *san);
 void conn_set_tls_peer_ca(struct conn *, char *cafile);
+void conn_set_tls_cipher_suites(struct conn *, char *cipher_suites);
+void conn_set_tls_psk_dhe_groups(struct conn *, char *groups);
+void conn_set_tls_psk_key_exchange(struct conn *, enum token mode);
 void conn_set_key(struct conn *, char *key);
 void conn_init_timeout(struct conn *);
 void conn_set_timeout(struct conn *, time_t tv_sec, suseconds_t tv_usec);
 void conn_set_retries(struct conn *, int retries);
 void conn_set_vrf(struct conn *, char *vrf);	// FIXME, not yet implemented
-void conn_set_tls_psk(struct conn *, char *identity, size_t identity_len);
-void conn_set_tls_psk_id(struct conn *, char *psk, size_t psk_len);
+void conn_set_tls_psk(struct conn *, char *psk, size_t psk_len);
+void conn_set_tls_psk_id(struct conn *, char *identity, size_t identity_len);
 void conn_set_tls_psk_hint(struct conn *, char *hint, size_t hint_len);
 
 void conn_set_peer_addr(struct conn *, sockaddr_union * addr);

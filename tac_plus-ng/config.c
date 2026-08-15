@@ -61,6 +61,7 @@
 #include "misc/strops.h"
 #include "misc/crc32.h"
 #include "misc/mymd5.h"
+#include "misc/base64.h"
 #include <setjmp.h>
 #include <pwd.h>
 #include <grp.h>
@@ -96,21 +97,6 @@ struct in6_cidr {
     struct in6_addr addr;
     int mask;
 };
-
-struct rewrite_expr {
-    char *name;
-#ifdef WITH_PCRE2
-    pcre2_code *code;
-    PCRE2_SPTR replacement;
-#endif
-    struct rewrite_expr *next;
-};
-typedef struct rewrite_expr tac_rewrite_expr;
-
-typedef struct {
-    TAC_NAME_ATTRIBUTES;
-    tac_rewrite_expr *expr;
-} tac_rewrite;
 
 static void parse_host(struct sym *, tac_realm *, tac_host *);
 static void parse_net(struct sym *, tac_realm *, tac_user *, tac_net *);
@@ -205,10 +191,90 @@ static rb_tree_t *tags_by_name = NULL;
 
 #ifdef WITH_SSL
 #ifndef OPENSSL_NO_PSK
+#ifndef OPENSSL_IS_BORINGSSL
 static int psk_find_session_cb(SSL * ssl, const unsigned char *identity, size_t identity_len, SSL_SESSION ** sess);
+#endif
 static unsigned int psk_server_cb(SSL * ssl, const char *identity, unsigned char *psk, unsigned int max_psk_len);
 #endif
 static SSL_CTX *ssl_init(struct realm *, int dtls, int use_tls_psk);
+#endif
+
+#if defined(WITH_SSL) && !defined(OPENSSL_IS_BORINGSSL)
+static int tls13_cipher_name_matches(const SSL_CIPHER *cipher, char *name, size_t name_len)
+{
+    const char *cipher_name = SSL_CIPHER_get_name(cipher);
+
+    return cipher_name && strlen(cipher_name) == name_len && !strncmp(cipher_name, name, name_len);
+}
+
+static int tls13_cipher_version_matches(const SSL_CIPHER *cipher)
+{
+    const char *version = SSL_CIPHER_get_version(cipher);
+
+    return version && !strcmp(version, "TLSv1.3");
+}
+
+static const SSL_CIPHER *tls13_cipher_find_by_name(const STACK_OF(SSL_CIPHER) *ciphers, char *name, size_t name_len)
+{
+    if (!ciphers)
+	return NULL;
+
+    for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
+	const SSL_CIPHER *cipher = sk_SSL_CIPHER_value(ciphers, i);
+	if (cipher && tls13_cipher_version_matches(cipher) && tls13_cipher_name_matches(cipher, name, name_len))
+	    return cipher;
+    }
+
+    return NULL;
+}
+
+static const SSL_CIPHER *tls13_cipher_find_first(const STACK_OF(SSL_CIPHER) *ciphers)
+{
+    if (!ciphers)
+	return NULL;
+
+    for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
+	const SSL_CIPHER *cipher = sk_SSL_CIPHER_value(ciphers, i);
+	if (cipher && tls13_cipher_version_matches(cipher))
+	    return cipher;
+    }
+
+    return NULL;
+}
+
+static const SSL_CIPHER *tls13_psk_cipher_find(SSL *ssl, char *cipher_suites)
+{
+    const STACK_OF(SSL_CIPHER) * ciphers = SSL_get_client_ciphers(ssl);
+    if (!ciphers)
+	ciphers = SSL_get_ciphers(ssl);
+
+    if (!cipher_suites)
+	return tls13_cipher_find_first(ciphers);
+
+    char *cipher_list = cipher_suites;
+    char cipher_list_buf[strlen(cipher_list) + 1];
+    memcpy(cipher_list_buf, cipher_list, strlen(cipher_list) + 1);
+
+    for (char *candidate = cipher_list_buf; candidate;) {
+	char *next = strchr(candidate, ':');
+	if (next)
+	    *next++ = 0;
+	size_t candidate_len = strlen(candidate);
+	if (!candidate_len) {
+	    report(NULL, LOG_ERR, ~0, "%s:%d empty TLS 1.3 cipher suite entry", __FILE__, __LINE__);
+	    return NULL;
+	}
+
+	const SSL_CIPHER *cipher = tls13_cipher_find_by_name(ciphers, candidate, candidate_len);
+	if (cipher)
+	    return cipher;
+
+	report(NULL, LOG_ERR, ~0, "%s:%d TLS 1.3 cipher suite '%s' was not offered or enabled", __FILE__, __LINE__, candidate);
+	return NULL;
+	candidate = next;
+    }
+    return NULL;
+}
 #endif
 
 static char *confdir_strdup(char *in)
@@ -252,10 +318,12 @@ void complete_realm(tac_realm *r)
 	    r->tls_psk = ssl_init(r, 0, 1);
 	if (!r->dtls_psk)
 	    r->dtls_psk = ssl_init(r, 1, 1);
+#ifndef OPENSSL_IS_BORINGSSL
 	SSL_CTX_set_psk_find_session_callback(r->tls_psk, psk_find_session_cb);	// tls1.3
 	SSL_CTX_set_psk_find_session_callback(r->dtls_psk, psk_find_session_cb);	// dtls1.3, eventually
-	SSL_CTX_set_psk_server_callback(r->tls_psk, psk_server_cb);	// tls1.2
-	SSL_CTX_set_psk_server_callback(r->dtls_psk, psk_server_cb);	// dtls1.2
+#endif
+	SSL_CTX_set_psk_server_callback(r->tls_psk, psk_server_cb);	// tls1.2 or BoringSSL
+	SSL_CTX_set_psk_server_callback(r->dtls_psk, psk_server_cb);	// dtls1.2 or BoringSSL
     }
 #endif
 #endif
@@ -277,6 +345,7 @@ void complete_realm(tac_realm *r)
 	RS(mavis_user_acl, NULL);
 	RS(enable_user_acl, NULL);
 	RS(password_acl, NULL);
+	RS(mavis_mfa_acl, NULL);
 	RS(haproxy_autodetect, TRISTATE_DUNNO);
 	RS(default_host->authfallback, TRISTATE_DUNNO);
 	RS(allowed_protocol_radius_udp, TRISTATE_DUNNO);
@@ -285,6 +354,11 @@ void complete_realm(tac_realm *r)
 	RS(allowed_protocol_radius_tls, TRISTATE_DUNNO);
 	RS(allowed_protocol_tacacs_tcp, TRISTATE_DUNNO);
 	RS(allowed_protocol_tacacs_tls, TRISTATE_DUNNO);
+	RS(backend_failure_file, NULL);
+	RS(aggregate_dev, NULL);
+	RS(aggregate_net, NULL);
+	if (!(r->default_host->bug_compatibility & CLIENT_BUG_NO_INHERIT))
+	    r->default_host->bug_compatibility |= rp->default_host->bug_compatibility;
 #ifdef WITH_SSL
 	RS(tls, NULL);
 	RS(dtls, NULL);
@@ -295,7 +369,10 @@ void complete_realm(tac_realm *r)
 	RS(tls_accept_expired, TRISTATE_DUNNO);
 	RS(default_host->tls_peer_cert_validation, S_unknown);
 	RS(tls_psk_hint, NULL);
+	RS(tls_cipher_suites, NULL);
+	RS(tls_psk_dhe_groups, NULL);
 	RS(default_host->type6key, NULL);
+	RS(tls_psk_key_exchange, S_unknown);
 
 	if (!r->crl_basedir.txt) {
 	    r->crl_basedir.txt = rp->crl_basedir.txt;
@@ -320,6 +397,7 @@ void complete_realm(tac_realm *r)
 	RS(warning_period);
 	RS(default_host->tcp_timeout);
 	RS(default_host->udp_timeout);
+	RS(default_host->fragment_timeout);
 	RS(default_host->session_timeout);
 	RS(default_host->context_timeout);
 	RS(default_host->dns_timeout);
@@ -426,6 +504,7 @@ void init_host(tac_host *host, tac_host *parent, tac_realm *r, int top)
     host->session_timeout = top ? 240 : -1;
     host->tcp_timeout = top ? 600 : -1;
     host->udp_timeout = top ? 30 : -1;
+    host->fragment_timeout = top ? 3 : -1;
     if (top) {
 	host->user_messages = calloc(UM_MAX, sizeof(char *));
 	host->user_messages[UM_PASSWORD] = "Password: ";
@@ -489,6 +568,7 @@ static tac_realm *new_realm(char *name, tac_realm *parent)
     r->debug = parent ? 0 : common_data.debug;
 #if defined(WITH_SSL)
     r->tls_verify_depth = -1;
+    r->tls_psk_key_exchange = S_unknown;
     //r->tls_ciphers = "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256";
 #endif
 
@@ -516,6 +596,8 @@ static tac_realm *new_realm(char *name, tac_realm *parent)
 	r->mavis_user_acl = tac_acl_lookup("__internal__username_acl__", r);
 	parse_inline(r, "acl __internal__enable_user__ { if (user =~ \"^\\\\$enab..?\\\\$$\") permit deny }", __FILE__, __LINE__);
 	r->enable_user_acl = tac_acl_lookup("__internal__enable_user__", r);
+	parse_inline(r, "acl __internal__permit__ { permit }", __FILE__, __LINE__);
+	parse_inline(r, "acl __internal__deny__ { deny }", __FILE__, __LINE__);
     }
 
     return r;
@@ -607,7 +689,7 @@ static tac_profile *lookup_profile(char *name, tac_realm *r)
     return NULL;
 }
 
-static tac_rewrite *lookup_rewrite(char *name, tac_realm *r)
+tac_rewrite *lookup_rewrite(char *name, tac_realm *r)
 {
     tac_rewrite rewrite = {.name.txt = name,.name.len = strlen(name) };
     for (; r; r = r->parent)
@@ -964,24 +1046,72 @@ static tac_realm *parse_realm(struct sym *sym, char *name, tac_realm *parent, ta
     return nrealm;
 }
 
-static char hexbyte(char *);
-
 #if defined(WITH_SSL) && !defined(OPENSSL_NO_PSK)
 static void parse_tls_psk_key(struct sym *sym, tac_host *host)
 {
+    if (!host->tls_psk_key)
+	host->tls_psk_key = mem_alloc(host->mem, sizeof(struct tls_psk_key));
+    else {
+	mem_free(host->mem, &host->tls_psk_key->key.txt);
+	host->tls_psk_key->key.len = 0;
+    }
+    switch (sym->code) {
+    case S_clear:
+	sym_get(sym);
+	str_set(&host->tls_psk_key->key, mem_strdup(host->mem, sym->buf), 0);
+	sym_get(sym);
+	return;
+    case S_7:
+	sym_get(sym);
+	if (c7decode(sym->buf))
+	    parse_error(sym, "type 7 psk is malformed");
+	str_set(&host->tls_psk_key->key, mem_strdup(host->mem, sym->buf), 0);
+	sym_get(sym);
+	return;
+    case S_6:
+	host->tls_psk_key->type = S_6;
+	sym->noescape = 1;
+	sym_get(sym);
+	str_set(&host->tls_psk_key->key, mem_strdup(host->mem, sym->buf), 0);
+	sym->noescape = 1;
+	sym_get(sym);
+	return;
+    case S_base64:{
+	    sym_get(sym);
+	    size_t len = strlen(sym->buf);
+	    size_t buflen = len * 3 / 4 + 1;
+	    char buf[buflen];
+	    if (base64dec(sym->buf, len, buf, &buflen))
+		parse_error(sym, "base64 psk is malformed");
+	    host->tls_psk_key->key.txt = mem_alloc(host->mem, buflen);
+	    host->tls_psk_key->key.len = buflen;
+	    sym_get(sym);
+	    return;
+	}
+    case S_hex:
+	sym_get(sym);
+	break;
+    case S_string:
+	break;
+    default:
+	parse_error_expect(sym, S_clear, S_6, S_7, S_base64, S_hex, S_unknown);
+    }
     char k[2];
     char *t = sym->buf;
     size_t l = strlen(sym->buf);
     if (l & 1)
 	parse_error(sym, "Illegal hex sequence (odd number of characters)");
     l >>= 1;
-    host->tls_psk_key = mem_alloc(host->mem, l);
-    host->tls_psk_key_len = l;
+    host->tls_psk_key->key.txt = mem_alloc(host->mem, l);
+    host->tls_psk_key->key.len = l;
     for (size_t i = 0; i < l; i++) {
+	if (!isxdigit(*t) || !isxdigit(*(t + 1)))
+	    parse_error(sym, "Invalid hex sequence");
 	k[0] = toupper(*t++);
 	k[1] = toupper(*t++);
-	host->tls_psk_key[i] = hexbyte(k);
+	host->tls_psk_key->key.txt[i] = hexbyte(k);
     }
+    sym_get(sym);
 }
 #endif
 
@@ -1177,7 +1307,7 @@ static int password_is_printable(char *s)
 {
     // FIXME. We don't really know the character set, so checking for US ASCII is the best option right now.
     for (char *t = s; *t; t++)
-	if (*t < 0x20 || *t == 0x7f)
+	if (*t < 0x20 || *t > 0x7e)
 	    return 0;
     return 1;
 }
@@ -1194,17 +1324,16 @@ int rad_get_password(tac_session *session, char **val, size_t *val_len)
 	    struct tac_key *key = session->ctx->key;
 	    char *pass = mem_alloc(session->mem, p[1] - 1);
 	    do {
-		memset(pass, 0, p[1] - 1);
-		u_char digest[16];
+		u_char digest[MD5_LEN];
 		for (int i = 0; i < p[1] - 2; i++) {
 		    if (!(i & 0xf)) {
 			struct iovec iov[2] = {
 			    {.iov_base = key->key,.iov_len = key->len },
 			    {.iov_base = i ? (p + i + 2 - 16) : session->radius_data->pak_in->authenticator,.iov_len = 16 }
 			};
-			md5v(digest, 16, iov, 2);
+			md5v(digest, sizeof(digest), iov, 2);
 		    }
-		    pass[i] = digest[i % 16] ^ p[i + 2];
+		    pass[i] = digest[i & 0xf] ^ p[i + 2];
 		}
 		if ((session->ctx->key_fixed == BISTATE_YES) || password_is_printable(pass)) {
 		    *val = pass;
@@ -1212,8 +1341,10 @@ int rad_get_password(tac_session *session, char **val, size_t *val_len)
 			*val_len = strlen(pass);
 		    return 0;
 		}
+		memset(pass, 0, p[1] - 1);
 		key = key->next;
 	    } while (key && (session->ctx->key_fixed == BISTATE_NO));
+	    break;
 	}
 	p += p[1];
     }
@@ -1254,6 +1385,63 @@ int rad_check_dacl(tac_session *session)
 	}
     }
     return 0;
+}
+
+struct tac_aggregate {
+    struct in6_addr addr;
+    struct in6_addr mask;
+    tac_host *host;
+    tac_net *net;
+    struct tac_aggregate *next;
+};
+
+// aggregate device = <ip>/<mask>
+// aggregate net = <ip>/<mask>
+
+static void parse_aggregate(struct sym *sym, tac_realm *r)
+{
+    struct tac_aggregate **a = NULL;
+    switch (sym->code) {
+    case S_net:
+	a = &(r->aggregate_net);
+	break;
+    case S_device:
+    case S_host:
+	a = &(r->aggregate_dev);
+	break;
+    default:
+	parse_error_expect(sym, S_device, S_host, S_net, S_unknown);
+    }
+    sym_get(sym);
+    parse(sym, S_equal);
+    while (*a)
+	a = &(*a)->next;
+    *a = calloc(1, sizeof(struct tac_aggregate));
+    if (v6_ptoh_ext(&((*a)->addr), &((*a)->mask), sym->buf))
+	parse_error(sym, "Expected an IP address or network, but got '%s'.", sym->buf);
+    sym_get(sym);
+}
+
+void check_aggregate(tac_realm *r, struct in6_addr *addr, enum token token)
+{
+    struct tac_aggregate *agg = r->aggregate_dev;
+    if (token == S_net)
+	agg = r->aggregate_net;
+
+    for (; r; r = r->parent) {
+	for (; agg; agg = agg->next) {
+	    uint32_t *aa = agg->addr.s6_addr32;
+	    uint32_t *am = agg->mask.s6_addr32;
+	    uint32_t *a = addr->s6_addr32;
+	    int i = 0;
+	    for (; i < 4 && (aa[i] & am[i]) == (a[i] & am[i]); i++);
+	    if (i != 4)
+		continue;
+	    for (int j = 0; j < 4; j++)
+		a[j] = aa[j];
+	    return;
+	}
+    }
 }
 
 void parse_decls_real(struct sym *sym, tac_realm *r)
@@ -1395,10 +1583,18 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		    r->default_host->authfallback = parse_tristate(sym);
 		    break;
 		case S_period:
+		    sym_get(sym);
+		    parse(sym, S_equal);
 		    r->backend_failure_period = parse_seconds(sym);
 		    break;
+		case S_file:
+		    sym_get(sym);
+		    parse(sym, S_equal);
+		    r->backend_failure_file = strdup(sym->buf);
+		    sym_get(sym);
+		    break;
 		default:
-		    parse_error_expect(sym, S_equal, S_period, S_unknown);
+		    parse_error_expect(sym, S_equal, S_period, S_file, S_unknown);
 		}
 		continue;
 	    default:
@@ -1445,6 +1641,12 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 	    parse(sym, S_timeout);
 	    parse(sym, S_equal);
 	    r->default_host->udp_timeout = parse_seconds(sym);
+	    break;
+	case S_fragment:
+	    sym_get(sym);
+	    parse(sym, S_timeout);
+	    parse(sym, S_equal);
+	    r->default_host->fragment_timeout = parse_seconds(sym);
 	    break;
 	case S_connection:
 	    sym_get(sym);
@@ -1576,6 +1778,10 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 	    config.dscp = parse_uint(sym);
 	    config.dscp <<= 2;
 	    continue;
+	case S_aggregate:
+	    sym_get(sym);
+	    parse_aggregate(sym, r);
+	    continue;
 	case S_retire:
 	    top_only(sym, r);
 	    sym_get(sym);
@@ -1652,6 +1858,24 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		    parse_error(sym, "ACL '%s' not found.", sym->buf);
 		sym_get(sym);
 		continue;
+	    case S_mfa:
+		sym_get(sym);
+		switch (sym->code) {
+		case S_acl:
+		    sym_get(sym);
+		    r->mavis_mfa_acl = tac_acl_lookup(sym->buf, r);
+		    if (!r->mavis_mfa_acl)
+			parse_error(sym, "ACL '%s' not found", sym->buf);
+		    sym_get(sym);
+		    break;
+		case S_equal:
+		    sym_get(sym);
+		    r->mavis_mfa_acl = tac_acl_lookup(parse_bool(sym) ? "__internal__permit__" : "__internal__deny__", r);
+		    break;
+		default:
+		    parse_error_expect(sym, S_acl, S_equal, S_unknown);
+		}
+		continue;
 	    case S_format:
 		sym_get(sym);
 		switch (sym->code) {
@@ -1669,7 +1893,7 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		r->mavis_custom_attr[i] = parse_log_format(sym, NULL);
 		continue;
 	    default:
-		parse_error_expect(sym, S_module, S_path, S_cache, S_format, S_unknown);
+		parse_error_expect(sym, S_module, S_path, S_cache, S_noauthcache, S_user, S_mfa, S_format, S_unknown);
 	    }
 	case S_enable:
 	    sym_get(sym);
@@ -1870,12 +2094,32 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		    parse(sym, S_equal);
 		    parse_tls_psk_key(sym, r->default_host);
 		    break;
+		case S_key_exchange:
+		    sym_get(sym);
+		    parse(sym, S_equal);
+		    switch (sym->code) {
+		    case S_auto:
+		    case S_dhe:
+		    case S_no_dhe:
+			r->tls_psk_key_exchange = sym->code;
+			sym_get(sym);
+			break;
+		    default:
+			parse_error_expect(sym, S_auto, S_dhe, S_no_dhe, S_unknown);
+		    }
+		    break;
+		case S_dhe_supported_groups:
+		    sym_get(sym);
+		    parse(sym, S_equal);
+		    r->tls_psk_dhe_groups = strdup(sym->buf);
+		    sym_get(sym);
+		    break;
 		case S_equal:
 		    sym_get(sym);
 		    r->use_tls_psk = parse_bool(sym) ? BISTATE_YES : BISTATE_NO;
 		    break;
 		default:
-		    parse_error_expect(sym, S_id, S_key, S_equal, S_unknown);
+		    parse_error_expect(sym, S_id, S_key, S_key_exchange, S_dhe_supported_groups, S_equal, S_unknown);
 		}
 		continue;
 #endif
@@ -1915,6 +2159,12 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		sym_get(sym);
 		parse(sym, S_equal);
 		r->tls_ciphers = strdup(sym->buf);
+		sym_get(sym);
+		continue;
+	    case S_cipher_suites:
+		sym_get(sym);
+		parse(sym, S_equal);
+		r->tls_cipher_suites = strdup(sym->buf);
 		sym_get(sym);
 		continue;
 	    case S_accept:
@@ -1957,8 +2207,8 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		r->tls_autodetect = parse_tristate(sym);
 		continue;
 	    default:
-		parse_error_expect(sym, S_cert_file, S_key_file, S_cafile, S_passphrase, S_ciphers, S_peer, S_accept, S_verify_depth, S_alpn, S_autodetect,
-				   S_psk, S_sni, S_unknown);
+		parse_error_expect(sym, S_cert_file, S_key_file, S_cafile, S_passphrase, S_ciphers, S_cipher_suites, S_peer,
+				   S_accept, S_verify_depth, S_alpn, S_autodetect, S_psk, S_sni, S_unknown);
 	    }
 	    continue;
 #endif
@@ -2040,7 +2290,7 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 			       S_anonenable, S_mschap, S_chap,
 			       S_key, S_motd, S_welcome, S_reject, S_permit, S_bug, S_augmented_enable, S_singleconnection, S_context,
 			       S_script, S_message, S_session, S_maxrounds, S_host, S_device, S_syslog, S_proctitle, S_coredump, S_alias,
-			       S_script_order, S_skip, S_aaa_protocol_allowed, S_dscp,
+			       S_script_order, S_skip, S_aaa_protocol_allowed, S_dscp, S_aggregate,
 #ifdef WITH_PCRE2
 			       S_rewrite,
 #endif
@@ -2366,8 +2616,8 @@ enum token eval_ruleset_r(tac_session *session, tac_realm *realm, int parent_fir
 	    res = eval_tac_acl(session, &rule->acl);
 #define DEBACL session, LOG_DEBUG, DEBUG_ACL_FLAG
 	    report(DEBACL | DEBUG_REGEX_FLAG,
-		   "%s@%s: ACL %s: %s (profile: %s)", session->username.txt,
-		   session->nac_addr_ascii.txt, rule->acl.name.txt, codestring[res].txt, session->profile ? session->profile->name.txt : "n/a");
+		   "%s@%s: ACL %s: %s (profile: %s)", session->username.txt, session->nac_addr_valid ? session->nac_addr_ascii.txt : "<unknown>",
+		   rule->acl.name.txt, codestring[res].txt, session->profile ? session->profile->name.txt : "n/a");
 	    switch (res) {
 	    case S_permit:
 	    case S_deny:
@@ -2498,7 +2748,7 @@ int parse_user_profile_fmt(struct sym *sym, tac_user *user, char *fmt, ...)
     return parse_user_profile(sym, user);
 }
 
-static char hexbyte(char *s)
+char hexbyte(char *s)
 {
     char *h = "\0\01\02\03\04\05\06\07\010\011\0\0\0\0\0\0\0\012\013\014\015\016\017\0\0\0\0\0\0\0\0\0";
     return (h[(s[0] - '0') & 0x1F] << 4) | h[(s[1] - '0') & 0x1F];
@@ -2515,7 +2765,7 @@ static int c7decode(char *in)
 	char *e = "051207055A0A070E204D4F08180416130A0D052B2A2529323423120617020057585952550F021917585956525354550A5A07065956";
 	char *u, *t = e;
 
-	c7 = calloc(0, strlen(e) / 2 + 1);
+	c7 = calloc(1, strlen(e) / 2 + 1);
 	u = c7;
 	while (*t) {
 	    *u = 'a' ^ hexbyte(t);
@@ -3167,6 +3417,26 @@ static void parse_user_attr(struct sym *sym, tac_user *user)
 	case S_password:
 	    parse_password(sym, user);
 	    continue;
+	case S_mavis:
+	    sym_get(sym);
+	case S_mfa:
+	    parse(sym, S_mfa);
+	    switch (sym->code) {
+	    case S_acl:
+		sym_get(sym);
+		user->mavis_mfa_acl = tac_acl_lookup(sym->buf, r);
+		if (!user->mavis_mfa_acl)
+		    parse_error(sym, "ACL '%s' not found", sym->buf);
+		sym_get(sym);
+		break;
+	    case S_equal:
+		sym_get(sym);
+		user->mavis_mfa_acl = tac_acl_lookup(parse_bool(sym) ? "__internal__permit__" : "__internal__deny__", r);
+		break;
+	    default:
+		parse_error_expect(sym, S_acl, S_equal, S_unknown);
+	    }
+	    continue;
 	case S_enable:
 	    sym_get(sym);
 	    if (!user->enable)
@@ -3529,7 +3799,13 @@ static void parse_host_attr(struct sym *sym, tac_realm *r, tac_host *host)
 	sym_get(sym);
 	parse(sym, S_compatibility);
 	parse(sym, S_equal);
-	host->bug_compatibility = parse_int(sym);
+	if (sym->code == S_none) {
+	    host->bug_compatibility = CLIENT_BUG_NO_INHERIT;
+	    sym_get(sym);
+	} else {
+	    host->bug_compatibility = parse_int(sym);
+	    host->bug_compatibility &= ~CLIENT_BUG_NO_INHERIT;
+	}
 	return;
     case S_pap:
 	sym_get(sym);
@@ -3657,6 +3933,12 @@ static void parse_host_attr(struct sym *sym, tac_realm *r, tac_host *host)
 	parse(sym, S_timeout);
 	parse(sym, S_equal);
 	host->udp_timeout = parse_seconds(sym);
+	break;
+    case S_fragment:
+	sym_get(sym);
+	parse(sym, S_timeout);
+	parse(sym, S_equal);
+	host->fragment_timeout = parse_seconds(sym);
 	break;
     case S_connection:
 	sym_get(sym);
@@ -3836,6 +4118,7 @@ static void parse_host_attr(struct sym *sym, tac_realm *r, tac_host *host)
 	    sym_get(sym);
 	    parse(sym, S_equal);
 	    host->tls_psk_id = mem_strdup(host->mem, sym->buf);
+	    sym_get(sym);
 	    break;
 	case S_key:
 	    sym_get(sym);
@@ -3845,7 +4128,6 @@ static void parse_host_attr(struct sym *sym, tac_realm *r, tac_host *host)
 	default:
 	    parse_error_expect(sym, S_id, S_key, S_unknown);
 	}
-	sym_get(sym);
 	break;
 #endif
 #ifdef WITH_SSL
@@ -4041,7 +4323,7 @@ static void parse_host(struct sym *sym, tac_realm *r, tac_host *parent)
 	    host->name.txt[i] = tolower(host->name.txt[i]);
     }
     if ((hp = RB_lookup(r->hosttable, (void *) host)))
-	parse_error(sym, "Host '%s' already defined at line %u", sym->buf, hp->line);
+	parse_error(sym, "Host '%s' already defined at line %u", host->name.txt, hp->line);
 
     d = dns_lookup_a(r, sym->buf, 0);
     while (d) {
@@ -4825,7 +5107,7 @@ static struct mavis_cond *tac_script_cond_parse_r(struct sym *sym, mem_t *mem, t
 		    } else {	// non-numeric
 			struct rad_dict_val *val = rad_dict_val_lookup_by_name(attr, sym->buf);
 			if (attr->val && !val)
-			    parse_error(sym, "RADIUS value '$s' not found (attribute: %s)", sym->buf, attr->name);
+			    parse_error(sym, "RADIUS value '%s' not found (attribute: %s)", sym->buf, attr->name);
 			sym_get(sym);
 			m->s.rhs_txt = val->name.txt;
 			m->s.rhs = (void *) (long) val->id;
@@ -5010,10 +5292,14 @@ static int tac_script_cond_eval(tac_session *session, struct mavis_cond *m)
     case S_net:
 	if (m->s.token == S_nas) {
 	    tac_net *net = (tac_net *) (m->s.rhs);
-	    res = radix_lookup(net->nettree, &session->ctx->device_addr, NULL) ? -1 : 0;
+	    struct in6_addr addr = session->ctx->device_addr;
+	    check_aggregate(session->ctx->realm, &addr, S_net);
+	    res = radix_lookup(net->nettree, &addr, NULL) ? -1 : 0;
 	} else if (session->nac_addr_valid) {
 	    tac_net *net = (tac_net *) (m->s.rhs);
-	    res = radix_lookup(net->nettree, &session->nac_address, NULL) ? -1 : 0;
+	    struct in6_addr addr = session->nac_address;
+	    check_aggregate(session->ctx->realm, &addr, S_net);
+	    res = radix_lookup(net->nettree, &addr, NULL) ? -1 : 0;
 	}
 	return tac_script_cond_eval_res(session, m, res);
     case S_time:
@@ -5363,27 +5649,23 @@ static void rad_attr_add(tac_session *session, struct rad_action *a, union rad_a
     default:			// just skip, likely OCTETS or VSA
 	return;
     }
-
-    int len = 2 + val_len;
+    struct rad_dict *dict = a->attr->dict;
+    int len = dict->type_len + dict->vendor_len + val_len;
     if (a->attr->dict->id > -1)
 	len += 6;
     if (data + len >= data_end || len > 255)
 	return;
 
-    if (a->attr->dict->id > -1) {
+    if (dict->id > -1) {
 	*data++ = RADIUS_A_VENDOR_SPECIFIC;
 	*data++ = len;
-	*data++ = (u_char) (0xff & (a->attr->dict->id >> 24));
-	*data++ = (u_char) (0xff & (a->attr->dict->id >> 16));
-	*data++ = (u_char) (0xff & (a->attr->dict->id >> 8));
-	*data++ = (u_char) (0xff & (a->attr->dict->id >> 0));
+	data = set_uint(data, a->attr->dict->id, 4);
 	data_len += 6;
-	len = 2 + val_len;
     }
 
-    *data++ = a->attr->id;
-    *data++ = 2 + val_len;
-    data_len += 2;
+    data = set_uint(data, a->attr->id, dict->type_len);
+    data = set_uint(data, dict->type_len + dict->vendor_len + val_len, dict->vendor_len);
+    data_len += dict->type_len + dict->vendor_len;
     memcpy(data, val, val_len);
     data += val_len;
     data_len += val_len;
@@ -5451,7 +5733,7 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 	return m->code;
     case S_context:
 	tac_script_set_exec_context(session, m->b.v);
-	report(DEBACL, " line %u: [%s]", m->line, codestring[m->code].txt);
+	report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, m->b.v);
 	break;
     case S_message:
 	str_set(&session->message, eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, &session->message.len), 0);
@@ -5466,6 +5748,13 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
     case S_label:
 	str_set(&session->label, eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, &session->label.len), 0);
 	report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, session->label.txt ? session->label.txt : "");
+	break;
+    case S_custom_0:
+    case S_custom_1:
+    case S_custom_2:
+    case S_custom_3:
+	session->mavis_custom_attr[m->code - S_custom_0] = m->b.v;
+	report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, m->b.v ? m->b.v : "");
 	break;
     case S_profile:
 	session->profile = (tac_profile *) (m->b.v);
@@ -5514,17 +5803,17 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
     case S_add:
     case S_set:
     case S_optional:
-	{
+	if (session->author_data){
 	    session->eval_log_raw = 1;
 	    size_t v_len = 0;
 	    char *v = eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, &v_len);
 	    session->eval_log_raw = 0;
 	    if (m->code == S_set)
-		attr_add(session, &session->attrs_m, &session->cnt_m, v, v_len);
+		attr_add(session, &session->author_data->attrs_m, &session->author_data->cnt_m, v, v_len);
 	    else if (m->code == S_add)
-		attr_add(session, &session->attrs_a, &session->cnt_a, v, v_len);
+		attr_add(session, &session->author_data->attrs_a, &session->author_data->cnt_a, v, v_len);
 	    else		// S_optional
-		attr_add(session, &session->attrs_o, &session->cnt_o, v, v_len);
+		attr_add(session, &session->author_data->attrs_o, &session->author_data->cnt_o, v, v_len);
 	    report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, v);
 	    break;
 	}
@@ -5636,6 +5925,15 @@ static struct mavis_action *tac_script_parse_r(struct sym *sym, mem_t *mem, int 
 	    parse_error(sym, "ACL '%s' not found.", sym->buf);
 	sym_get(sym);
 	break;
+    case S_custom_0:
+    case S_custom_1:
+    case S_custom_2:
+    case S_custom_3:
+	m = mavis_action_new(sym, mem);
+	parse(sym, S_equal);
+	m->b.v = mem_strdup(mem, sym->buf);
+	sym_get(sym);
+	break;
     case S_add:
     case S_optional:
 	sep = "*";
@@ -5704,22 +6002,19 @@ void tac_rewrite_user(tac_session *session, tac_rewrite *rewrite)
     if (!session->username_rewritten) {
 	tac_rewrite_expr *e = rewrite->expr;
 
-	if (e) {
-	    for (int rc = -1; e && rc < 1; e = e->next) {
-		PCRE2_SPTR replacement = e->replacement;
-		PCRE2_UCHAR outbuf[1024];
-		PCRE2_SIZE outlen = sizeof(outbuf);
-		pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(e->code, NULL);
-		rc = pcre2_substitute(e->code, (PCRE2_SPTR8) session->username.txt,
-				      PCRE2_ZERO_TERMINATED, 0,
-				      PCRE2_SUBSTITUTE_EXTENDED, match_data, NULL, replacement, PCRE2_ZERO_TERMINATED, outbuf, &outlen);
-		pcre2_match_data_free(match_data);
-		report(session, LOG_DEBUG, DEBUG_REGEX_FLAG, "pcre2: '%s' <=> '%s' = %d", e->name, session->username.txt, rc);
-		if (rc > 0) {
-		    str_set(&session->username, mem_strndup(session->mem, outbuf, outlen), outlen);
-		    session->username_rewritten = strcmp(session->username_orig.txt, session->username.txt) ? 1 : 0;
-		    report(session, LOG_DEBUG, DEBUG_REGEX_FLAG, "pcre2: setting username to '%s'", session->username.txt);
-		}
+	for (int rc = -1; e && rc < 1; e = e->next) {
+	    PCRE2_SPTR replacement = e->replacement;
+	    PCRE2_UCHAR outbuf[1024];
+	    PCRE2_SIZE outlen = sizeof(outbuf);
+	    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(e->code, NULL);
+	    rc = pcre2_substitute(e->code, (PCRE2_SPTR8) session->username.txt,
+				  PCRE2_ZERO_TERMINATED, 0, PCRE2_SUBSTITUTE_EXTENDED, match_data, NULL, replacement, PCRE2_ZERO_TERMINATED, outbuf, &outlen);
+	    pcre2_match_data_free(match_data);
+	    report(session, LOG_DEBUG, DEBUG_REGEX_FLAG, "pcre2: '%s' <=> '%s' = %d", e->name, session->username.txt, rc);
+	    if (rc > 0) {
+		str_set(&session->username, mem_strndup(session->mem, outbuf, outlen), outlen);
+		session->username_rewritten = strcmp(session->username_orig.txt, session->username.txt) ? 1 : 0;
+		report(session, LOG_DEBUG, DEBUG_REGEX_FLAG, "pcre2: setting username to '%s'", session->username.txt);
 	    }
 	}
     }
@@ -5873,15 +6168,18 @@ static int tac_tag_regex_check(tac_session *session, struct mavis_cond *m, tac_t
 
 #ifdef WITH_SSL
 #ifndef OPENSSL_NO_PSK
-static int cfg_get_tls_psk(struct context *ctx, char *identity, u_char **key, size_t *keylen)
+static str_t *cfg_get_tls_psk(struct context *ctx, char *identity)
 {
+    str_t *res = NULL;
+    enum token type = S_unknown;
+
     char *t = identity;
     // host may have key set:
     if (ctx->host->tls_psk_id && !strcmp(identity, ctx->host->tls_psk_id)
-	&& ctx->host->tls_psk_key_len) {
-	*key = ctx->host->tls_psk_key;
-	*keylen = ctx->host->tls_psk_key_len;
-	return 0;
+	&& ctx->host->tls_psk_key && ctx->host->tls_psk_key->key.len) {
+	type = ctx->host->tls_psk_key->type;
+	res = &ctx->host->tls_psk_key->key;
+	goto final;
     }
 
     // no key set for host, possibly because host is a parent and/or the NAC has
@@ -5890,11 +6188,11 @@ static int cfg_get_tls_psk(struct context *ctx, char *identity, u_char **key, si
 	tac_host *h = lookup_host(t, ctx->realm);
 	if (h) {
 	    complete_host(h);
-	    if (h->tls_psk_key_len) {
+	    if (h->tls_psk_key && h->tls_psk_key->key.len) {
+		type = h->tls_psk_key->type;
+		res = &h->tls_psk_key->key;
 		ctx->host = h;
-		*key = h->tls_psk_key;
-		*keylen = h->tls_psk_key_len;
-		return 0;
+		goto final;
 	    }
 	}
 	t = strchr(t, '.');
@@ -5902,9 +6200,24 @@ static int cfg_get_tls_psk(struct context *ctx, char *identity, u_char **key, si
 	    t++;
     }
 
-    return -1;
+  final:
+    if (type == S_6) {
+	if (!ctx->host->type6key)
+	    return NULL;
+	ctx->host->tls_psk_key->type = S_clear;
+	char *dec = decrypt_type6(res->txt, ctx->host->type6key);
+	if (!dec)
+	    return NULL;
+	size_t len = strlen(dec);
+	memcpy(res->txt, dec, len);
+	res->len = len;
+	if (!res->len)
+	    return NULL;
+    }
+    return res;
 }
 
+#ifndef OPENSSL_IS_BORINGSSL
 static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t identity_len, SSL_SESSION **sess)
 {
     struct context *ctx = SSL_get_app_data(ssl);
@@ -5925,9 +6238,8 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t i
 	return 0;
     }
 
-    u_char *key;
-    size_t key_len;
-    if (cfg_get_tls_psk(ctx, id, &key, &key_len)) {
+    str_t *key = cfg_get_tls_psk(ctx, id);
+    if (!key) {
 	char *t = id;
 	for (; *t && isprint(*t); t++);
 	report(NULL, LOG_ERR, ~0, "%s:%d psk for identity '%s' not found", __FILE__, __LINE__, *t ? "invalid" : id);
@@ -5936,34 +6248,20 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t i
 
     // FIXME Use PSK session file?
 
-    // Constants from https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml
-    // and RFC8446, 8.4.
-    // FIXME. There's probably a way to map some standard string to the iana values, somewhere.
-    struct ciphers {
-	unsigned char c[2];
-    };
-    struct ciphers cipherlist[] = {
-//      { { 0x13, 0x02 } }, // TLS_AES_256_GCM_SHA384
-//      { { 0x13, 0x03 } }, // TLS_CHACHA20_POLY1305_SHA256
-	{ { 0x13, 0x01} },	// TLS_AES_128_GCM_SHA256
-	{ { 0x00, 0xFF} },	// TLS_EMPTY_RENEGOTIATION_INFO_SCSV
-    };
-    const SSL_CIPHER *cipher = NULL;
-    for (struct ciphers * i = cipherlist; !cipher && i->c[0]; i++)
-	cipher = SSL_CIPHER_find(ssl, i->c);
+    const SSL_CIPHER *cipher = tls13_psk_cipher_find(ssl, ctx->realm->tls_cipher_suites);
 
     if (!cipher) {
-	report(NULL, LOG_ERR, ~0, "%s:%d SSL_CIPHER_find() failed", __FILE__, __LINE__);
+	report(NULL, LOG_ERR, ~0, "%s:%d TLS 1.3 PSK cipher suite selection failed", __FILE__, __LINE__);
 	return 0;
     }
 
-    SSL_SESSION *nsession = nsession = SSL_SESSION_new();
+    SSL_SESSION *nsession = SSL_SESSION_new();
     if (!nsession) {
 	report(NULL, LOG_ERR, ~0, "%s:%d SSL_SESSION_new() failed", __FILE__, __LINE__);
 	return 0;
     }
 
-    if (!SSL_SESSION_set1_master_key(nsession, key, key_len)) {
+    if (!SSL_SESSION_set1_master_key(nsession, (u_char *) key->txt, key->len)) {
 	report(NULL, LOG_ERR, ~0, "%s:%d SSL_SESSION_set1_master_key() failed", __FILE__, __LINE__);
 	SSL_SESSION_free(nsession);
 	return 0;
@@ -5991,6 +6289,7 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t i
 
     return 1;
 }
+#endif
 
 static unsigned int psk_server_cb(SSL *ssl, const char *identity, unsigned char *psk, unsigned int max_psk_len)
 {
@@ -6000,23 +6299,22 @@ static unsigned int psk_server_cb(SSL *ssl, const char *identity, unsigned char 
 	return 0;
     }
 
-    u_char *key;
-    size_t key_len;
-    if (cfg_get_tls_psk(ctx, (char *) identity, &key, &key_len)) {
+    str_t *key = cfg_get_tls_psk(ctx, (char *) identity);
+    if (!key) {
 	report(NULL, LOG_ERR, ~0, "%s:%d psk not found", __FILE__, __LINE__);
 	return 0;
     }
 
-    if (key_len > max_psk_len) {
+    if (key->len > max_psk_len) {
 	report(NULL, LOG_ERR, ~0, "%s:%d psk key length exceeds maximum", __FILE__, __LINE__);
 	return 0;
     }
 
-    memcpy(psk, key, key_len);
+    memcpy(psk, key->txt, key->len);
 
     str_set(&ctx->tls_psk_identity, mem_strdup(ctx->mem, (char *) identity), 0);
 
-    return key_len;
+    return key->len;
 }
 #endif
 
@@ -6040,8 +6338,8 @@ static void keylog_cb(const SSL *ssl __attribute__((unused)), const char *line)
 	fcntl(SSLKEYLOGFILE, F_SETLK, &flock);
 
 	lseek(SSLKEYLOGFILE, 0, SEEK_END);
-	write(SSLKEYLOGFILE, line, strlen(line));
-	write(SSLKEYLOGFILE, "\n", 1);
+	UNUSED_RESULT(write(SSLKEYLOGFILE, line, strlen(line)));
+	UNUSED_RESULT(write(SSLKEYLOGFILE, "\n", 1));
 
 	struct flock funlock = {.l_type = F_UNLCK,.l_whence = SEEK_SET };
 	fcntl(SSLKEYLOGFILE, F_SETLK, &funlock);
@@ -6065,6 +6363,56 @@ static int alpn_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen, c
     ctx->alpn_passed = TRISTATE_YES;
 
     return SSL_TLSEXT_ERR_OK;
+}
+
+static void ssl_apply_options(SSL_CTX *ctx, struct realm *r, int use_tls_psk)
+{
+    if (r->tls_cipher_suites) {
+#ifdef TLS1_3_VERSION
+	if (!SSL_CTX_set_ciphersuites(ctx, r->tls_cipher_suites)) {
+	    report(NULL, LOG_ERR, ~0, "%s %d: SSL_CTX_set_ciphersuites", __func__, __LINE__);
+	    tac_exit(EX_CONFIG);
+	}
+#else
+	report(NULL, LOG_ERR, ~0, "%s %d: TLS 1.3 cipher suites are not supported by this OpenSSL build", __func__, __LINE__);
+	tac_exit(EX_CONFIG);
+#endif
+    }
+
+    if (use_tls_psk && r->tls_psk_dhe_groups && r->tls_psk_key_exchange != S_no_dhe) {
+#ifdef SSL_CTRL_SET_GROUPS_LIST
+	if (!SSL_CTX_ctrl(ctx, SSL_CTRL_SET_GROUPS_LIST, 0, r->tls_psk_dhe_groups)) {
+	    report(NULL, LOG_ERR, ~0, "%s %d: SSL_CTX_set1_groups_list", __func__, __LINE__);
+	    tac_exit(EX_CONFIG);
+	}
+#else
+	report(NULL, LOG_ERR, ~0, "%s %d: TLS supported groups are not configurable with this OpenSSL build", __func__, __LINE__);
+	tac_exit(EX_CONFIG);
+#endif
+    }
+
+    if (use_tls_psk)
+	switch (r->tls_psk_key_exchange) {
+	case S_unknown:
+	case S_auto:
+#ifdef SSL_OP_ALLOW_NO_DHE_KEX
+	    SSL_CTX_set_options(ctx, SSL_OP_ALLOW_NO_DHE_KEX);
+#endif
+	    break;
+	case S_dhe:
+	    break;
+	case S_no_dhe:
+#if defined(SSL_OP_ALLOW_NO_DHE_KEX) && defined(SSL_OP_PREFER_NO_DHE_KEX)
+	    SSL_CTX_set_options(ctx, SSL_OP_ALLOW_NO_DHE_KEX | SSL_OP_PREFER_NO_DHE_KEX);
+#else
+	    report(NULL, LOG_ERR, ~0, "%s %d: TLS 1.3 PSK without DHE is not supported by this OpenSSL build", __func__, __LINE__);
+	    tac_exit(EX_CONFIG);
+#endif
+	    break;
+	default:
+	    report(NULL, LOG_ERR, ~0, "%s %d: unsupported TLS PSK key exchange mode", __func__, __LINE__);
+	    tac_exit(EX_CONFIG);
+	}
 }
 
 static int sni_cb(SSL *ssl, int *al __attribute__((unused)), void *arg __attribute__((unused)))
@@ -6095,15 +6443,17 @@ static int sni_cb(SSL *ssl, int *al __attribute__((unused)), void *arg __attribu
 }
 
 
-static SSL_CTX *ssl_init(struct realm *r, int dtls, int use_tls_psk __attribute__((unused)))
+static SSL_CTX *ssl_init(struct realm *r, int dtls, int use_tls_psk)
 {
     SSL_CTX *ctx = SSL_CTX_new(dtls ? DTLS_server_method() : TLS_server_method());
     if (!ctx) {
 	report(NULL, LOG_ERR, ~0, "%s %d: SSL_CTX_new", __func__, __LINE__);
 	return ctx;
     }
-    if (r->tls_ciphers && !SSL_CTX_set_cipher_list(ctx, r->tls_ciphers))
+    if (r->tls_ciphers && !SSL_CTX_set_cipher_list(ctx, r->tls_ciphers)) {
 	report(NULL, LOG_ERR, ~0, "%s %d: SSL_CTX_set_cipher_list", __func__, __LINE__);
+    }
+    ssl_apply_options(ctx, r, use_tls_psk);
     if (r->tls_pass) {
 	SSL_CTX_set_default_passwd_cb(ctx, ssl_pem_phrase_cb);
 	SSL_CTX_set_default_passwd_cb_userdata(ctx, r->tls_pass);
@@ -6158,6 +6508,9 @@ static SSL_CTX *ssl_init(struct realm *r, int dtls, int use_tls_psk __attribute_
     }
     if (r->tls_verify_depth > -1)
 	SSL_CTX_set_verify_depth(ctx, r->tls_verify_depth);
+#ifdef OPENSSL_IS_BORINGSSL
+    SSL_CTX_set_options(ctx, SSL_OP_NO_TICKET);
+#endif
     return ctx;
 }
 #endif

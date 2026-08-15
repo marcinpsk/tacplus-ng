@@ -7,18 +7,24 @@ include $(BASE)/Makefile.inc
 
 PROG=tactester
 
-LIB	+= $(LIB_MAVIS) $(LIB_CRYPT) $(LIB_NET) $(LIB_SSL) $(LIB_CRYPTO) $(LIB_PCRE) $(LIB_TLS)
+LIB	+= $(LIB_MAVIS) $(LIB_SSL) $(LIB_CRYPTO) $(LIB_CRYPT) $(LIB_NET) $(LIB_PCRE) $(LIB_TLS)
 
 CFLAGS	+= $(DEF) $(INC) $(INC_SSL) $(INC_PCRE)
-VPATH	= $(BASE)/$(PROG):$(BASE)/misc:-I$(BASE)/tac_plus-ng
+VPATH	= $(BASE)/$(PROG):$(BASE)/misc:$(BASE)/tac_plus-ng
 
+ifeq ($(WITH_SSL),1)
 ALL = $(PROG)$(EXEC_EXT) install_stage
+INSTALL_TARGETS = $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT)
+else
+ALL =
+INSTALL_TARGETS =
+endif
 
 all: $(ALL)
 
-main.o: main.c $(BASE)/misc/version.h
+OBJ += conn.o aaa.o main.o config_radius.o
 
-OBJ += conn.o aaa.o main.o ../tac_plus-ng/config_radius.o
+main.o: main.c $(BASE)/misc/version.h
 
 $(OBJ): conn.h
 
@@ -34,7 +40,7 @@ $(INSTALLROOT)$(SBINDIR_DEST):
 $(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT)
 	$(INSTALL) -m 0755 $< $@
 
-install:  $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT)
+install:  $(INSTALL_TARGETS)
 
 install_doc:
 	@$(MAKE) -C $(BASE)/$(PROG)/doc INSTALLROOT=$(BASE)/build/$(OS)/fakeroot install

@@ -158,7 +158,7 @@ void parse_error(struct sym *sym, char *fmt, ...)
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
-    if (common_data.debugtty)
+    if (common_data.debugtty || common_data.debugstderr)
 	fprintf(stderr, "%.*s\n%s:%u: %s\n", sym->len - sym->tlen, sym->in, sym->filename, sym->line, msg);
     report_cfg_error(LOG_ERR, ~0, "%s:%u: %s", sym->filename, sym->line, msg);
 
@@ -280,6 +280,16 @@ static void sym_getchar(struct sym *sym)
     } else {
 	sym->chlen = 1;
 	sym->start = sym->tin;
+	/* Fast path for single-byte ASCII, the overwhelmingly common case.
+	   sym->ch is a fixed-size buffer read together with sym->chlen and is
+	   intentionally not NUL-terminated: a 4-byte UTF-8 sequence fills the
+	   whole buffer, so callers must always use sym->chlen, never treat
+	   sym->ch as a C string. */
+	if (!(*sym->tin & 0x80)) {
+	    sym->ch[0] = *sym->tin++;
+	    sym->tlen--;
+	    return;
+	}
 	if (sym->tlen > 1 && ((*sym->tin & 0xE0) == 0xC0) && (*(sym->tin + 1) & 0xC0) == 0x80)
 	    sym->chlen = 2;
 	else if (sym->tlen > 2 && (*sym->tin & 0xF0) == 0xE0 && (*(sym->tin + 1) & 0xC0) == 0x80 && (*(sym->tin + 2) & 0xC0) == 0x80)
@@ -305,6 +315,12 @@ static void substitute_envvar(struct sym *sym)
 {
     int found = 0;
     char *t = sym->buf;
+
+    /* Hot path: if the token has no '$' there is nothing to expand, skip the
+       whole scan-and-copy. */
+    if (!strchr(t, '$'))
+	return;
+
     char buf[MAX_INPUT_LINE_LEN];
     char *b = buf;
     char *be = buf + MAX_INPUT_LINE_LEN - 1;
@@ -725,8 +741,7 @@ void sym_get(struct sym *sym)
 	    common_data.regex_posix_flags = REG_ICASE;
 	}
     }
-    if (sym->code == S_include && !sym->flag_prohibit_include) {
-
+    if (sym->code == S_include && !sym->flag_prohibit_include && !sym->flag_parse_pcre) {
 	sym_get(sym);
 	if (sym->code == S_equal)
 	    sym_get(sym);
@@ -1060,6 +1075,7 @@ void cfg_read_config(char *url, void (*parsefunction)(struct sym *), char *id)
 		parse(&sym, S_openbra);
 		parsefunction(&sym);
 		parse(&sym, S_closebra);
+		sym.code = S_eof;
 	    }
 	    break;
 	case S_eof:
@@ -1114,7 +1130,10 @@ int parse_int(struct sym *sym)
     int i;
     char c;
 
-    switch (sscanf(sym->buf, "%d%c", &i, &c)) {
+    int r = sscanf(sym->buf, "%d%c", &i, &c);
+    if (r == 2 && i == 0 && (c == 'x' || c == 'X'))
+	r = sscanf(sym->buf, "%x%c", &i, &c);
+    switch (r) {
     case 2:
 	switch (c) {
 	default:
@@ -1211,12 +1230,27 @@ void sym_init(struct sym *sym)
     sym_get(sym);
 }
 
+/* Single source of truth for whether a config message is emitted at all.
+   The body below still decides *how* it is emitted (stderr vs syslog, debug
+   vs error), but "whether" must only be defined here so the early-return
+   guard and the emission code can never drift apart. */
+static int cfg_error_visible(int priority, int level)
+{
+    return (common_data.debug & level) || ((priority & LOG_PRIMASK) != LOG_DEBUG);
+}
+
 void report_cfg_error(int priority, int level, char *fmt, ...)
 {
     int len = 1024;
-    char *msg = alloca(len);
+    char *msg;
     va_list ap;
     int nlen;
+
+    /* Skip formatting entirely when the message would be suppressed. */
+    if (!cfg_error_visible(priority, level))
+	return;
+
+    msg = alloca(len);
 
     va_start(ap, fmt);
     nlen = vsnprintf(msg, len, fmt, ap);
@@ -1229,7 +1263,7 @@ void report_cfg_error(int priority, int level, char *fmt, ...)
     }
 
     if ((common_data.debug & level) /*|| common_data.parse_only */ ) {
-	if (common_data.debugtty) {
+	if (common_data.debugtty || common_data.debugstderr) {
 	    fprintf(stderr, "%ld: %s\n", (long int) common_data.pid, msg);
 	    fflush(stderr);
 	} else
@@ -1859,6 +1893,7 @@ void common_usage(void)
 	    "-I <spawnd-id>    select spawnd configuration id\n"
 	    "-p <pid-file>     write master process ID to the file specified\n"
 	    "-d <debug-level>  set debugging level\n"
+	    "-D                send debug to stderr even if it's not a TTY\n"
 	    "\n"
 	    "%sVersion:%s %s%s%s\n"
 	    "\n"
@@ -1868,7 +1903,7 @@ void common_usage(void)
 	    "%sHome site:%s  %shttps://www.pro-bono-publico.de/projects/%s\n"
 	    "%sSoure code:%s %shttps://github.com/MarcJHuber/event-driven-servers/%s\n"
 	    "\n"
-	    "%sPlease or open discussions and issues at the corresponding GitHub pages at\n"
+	    "%sPlease open discussions and issues via the corresponding GitHub pages at\n"
 	    "\n"
 	    "    https://github.com/MarcJHuber/event-driven-servers/discussions\n"
 	    "    https://github.com/MarcJHuber/event-driven-servers/issues\n"

@@ -771,7 +771,7 @@ static void do_chpass(tac_session *session)
 	    return;
     }
     if (!session->password_new) {
-	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_GETPASS, "New password: ", 0, NULL, 0, TAC_PLUS_REPLY_FLAG_NOECHO);
+	send_authen_reply(session, session->chpass ? TAC_PLUS_AUTHEN_STATUS_GETPASS : TAC_PLUS_AUTHEN_STATUS_GETDATA, "New password: ", 0, NULL, 0, TAC_PLUS_REPLY_FLAG_NOECHO);
 	return;
     }
     if (!session->password_new[0]) {
@@ -779,7 +779,7 @@ static void do_chpass(tac_session *session)
 	return;
     }
     if (!session->authen_data->msg) {
-	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_GETPASS, "Retype new password: ", 0, NULL, 0, TAC_PLUS_REPLY_FLAG_NOECHO);
+	send_authen_reply(session, session->chpass ? TAC_PLUS_AUTHEN_STATUS_GETPASS : TAC_PLUS_AUTHEN_STATUS_GETDATA, "Retype new password: ", 0, NULL, 0, TAC_PLUS_REPLY_FLAG_NOECHO);
 	return;
     }
 
@@ -1789,6 +1789,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 		switch (start->type) {
 		case TAC_PLUS_AUTHEN_TYPE_ASCII:
 		    session->authen_data->authfn = do_chpass;
+		    session->chpass = 1;
 		    username_required = 0;
 		    break;
 		}

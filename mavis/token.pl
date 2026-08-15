@@ -150,6 +150,7 @@ chmod-mask			S_chmodmask
 chpass				S_chpass
 chroot				S_chroot
 ciphers				S_ciphers
+cipher-suites			S_cipher_suites
 clear				S_clear
 cleanup				S_cleanup
 interval			S_interval
@@ -516,12 +517,18 @@ psk				S_psk
 verify-depth			S_verify_depth
 identity-source			S_identity_source
 interim	S_interim
+key-exchange			S_key_exchange
+dhe-supported-groups		S_dhe_supported_groups
 rewritten-only			S_rewritten_only
 password-new			S_password_new
 verdict				S_verdict
 true				S_true
 false				S_false
 error				S_error
+groups				S_groups
+auto				S_auto
+no-dhe				S_no_dhe
+dhe				S_dhe
 not-found			S_notfound
 #
 device				S_device
@@ -580,6 +587,7 @@ aaa.protocol			S_aaa_protocol
 aaa.protocol.allowed		S_aaa_protocol_allowed
 udp				S_udp
 tcp				S_tcp
+fragment			S_fragment
 dtls				S_dtls
 tacacs				S_tacacs
 tacacs.tcp			S_tacacs_tcp
@@ -610,4 +618,9 @@ FS				S_FS
 data				S_data
 version				S_version
 dscp				S_dscp
+threshold			S_threshold
+aggregate			S_aggregate
+mfa				S_mfa
+hex				S_hex
+base64				S_base64
 #

@@ -1,6 +1,6 @@
 /*
  * libmavis_tacauth_limit.c
- * Caches MAVIS-TACACS+ authentication results to disk for later authorizations.
+ * Limits MAVIS-TACACS+ failed authentications.
  * (C)2002-2024 by Marc Huber <Marc.Huber@web.de>
  * All rights reserved.
  * 
@@ -175,7 +175,7 @@ static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 	    mavis_module_parse_action(mcx, sym);
 	    continue;
 	default:
-	    parse_error_expect(sym, S_script, S_userid, S_groupid, S_directory, S_hash, S_action, S_closebra, S_unknown);
+	    parse_error_expect(sym, S_script, S_userid, S_groupid, S_directory, S_hash, S_action, S_closebra, S_blacklist, S_unknown);
 	}
     }
     DebugOut(DEBUG_MAVIS);
@@ -323,7 +323,7 @@ static int mavis_recv_out(mavis_ctx *mcx, av_ctx **ac)
 	i++;
 	char buf[80];
 	int len = snprintf(buf, sizeof(buf), "count = %u\n", i);
-	write(fn, buf, len);
+	UNUSED_RESULT(write(fn, buf, len));
 	uint64_t hashbits = mcx->hashbits;
 	for (int j = 0; j < AV_A_ARRAYSIZE; j++) {
 	    char *t;
@@ -334,7 +334,7 @@ static int mavis_recv_out(mavis_ctx *mcx, av_ctx **ac)
 		    {.iov_base = t,.iov_len = strlen(t) },
 		    {.iov_base = "\n",.iov_len = 1 }
 		};
-		writev(fn, iov, 4);
+		UNUSED_RESULT(writev(fn, iov, 4));
 	    }
 	    hashbits >>= 1;
 	}

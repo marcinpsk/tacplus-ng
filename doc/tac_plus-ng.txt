@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: bc33bf3c64cd2db1dd6a573c81ce80ac331f9907 $
+   $Id: fab6f2f19d0fa73ec71e2deb6e8c7e2f933403bd $
      __________________________________________________________
 
    Table of Contents
@@ -775,6 +775,17 @@ n tested.
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
     # filter { if (user =~ /^demo/) deny } # inline script
+    #
+    #
+    # Also, you can rewrite logs. E.g.: Define this at realm level:
+    # rewrite sanitize {
+    #   rewrite /(key|secret|password) (\d) (\w+)/ "$1 $2 ***"
+    #   rewrite /(key|secret|password) (\w+)/ "$1 ***"
+    # }
+    #
+    # Then use
+    #   rewrite = sanitize
+    # in log context.
   }
   authentication log = mylog
   accounting log = mylog
@@ -1090,6 +1101,10 @@ message USERNAME = "Utilisateur: "
        Terminate a connection to a NAS after an idle period of at
        least s seconds.
        Default: 600
+     * fragment timeout = s
+       Terminate a connection to a NAS if fragmented packets
+       aren't completed in time.
+       Default: 3
      * context timeout = s
        Clears context cache entries after s seconds of inactivity.
        Default: 3600 seconds.
@@ -1184,7 +1199,7 @@ Username:
        Several broken TACACS+ implementations send no or an
        invalid username in enable packets. Setting this option to
        deny tries to enforce user authentication before enabling.
-       This option defaults to permit.
+       This option defaults to being unset.
        Alas, this may or may not work. In theory, the enable
        dialog should look somewhat like:
 Router> enable
@@ -1192,14 +1207,13 @@ Username: me
 Password: *******
 Enable Password: **********
 Router#
-       However, some implementations may resend the user password
-       at the Enable Password: prompt. In that case you've got
-       only two options: Either try
+       However, some implementations may simply resend the user
+       password at the Enable Password: prompt. In that case
+       you've got only two options: Either try
     enable = login
        at user profile level, which will omit the secondary
        password query and let the user enable with his login
-       password, or permit anonymous enable (which is disabled by
-       default) with
+       password, or permit anonymous enable with
     anonymous-enable = permit
        in device context to use the enable passwords defined
        there.
@@ -1330,6 +1344,12 @@ mavis user filter = __internal__username_acl__
        requests. Log variable substitution applies. For example,
 mavis format custom_0 = "${server.address} ${server.port}"
        will set the AV_A_CUSTOM_0 MAVIS attribute.
+       Tip: custom attributes can also be in ACLs. Example:
+       custom_0 = "string".
+     * mavis mfa = ( yes | no )
+       mavis mfa acl = acl
+       Authenticate users via MAVIS MFA. These directives work in
+       user context, too.
      __________________________________________________________
 
 4.7.3. TLS and DTLS
@@ -1379,6 +1399,12 @@ mavis format custom_0 = "${server.address} ${server.port}"
        enabling it will skip device object selection based on the
        SAN IP if the latter doesn't equal the peer IP. Not sure
        whether there's a use case for this at all.
+     * tls cipher-suites = string
+       tls key-exchange = string
+       tls dhe = string
+       tls groups = string
+       tls supported-groups = string
+       Sets the corresponding OpenSSL parameters.
 
    If compiled with OpenSSL support, TLSv1.2 and TLSv1.3 Preshared
    Keys and SNIs are supported:
@@ -1395,7 +1421,12 @@ mavis format custom_0 = "${server.address} ${server.port}"
        PSK identity and key can be declared at device or realm
        level:
 tls psk id = myid
-tls psk key = 0123456789abcdef # in hex
+#tls psk key = clear demoDemo # plain text
+#tls psk key = 6 'FFM^eVF\gQS^ZeW`TYeaHeD^eKPMgXAAB' # type 6, requires
+master key
+#tls psk key = 7 2703130E0E725C555C # type 7
+#tls psk key = base64 'ZGVtb0RlbW9EZW1vCg==' # base64
+tls psk key = 0123456789abcdef # hex
      * tls sni = SNI
        This adds SNI to the server name list of the current realm.
        A TLS connection requesting SNI will automatically be
@@ -1563,6 +1594,21 @@ quo\te me".
    requirement for unambiguousness is quite simply based on the
    fact that certain device object attributes (key, prompt, enable
    passwords) may only exist once.
+
+   Tip Aggregation
+
+
+   Some IP lookups support aggregation. E.g., defining
+    aggregate device = 172.16.0.0/23
+
+   at realm level will map device related IP lookups in that range
+   to 172.16.0.0.
+
+   Likewise, net related lookups use aggregates, too:
+    aggregate net = 192.168.0.240/255.255.0.240
+
+   Aggregation is supported for both IPv4 and IPv6. Also, netmasks
+   don't need to be contiguous.
 
    If compiled with TLS support, primary criteria for device
    object selection with TLS is no longer the NAS IP address but
@@ -1851,6 +1897,8 @@ aaa authentication enable default group tacacs+ enable
    TACACS+ (this violates draft-ietf-opsawg-tacacs-tls13-24.txt).
    7 128 Don't require TLS1.3 TACACS+-over-TLS (this violates
    draft-ietf-opsawg-tacacs-tls13-24.txt).
+   8 256 Ignore TACACS+ authorization AV pairs that lack the =/*
+   separator.
 
    Example:
   device ... {
@@ -1860,6 +1908,9 @@ aaa authentication enable default group tacacs+ enable
   }
 
    This configuration will be accepted at realm level, too.
+
+   The bug compatibility value is inherited from the corresponding
+   parent. You can stop that with bug compatibility = none.
      __________________________________________________________
 
 4.12.6. Inheritance and Devices
@@ -3191,6 +3242,11 @@ ntly enabled.\n"
         authentication fallback = deny
         ...
     }
+
+   Backend failures are detected per-process. However, you can
+   sync fallback state between worker processes via the file
+   system, on a per-realm basis:
+    authentication fallback file = /tmp/tac/my_realm/fallack
      __________________________________________________________
 
 6. RADIUS
@@ -3347,6 +3403,14 @@ radius.dictionary cisco 9 {
    You can put this dictionary data directly into your main
    configuration file or put it somewhere else and just include
    it, which is recommended.
+
+   Multi-byte attribute (and length) dictionaries are supported,
+   too:
+radius.dictionary vendor-name vendor-id format=attribute bytes,length by
+tes
+
+   (This is similar to FreeRADIUS, but there are quite certainly
+   some missing options.)
      __________________________________________________________
 
 6.4. RADIUS Rule Set

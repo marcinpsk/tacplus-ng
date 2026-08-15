@@ -159,8 +159,8 @@ if ($pid == 0) {
 	close $sock0;
 	POSIX::dup2 (fileno $sock1, 0) or die "POSIX::dup2: $!";
 	close $sock1;
-	exec("/usr/bin/valgrind", $exec, "-d", $debugopts, "-d", "4194304", $conf, $id) if defined $valgrind;
-	exec($exec, "-d", $debugopts, "-d", "4194304", $conf, $id);
+	exec("/usr/bin/valgrind", $exec, "-Dd", $debugopts, "-d", "4194304", $conf, $id) if defined $valgrind;
+	exec($exec, "-Dd", $debugopts, "-d", "4194304", $conf, $id);
 	die "exec: $!";;
 }
 close $sock1;

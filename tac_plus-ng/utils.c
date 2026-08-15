@@ -105,6 +105,9 @@ struct logfile {
     enum token timestamp_format;
     size_t buf_limit;
     struct mavis_action *filter;
+#ifdef WITH_PCRE2
+    tac_rewrite *rewrite;
+#endif
 };
 
 static void log_start(struct logfile *, struct context_logfile *);
@@ -617,6 +620,16 @@ void parse_log(struct sym *sym, tac_realm *r)
 	    case S_filter:
 		tac_script_parse(sym, &lf->filter, NULL, r, NULL);
 		continue;
+#ifdef WITH_PCRE2
+	    case S_rewrite:
+		sym_get(sym);
+		parse(sym, S_equal);
+		lf->rewrite = lookup_rewrite(sym->buf, r);
+		if (!lf->rewrite)
+		    parse_error(sym, "Rewrite '%s' not found.", sym->buf);
+		sym_get(sym);
+		continue;
+#endif
 	    default:
 		parse_error_expect(sym, S_destination, S_syslog, S_access, S_authorization, S_accounting, S_connection, S_closebra, S_filter,
 				   S_prefix, S_postfix, S_separator, S_radius_access, S_radius_accounting, S_timestamp, S_buffer, S_unknown);
@@ -2015,6 +2028,38 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
     return mem_strdup(session ? session->mem : ctx->mem, buf);
 }
 
+#ifdef WITH_PCRE2
+static char *rewrite_log(tac_session *session, struct context *ctx, struct logfile *lf, char *in, size_t *len)
+{
+    if (!lf->rewrite)
+	return in;
+
+    tac_rewrite_expr *e = lf->rewrite->expr;
+
+    for (int rc = -1; e && rc < 1; e = e->next) {
+	PCRE2_SPTR replacement = e->replacement;
+	PCRE2_UCHAR outbuf[2048];
+	PCRE2_SIZE outlen = sizeof(outbuf);
+	pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(e->code, NULL);
+	rc = pcre2_substitute(e->code, (PCRE2_SPTR8) in,
+			      PCRE2_ZERO_TERMINATED, 0, PCRE2_SUBSTITUTE_EXTENDED, match_data, NULL, replacement, PCRE2_ZERO_TERMINATED, outbuf, &outlen);
+	pcre2_match_data_free(match_data);
+	report(session, LOG_DEBUG, DEBUG_REGEX_FLAG, "pcre2: '%s' <=> '%s' = %d", e->name, in, rc);
+	if (rc > 0) {
+	    if (outlen < 1) {
+		*len = 0;
+		return NULL;
+	    }
+	    char *out = mem_strndup(session ? session->mem : (ctx ? ctx->mem : NULL), outbuf, outlen);
+	    report(session, LOG_DEBUG, DEBUG_REGEX_FLAG, "pcre2: setting log string to '%s'", out);
+	    *len = outlen;
+	    return out;
+	}
+    }
+    return in;
+}
+#endif
+
 void log_exec(tac_session *session, struct context *ctx, enum token token, time_t sec)
 {
     tac_realm *r = ctx->realm;
@@ -2074,7 +2119,7 @@ void log_exec(tac_session *session, struct context *ctx, enum token token, time_
 		}
 
 		if (lf->filter && tac_script_eval_r(session, lf->filter) == S_deny)
-		    return;
+		    continue;
 
 		sockaddr_union syslog_src;
 
@@ -2093,6 +2138,11 @@ void log_exec(tac_session *session, struct context *ctx, enum token token, time_
 		    post = eval_log_format(session, ctx, lf, lf->postfix, sec, &post_len);
 
 		char *s = eval_log_format(session, ctx, lf, li, sec, &len);
+#ifdef WITH_PCRE2
+		s = rewrite_log(session, ctx, lf, s, &len);
+		if (!s)
+		    continue;
+#endif
 		log_start(lf, NULL);
 		if (pre && *pre)
 		    log_write_common(lf, pre, pre_len);

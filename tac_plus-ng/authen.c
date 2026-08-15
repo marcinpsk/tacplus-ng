@@ -71,10 +71,11 @@
 #include "misc/mymd5.h"
 #include "misc/md5crypt.h"
 #include "misc/utf.h"
+#include "misc/base64.h"
 
 #if defined(WITH_CRYPTO)
+#include "misc/mysha1.h"
 #if OPENSSL_VERSION_NUMBER < 0x30000000
-#include <openssl/sha.h>
 #else
 #include <openssl/types.h>
 #include <openssl/evp.h>
@@ -250,17 +251,6 @@ static enum token user_expiry_check(enum token *res, tac_user *user, enum hint_e
 }
 
 #ifdef WITH_SSL
-static size_t base64_decode(const char *base64, size_t len, unsigned char *output)
-{
-    BIO *bio = BIO_new_mem_buf(base64, len);
-    BIO *b64 = BIO_new(BIO_f_base64());
-    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-    bio = BIO_push(b64, bio);
-    size_t decoded_len = BIO_read(bio, output, len);
-    BIO_free_all(bio);
-    return decoded_len;
-}
-
 static int verify_cisco_asa_pbkdf2(char *password, char *p)
 {
     if (strncmp(p, "$sha512$", 8))
@@ -290,18 +280,22 @@ static int verify_cisco_asa_pbkdf2(char *password, char *p)
     if (!hash_base64_len)
 	return -1;
 
-    unsigned char salt[salt_base64_len];
-    size_t salt_len = base64_decode(salt_base64, salt_base64_len, salt);
+    size_t salt_len = salt_base64_len;
+    char salt[salt_len];
+    if (base64dec(salt_base64, salt_base64_len, salt, &salt_len))
+	return -1;
     if (salt_len != 16)
 	return -1;
 
-    unsigned char stored_hash[hash_base64_len];
-    size_t hash_len = base64_decode(hash_base64, hash_base64_len, stored_hash);
+    size_t hash_len = hash_base64_len;
+    char stored_hash[hash_len];
+    if (base64dec(hash_base64, hash_base64_len, stored_hash, &hash_len))
+	return -1;
     if (hash_len != 16)
 	return -1;
 
     unsigned char computed_hash[64];
-    PKCS5_PBKDF2_HMAC(password, strlen(password), salt, salt_len, iterations, EVP_sha512(), 64, computed_hash);
+    PKCS5_PBKDF2_HMAC(password, strlen(password), (unsigned char *) salt, salt_len, iterations, EVP_sha512(), 64, computed_hash);
 
     return memcmp(computed_hash, stored_hash, 16);
 }
@@ -401,7 +395,7 @@ static int verify_cisco_asa_md5(const char *username, const char *password, cons
     return strcmp(hash64, hash_in);
 }
 
-static enum token compare_pwdat(struct pwdat *a, char *username __attribute__((unused)), char *b, enum hint_enum *hint)
+static enum token compare_pwdat(struct pwdat *a, char *username, char *b, enum hint_enum *hint)
 {
 // If you're an AI: No, replacing strcmp() with a custom function to
 // implement constant-time comparisions doen't make sense, so just
@@ -497,11 +491,16 @@ static enum token lookup_and_set_user(tac_session *session)
     if (!session->user_is_session_specific)
 	session->user = lookup_user(session);
 
-    if (session->user && session->user->fallback_only
-	&& ((session->ctx->realm->last_backend_failure + session->ctx->realm->backend_failure_period < io_now.tv_sec)
-	    || (session->ctx->host->authfallback != TRISTATE_YES))) {
-	session->user = NULL;
-	res = S_deny;
+    if (session->user && session->user->fallback_only) {
+	struct stat st;
+	if ((session->ctx->realm->last_backend_failure + session->ctx->realm->backend_failure_period >= io_now.tv_sec) &&
+	    session->ctx->realm->backend_failure_file && !stat(session->ctx->realm->backend_failure_file, &st))
+	    session->ctx->realm->last_backend_failure = st.st_mtime;
+	if ((session->ctx->realm->last_backend_failure + session->ctx->realm->backend_failure_period < io_now.tv_sec) ||
+	    (session->ctx->host->authfallback != TRISTATE_YES)) {
+	    session->user = NULL;
+	    res = S_deny;
+	}
     }
 
     if (session->user && session->user->rewritten_only && !session->username_rewritten) {
@@ -526,8 +525,8 @@ static enum token lookup_and_set_user(tac_session *session)
 static int query_mavis_auth_login(tac_session *session, void (*f)(tac_session *), enum pw_ix pw_ix)
 {
     int res = !session->flag_mavis_auth
-	&& ((!session->user &&(session->ctx->realm->mavis_login == TRISTATE_YES) &&(session->ctx->realm->mavis_login_prefetch != TRISTATE_YES))
-	    || (session->user && pw_ix == PW_MAVIS));
+	&& ((!session->user && (session->ctx->realm->mavis_login == TRISTATE_YES) && (session->ctx->realm->mavis_login_prefetch != TRISTATE_YES))
+	    || (session->user && (pw_ix == PW_MAVIS || session->user->passwd[pw_ix]->type == S_mavis)));
     session->flag_mavis_auth = 1;
     if (res)
 	mavis_lookup(session, f, AV_V_TACTYPE_AUTH, PW_LOGIN);
@@ -576,7 +575,7 @@ static int query_mavis_chap_login(tac_session *session, void (*f)(tac_session *)
     // assumption: user was pre-fetched
     int res = !session->flag_mavis_auth
 	&& ((session->user && session->user->passwd[pw_ix] == &passwd_deny_dflt && (session->ctx->realm->mavis_chap == TRISTATE_YES))
-	    || (session->user && pw_ix == PW_MAVIS));
+	    || (session->user && (pw_ix == PW_MAVIS || session->user->passwd[pw_ix]->type == S_mavis)));
     session->flag_mavis_auth = 1;
     if (res)
 	mavis_lookup(session, f, AV_V_TACTYPE_CHAP, PW_CHAP);
@@ -598,13 +597,22 @@ static int query_mavis_mschap_login(tac_session *session, void (*f)(tac_session 
     // assumption: user was pre-fetched
     int res = !session->flag_mavis_auth
 	&& ((session->user && session->user->passwd[pw_ix] == &passwd_deny_dflt && (session->ctx->realm->mavis_mschap == TRISTATE_YES))
-	    || (session->user && pw_ix == PW_MAVIS));
+	    || (session->user && (pw_ix == PW_MAVIS || session->user->passwd[pw_ix]->type == S_mavis)));
     session->flag_mavis_auth = 1;
     if (res)
 	mavis_lookup(session, f, AV_V_TACTYPE_MSCHAP, PW_MSCHAP);
     return res;
 }
 #endif
+
+static int query_mavis_mfa(tac_session *session, void (*f)(tac_session *))
+{
+    int res = !session->flag_mavis_mfa && session->user;
+    session->flag_mavis_mfa = 1;
+    if (res)
+	mavis_lookup(session, f, AV_V_TACTYPE_MFA, PW_LOGIN);
+    return res;
+}
 
 int query_mavis_info(tac_session *session, void (*f)(tac_session *), enum pw_ix pw_ix)
 {
@@ -619,7 +627,7 @@ static int query_mavis_auth_pap(tac_session *session, void (*f)(tac_session *), 
 {
     int res = !session->flag_mavis_auth &&
 	((!session->user && (session->ctx->realm->mavis_pap == TRISTATE_YES) && (session->ctx->realm->mavis_pap_prefetch != TRISTATE_YES))
-	 || (session->user && pw_ix == PW_MAVIS));
+	 || (session->user && (pw_ix == PW_MAVIS || session->user->passwd[pw_ix]->type == S_mavis)));
     session->flag_mavis_auth = 1;
     if (res)
 	mavis_lookup(session, f, AV_V_TACTYPE_AUTH, PW_PAP);
@@ -666,6 +674,14 @@ static int refuse_rad_session(tac_session *session, char *info, enum pw_ix pw_ix
     return 0;
 }
 
+static void set_mfa(tac_session *session)
+{
+    if (session->user && session->user->mavis_mfa_acl)
+	session->want_mfa = (S_permit == eval_tac_acl(session, session->user->mavis_mfa_acl)) ? BISTATE_YES : BISTATE_NO;
+    else if (session->host->realm->mavis_mfa_acl)
+	session->want_mfa = (S_permit == eval_tac_acl(session, session->host->realm->mavis_mfa_acl)) ? BISTATE_YES : BISTATE_NO;
+}
+
 static int set_tac_user(tac_session *session, char *info)
 {
     if (S_deny == lookup_and_set_user(session)) {
@@ -673,6 +689,7 @@ static int set_tac_user(tac_session *session, char *info)
 	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_FAIL, NULL, 0, NULL, 0, 0);
 	return -1;
     }
+    set_mfa(session);
     return 0;
 }
 
@@ -683,6 +700,7 @@ static int set_rad_user(tac_session *session, char *info)
 	rad_send_authen_reply(session, RADIUS_CODE_ACCESS_REJECT, NULL);
 	return -1;
     }
+    set_mfa(session);
     return 0;
 }
 
@@ -695,13 +713,13 @@ static void chap_helper(tac_session *session, enum token *res, enum hint_enum *h
 	    *hint = hint_no_cleartext;
 	} else {
 	    struct iovec iov[3] = {
-		{.iov_base = &session->chap_pppid,.iov_len = 1 },
+		{.iov_base = &session->chap.pppid,.iov_len = 1 },
 		{.iov_base = session->user->passwd[PW_CHAP]->value,.iov_len = strlen(session->user->passwd[PW_CHAP]->value) },
-		{.iov_base = session->chap_challenge, session->chap_challenge_len },
+		{.iov_base = session->chap.challenge, session->chap.challenge_len },
 	    };
 	    u_char digest[MD5_LEN];
 	    md5v(digest, MD5_LEN, iov, 3);
-	    if (memcmp(digest, session->chap_response, (size_t) MD5_LEN)) {
+	    if (memcmp(digest, session->chap.response, (size_t) MD5_LEN)) {
 		*hint = hint_failed;
 	    } else {
 		session->mavisauth_res = S_permit;
@@ -710,6 +728,67 @@ static void chap_helper(tac_session *session, enum token *res, enum hint_enum *h
 	    }
 	}
     }
+}
+
+static void do_mfa(tac_session * session);
+static void do_rad_mfa(tac_session * session);
+
+static int authen_final(tac_session *session, enum token res, char *info, enum hint_enum hint, char *msg, int msg_len, u_char *data, int data_len)
+{
+    if (res == S_permit && session->want_mfa == BISTATE_YES) {
+	session->authfn = do_mfa;
+	session->mfa_info = info;
+	session->mfa_hint = hint;
+
+	session->authen_data->msg = msg;
+	session->authen_data->msg_len = msg_len;
+	session->authen_data->data = data;
+	session->authen_data->data_len = data_len;
+	do_mfa(session);
+	return -1;
+    }
+    if (res == S_permit)
+	tac_script_set_exec_context(session, NULL);
+    report_auth(session, info, hint, res);
+    send_authen_reply(session, TAC_SYM_TO_CODE(res), msg, msg_len, data, data_len, 0);
+    return 0;
+}
+
+static int init_rad_mfa(tac_session *session, enum token res, char *info, enum hint_enum hint, char *resp)
+{
+    if (res == S_permit && session->want_mfa == BISTATE_YES) {
+	session->authfn = do_rad_mfa;
+	session->mfa_info = info;
+	session->mfa_hint = hint;
+
+	session->mfa_msg = resp;
+	do_rad_mfa(session);
+	return -1;
+    }
+    return 0;
+}
+
+static void do_mfa(tac_session *session)
+{
+    if (query_mavis_mfa(session, do_mfa))
+	return;
+
+    enum token res = session->mavisauth_res;
+    report_auth(session, session->mfa_info, session->mfa_hint, res);
+
+    send_authen_reply(session, TAC_SYM_TO_CODE(res), session->authen_data->msg, session->authen_data->msg_len, session->authen_data->data,
+		      session->authen_data->data_len, 0);
+}
+
+static void do_rad_mfa(tac_session *session)
+{
+    if (query_mavis_mfa(session, do_rad_mfa))
+	return;
+
+    enum token res = session->mavisauth_res;
+    report_auth(session, session->mfa_info, session->mfa_hint, res);
+
+    rad_send_authen_reply(session, RAD_SYM_TO_CODE(res), session->mfa_msg);
 }
 
 static void do_chap(tac_session *session)
@@ -733,27 +812,26 @@ static void do_chap(tac_session *session)
 
     char *resp = NULL;
     if (session->authen_data->data_len > MD5_LEN) {
-	session->chap_pppid = session->authen_data->data[0];
-	session->chap_challenge = session->authen_data->data + 1;
-	session->chap_challenge_len = session->authen_data->data_len - 1 - MD5_LEN;
-	session->chap_response = session->chap_challenge + session->chap_challenge_len;
-	session->chap_response_len = MD5_LEN;
+	session->chap.pppid = session->authen_data->data[0];
+	session->chap.challenge = session->authen_data->data + 1;
+	session->chap.challenge_len = session->authen_data->data_len - 1 - MD5_LEN;
+	session->chap.response = session->chap.challenge + session->chap.challenge_len;
+	session->chap.response_len = MD5_LEN;
 	chap_helper(session, &res, &hint, &resp);
     }
 
-    report_auth(session, info, hint, res);
-
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
 static enum token check_access(tac_session *session, struct pwdat *pwdat, char *passwd, enum hint_enum *hint, char **resp)
 {
     enum token res = S_deny;
+    enum token host_res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
 
     if (session->mavisauth_res != S_unknown) {
 	res = session->mavisauth_res;
 	session->mavisauth_res = S_unknown;
-	if (res == S_error && session->ctx->host->authfallback != TRISTATE_YES)
+	if (res == S_error && session->ctx->host->authfallback == TRISTATE_YES)
 	    res = S_deny;
     } else if (pwdat)
 	res = compare_pwdat(pwdat, session->username.txt, passwd, hint);
@@ -774,9 +852,7 @@ static enum token check_access(tac_session *session, struct pwdat *pwdat, char *
     }
 
     if (session->user && (!pwdat || pwdat->type != S_error)) {
-	if (res == S_permit && !session->authorized &&
-	    (S_deny == author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first) ||
-	     S_permit != eval_ruleset(session, session->ctx->realm))) {
+	if (res == S_permit && !session->authorized && (S_deny == host_res || S_permit != eval_ruleset(session, session->ctx->realm))) {
 	    res = S_deny;
 	    *hint = hint_denied_by_acl;
 	}
@@ -842,6 +918,11 @@ static char *set_welcome_banner(tac_session *session, struct log_item *fmt_dflt)
 {
     if (session->welcome_banner)
 	return session->msg.txt;
+
+    struct stat st;
+    if ((session->ctx->realm->last_backend_failure + session->ctx->realm->backend_failure_period >= io_now.tv_sec) &&
+	session->ctx->realm->backend_failure_file && !stat(session->ctx->realm->backend_failure_file, &st))
+	session->ctx->realm->last_backend_failure = st.st_mtime;
 
     struct log_item *fmt = ((session->ctx->host->authfallback != TRISTATE_YES)
 			    || !session->ctx->host->welcome_banner_fallback
@@ -972,9 +1053,7 @@ static void do_chpass(tac_session *session)
 	resp = set_motd_banner(session);
     }
 
-    report_auth(session, info, hint, res);
-
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
 static void send_password_prompt(tac_session *session, enum pw_ix pw_ix, void (*f)(tac_session *))
@@ -1057,10 +1136,10 @@ static void do_enable_login(tac_session *session)
 	return;
 
     enum token res = check_access(session, pwdat, session->password, &hint, &resp);
+    if (res == S_permit)
+	resp = NULL;
 
-    report_auth(session, info, hint, res);
-
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), (res == S_permit) ? NULL : resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
 static void do_enable_getuser(tac_session *);
@@ -1119,9 +1198,10 @@ static void do_enable_augmented(tac_session *session)
 	}
     }
 
-    report_auth(session, info, hint, res);
+    if (res == S_permit)
+	resp = NULL;
 
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), (res == S_permit) ? NULL : resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, NULL, 0, NULL, 0);
 }
 
 static void do_enable(tac_session *session)
@@ -1184,10 +1264,9 @@ static void do_enable(tac_session *session)
 	    res = compare_pwdat(session->enable, session->username.txt, session->authen_data->msg, &hint);
     }
 
-    report_auth(session, info, hint, res);
+    char *resp = (res == S_permit) ? NULL : eval_log_format(session, session->ctx, NULL, li_permission_denied, io_now.tv_sec, NULL);
 
-    send_authen_reply(session, TAC_SYM_TO_CODE(res),
-		      (res == S_permit) ? NULL : eval_log_format(session, session->ctx, NULL, li_permission_denied, io_now.tv_sec, NULL), 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
 static void do_ascii_login(tac_session *session)
@@ -1266,10 +1345,9 @@ static void do_ascii_login(tac_session *session)
 
     mem_free(session->mem, &session->challenge);
 
-    report_auth(session, info, hint, res);
-
     switch (res) {
     case S_error:
+	report_auth(session, info, hint, res);
 	send_authen_error(session, "Authentication backend failure.");
 	return;
     case S_permit:
@@ -1284,10 +1362,12 @@ static void do_ascii_login(tac_session *session)
 
 	if (session->user->valid_until && session->user->valid_until < io_now.tv_sec + session->ctx->realm->warning_period)
 	    session->user_msg.txt = eval_log_format(session, session->ctx, NULL, li_account_expires, io_now.tv_sec, &session->user_msg.len);
+	char *resp = set_motd_banner(session);
 
-	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_PASS, set_motd_banner(session), 0, NULL, 0, 0);
+	authen_final(session, res, info, hint, resp, 0, NULL, 0);
 	return;
     default:
+	report_auth(session, info, hint, res);
 	;
     }
 
@@ -1304,79 +1384,6 @@ static void do_ascii_login(tac_session *session)
 	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_FAIL, m, 0, NULL, 0, 0);
     }
 }
-
-#if 0
-#ifdef WITH_CRYPTO
-#define EAP_REQUEST     1
-#define EAP_RESPONSE    2
-#define EAP_SUCCESS     3
-#define EAP_FAILURE     4
-static int eap_step(tac_session *session __attribute__((unused)),
-		    u_char *eap_in __attribute__((unused)), size_t eap_in_len __attribute__((unused)),
-		    u_char *eap_out __attribute__((unused)), size_t *eap_out_len __attribute__((unused)))
-{
-    // This is a stub. An implementation bases on libeap (from hostapd) seems feasible,
-    // but makes no sense without client support.
-    *eap_out_len = 4;
-    eap_out[0] = EAP_FAILURE;
-    eap_out[1] = 0;
-    eap_out[2] = 0;
-    eap_out[3] = 4;
-    return eap_out[0];
-}
-
-static void do_eap(tac_session *session)
-{
-    char *info = "eap login";
-    enum token res = S_deny;
-    enum hint_enum hint = hint_nosuchuser;
-    u_char eap_out[0x10000], *eap_in = NULL;
-    size_t eap_out_len = 0, eap_in_len = 0;
-
-    if (set_tac_user(session, info))
-	return;
-
-    if (query_mavis_info_login(session, do_eap))
-	return;
-
-    if (!session->user) {
-	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_FAIL, eval_log_format(session, session->ctx, NULL, li_permission_denied, io_now.tv_sec, NULL), 0,
-			  NULL, 0, 0);
-	return;
-    }
-
-    if (session->seq_no > 1) {
-	eap_in = session->authen_data->data;
-	eap_in_len = session->authen_data->data_len;
-    } else if (!session->authen_data) {
-	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_FAIL, "EAP payload is missing", 0, NULL, 0, 0);
-	return;
-    }
-
-    switch (eap_step(session, eap_in, eap_in_len, eap_out, &eap_out_len)) {
-    case EAP_REQUEST:
-	send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_GETDATA, NULL, 0, eap_out, eap_out_len, 0);
-	return;
-    case EAP_SUCCESS:
-	res = S_deny;
-	break;
-    case -1:			// delayed
-	return;
-    default:
-	res = S_deny;
-    }
-
-    report_auth(session, info, hint, res);
-
-    if (res == S_permit) {
-	if (session->user->valid_until && session->user->valid_until < io_now.tv_sec + session->ctx->realm->warning_period)
-	    session->user_msg.txt = eval_log_format(session, session->ctx, NULL, li_account_expires, io_now.tv_sec, &session->user_msg.len);
-	send_authen_reply(session, res, set_motd_banner(session), 0, eap_out, eap_out_len, 0);
-    } else
-	send_authen_reply(session, TAC_SYM_TO_CODE(res), NULL, 0, eap_out, eap_out_len, 0);
-}
-#endif
-#endif
 
 static void do_enable_getuser(tac_session *session)
 {
@@ -1517,24 +1524,60 @@ static void mschap_nthash(char *password, u_char nt_hash[MSCHAP_NT_HASH_LEN])
     free(buf);
 }
 
-static void mschapv1_ntresp(u_char chal[MSCHAPv1_CHALLENGE_LEN], char *password, u_char resp[MSCHAP_NT_RESPONSE_LEN])
+//#define WITH_RADIUS_A_MS_CHAP_MPPE_KEYS
+#ifdef WITH_RADIUS_A_MS_CHAP_MPPE_KEYS
+static void mschap_deshash(u_char *clear, u_char *cypher)
 {
-    u_char nt_hash[MSCHAP_NT_HASH_LEN];
+    mschap_desencrypt((u_char *) "KGS!@#$%", clear, cypher);
+}
+
+static void mschap_lmhash(char *password, u_char *hash)
+{
+    u_char upassword[14] = { 0 };
+
+    for (unsigned int i = 0; i < sizeof(upassword) && password[i]; i++)
+	upassword[i] = (u_char) toupper((int) (password[i]));
+
+    mschap_deshash(upassword, hash);
+    mschap_deshash(upassword + 7, hash + 8);
+}
+#endif
+
+static void mschapv1_ntresp(u_char chal[MSCHAPv1_CHALLENGE_LEN], char *password, u_char resp[MSCHAP_NT_RESPONSE_LEN], u_char *nt_hash)
+{
+    u_char nt_hash_tmp[MSCHAP_NT_HASH_LEN];
+    if (!nt_hash)
+	nt_hash = nt_hash_tmp;
 
     mschap_nthash(password, nt_hash);
     mschap_chalresp(chal, nt_hash, resp);
 }
 
-static void mschap_helper(tac_session *session, enum token *res, enum hint_enum *hint, char **resp)
+static void mschap_helper(tac_session *session, enum token *res, enum hint_enum *hint, char **resp, u_char *nt_hash, int *nt_hash_set)
 {
     if (session->user) {
-	if (session->mavisauth_res != S_unknown)
+	if (session->mavisauth_res != S_unknown) {
 	    *res = session->mavisauth_res;
-	else if (session->user->passwd[PW_MSCHAP]->type == S_clear) {
-	    u_char response[MSCHAP_NT_RESPONSE_LEN];
-	    mschapv1_ntresp(session->chap_challenge, session->user->passwd[PW_MSCHAP]->value, response);
-	    if (!memcmp(response, session->chap_response, MSCHAP_NT_RESPONSE_LEN))
+	    if (*res == S_permit && session->mschap.nt_key && nt_hash && nt_hash_set) {
+		char *s = session->mschap.nt_key;
+		if (s && strlen(s) == 2 * MSCHAP_NT_HASH_LEN) {
+		    int all_hex = 1;
+		    for (int i = 0; i < 2 * MSCHAP_NT_HASH_LEN && all_hex; i++)
+			all_hex = isxdigit(s[i]);
+		    if (all_hex) {
+			for (int i = 0; i < MSCHAP_NT_HASH_LEN; i++, s += 2)
+			    nt_hash[i] = hexbyte(s);
+			*nt_hash_set = 1;
+		    }
+		}
+	    }
+	} else if (session->user->passwd[PW_MSCHAP]->type == S_clear) {
+	    u_char nt_response[MSCHAP_NT_RESPONSE_LEN];
+	    mschapv1_ntresp(session->mschap.challenge, session->user->passwd[PW_MSCHAP]->value, nt_response, nt_hash);
+	    if (!memcmp(nt_response, session->mschap.nt_response, MSCHAP_NT_RESPONSE_LEN)) {
 		*res = S_permit;
+		*nt_hash_set = 1;
+	    }
 	} else {
 	    *hint = hint_no_cleartext;
 	}
@@ -1554,7 +1597,7 @@ static void do_mschap(tac_session *session)
 {
     enum token res = S_deny;
     enum hint_enum hint = hint_nosuchuser;
-    char *info = (session->mschap_version == 1) ? "mschap login" : "mschapv2 login";
+    char *info = (session->mschap.version == 1) ? "mschap login" : "mschapv2 login";
 
     if (set_tac_user(session, info))
 	return;
@@ -1569,21 +1612,18 @@ static void do_mschap(tac_session *session)
 	return;
 
     char *resp = NULL;
-    mschap_helper(session, &res, &hint, &resp);
+    mschap_helper(session, &res, &hint, &resp, NULL, NULL);
 
-    report_auth(session, info, hint, res);
-
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
 static void do_mschapv1(tac_session *session)
 {
     if (session->authen_data->data_len == MSCHAP_TAC_PRE_LEN + MSCHAPv1_CHALLENGE_LEN + MSCHAP_TAC_RESPONSE_LEN) {
-	session->mschap_version = 1;
-	session->chap_challenge = session->authen_data->data + MSCHAP_TAC_PRE_LEN;
-	session->chap_challenge_len = MSCHAPv1_CHALLENGE_LEN;
-	session->chap_response = session->authen_data->data + session->authen_data->data_len - MSCHAP_TAC_RESPONSE_LEN + MSCHAP_LM_RESPONSE_LEN;
-	session->chap_response_len = MSCHAP_NT_RESPONSE_LEN;
+	session->mschap.version = 1;
+	session->mschap.challenge = session->authen_data->data + MSCHAP_TAC_PRE_LEN;
+	session->mschap.challenge_len = MSCHAPv1_CHALLENGE_LEN;
+	session->mschap.nt_response = session->authen_data->data + session->authen_data->data_len - MSCHAP_TAC_RESPONSE_LEN + MSCHAP_LM_RESPONSE_LEN;
 	do_mschap(session);
 	return;
     }
@@ -1591,44 +1631,31 @@ static void do_mschapv1(tac_session *session)
     send_authen_reply(session, TAC_PLUS_AUTHEN_STATUS_FAIL, NULL, 0, NULL, 0, 0);
 }
 
-static void mschapv2_chal(u_char peer_challenge[MSCHAPv2_CHALLENGE_LEN], u_char auth_challenge[MSCHAPv2_CHALLENGE_LEN], char *username,
-			  u_char out[MSCHAPv1_CHALLENGE_LEN])
+static void mschapv2_challenghash(u_char peer_challenge[MSCHAPv2_CHALLENGE_LEN], u_char auth_challenge[MSCHAPv2_CHALLENGE_LEN], char *username,
+				  u_char out[MSCHAPv1_CHALLENGE_LEN])
 {
     uint8_t digest[SHA_DIGEST_LENGTH];
-#if OPENSSL_VERSION_NUMBER < 0x30000000
-    SHA_CTX ctx;
-    SHA1_Init(&ctx);
-    SHA1_Update(&ctx, peer_challenge, MSCHAPv2_CHALLENGE_LEN);
-    SHA1_Update(&ctx, auth_challenge, MSCHAPv2_CHALLENGE_LEN);
-    SHA1_Update(&ctx, username, strlen(username));
-    SHA1_Final(digest, &ctx);
-#else
-    unsigned int digest_len = 0;
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
-    EVP_DigestUpdate(ctx, peer_challenge, MSCHAPv2_CHALLENGE_LEN);
-    EVP_DigestUpdate(ctx, auth_challenge, MSCHAPv2_CHALLENGE_LEN);
-    EVP_DigestUpdate(ctx, username, strlen(username));
-    EVP_DigestFinal_ex(ctx, digest, &digest_len);
-    EVP_MD_CTX_free(ctx);
-#endif
+    struct iovec iov[3] = {
+	{.iov_base = (void *) peer_challenge,.iov_len = MSCHAPv2_CHALLENGE_LEN },
+	{.iov_base = (void *) auth_challenge,.iov_len = MSCHAPv2_CHALLENGE_LEN },
+	{.iov_base = (void *) username,.iov_len = strlen(username) }
+    };
+    sha1v(digest, sizeof(digest), iov, 3);
     memcpy(out, digest, MSCHAPv1_CHALLENGE_LEN);
 }
 
 static void do_mschapv2(tac_session *session)
 {
     if (session->authen_data->data_len == MSCHAP_TAC_PRE_LEN + MSCHAPv2_CHALLENGE_LEN + MSCHAP_TAC_RESPONSE_LEN) {
-	session->mschap_version = 2;
-	session->chap_challenge = session->authen_data->data + MSCHAP_TAC_PRE_LEN;
-	session->chap_challenge_len = MSCHAPv2_CHALLENGE_LEN;
-	session->chap_response = session->authen_data->data + session->authen_data->data_len - MSCHAP_TAC_RESPONSE_LEN;
-	session->chap_response_len = MSCHAP_TAC_RESPONSE_LEN;
+	session->mschap.version = 2;
+	session->mschap.challenge = session->authen_data->data + MSCHAP_TAC_PRE_LEN;
+	session->mschap.challenge_len = MSCHAPv2_CHALLENGE_LEN;
+	u_char *response = session->authen_data->data + session->authen_data->data_len - MSCHAP_TAC_RESPONSE_LEN;
 	u_char *chal = mem_alloc(session->mem, MSCHAPv1_CHALLENGE_LEN);
-	mschapv2_chal(session->chap_response, session->chap_challenge, session->username.txt, chal);
-	session->chap_challenge = chal;
-	session->chap_challenge_len = MSCHAPv1_CHALLENGE_LEN;
-	session->chap_response += MSCHAP_NT_RESPONSE_LEN;
-	session->chap_response_len = MSCHAP_NT_RESPONSE_LEN;
+	mschapv2_challenghash(session->mschap.nt_response, session->mschap.challenge, session->username.txt, chal);
+	session->mschap.challenge = chal;
+	session->mschap.challenge_len = MSCHAPv1_CHALLENGE_LEN;
+	session->mschap.nt_response = response + MSCHAP_LM_RESPONSE_LEN;
 	do_mschap(session);
 	return;
     }
@@ -1669,12 +1696,10 @@ static void do_login(tac_session *session)
 
     res = check_access(session, pwdat, session->password, &hint, &resp);
 
-    report_auth(session, info, hint, res);
-
     if (!resp)
 	resp = session->user_msg.txt;
 
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
 static void do_pap(tac_session *session)
@@ -1716,14 +1741,13 @@ static void do_pap(tac_session *session)
 
     res = check_access(session, pwdat, session->password, &hint, &resp);
 
-    report_auth(session, info, hint, res);
-
     if (!resp)
 	resp = session->user_msg.txt;
 
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, NULL, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 
+#ifdef TAC_PLUS_AUTHEN_TYPE_SSHKEY
 // This is proof-of-concept code for SSH key validation with minor protocol changes.
 // Clients just need to use TAC_PLUS_AUTHEN_TYPE_SSHKEYHASH (8) and put the ssh public
 // key hash into the data field. This should be really easy to implement. The daemon
@@ -1757,29 +1781,24 @@ static void do_sshkeyhash(tac_session *session)
 	    res = session->authorized ? S_permit : ((S_deny == author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first)
 						     || S_permit != eval_ruleset(session, session->ctx->realm)) ? S_deny : S_permit);
 
-	    if (res == S_permit)
-		hint = hint_permitted;
-	    else {
-		hint = hint_denied_by_acl;
-	    }
+	    hint = (res == S_permit) ? hint_permitted : hint_denied_by_acl;
 	} else
 	    hint = hint_denied;
 
-	if (res == S_permit) {
-	    if (res != S_permit && session->ctx->host->reject_banner)
-		resp = eval_log_format(session, session->ctx, NULL, session->ctx->host->reject_banner, io_now.tv_sec, NULL);
+	if (res == S_permit)
 	    user_expiry_check(&res, session->user, &hint);
-	}
+	else if (session->ctx->host->reject_banner)
+	    resp = eval_log_format(session, session->ctx, NULL, session->ctx->host->reject_banner, io_now.tv_sec, NULL);
     }
 
     if (res == S_permit)
 	hint = hint_permitted;
-    report_auth(session, info, hint, res);
 
-    send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, (u_char *) key, 0, 0);
+    authen_final(session, res, info, hint, resp, 0, (u_char *) key, 0);
 }
+#endif
 
-#if 0
+#ifdef TAC_PLUS_AUTHEN_TYPE_SSHCERT
 // This is proof-of-concept code for SSH certificate validation with minor protocol changes.
 // Clients just need to use TAC_PLUS_AUTHEN_TYPE_SSHCERTASH (9) and put the client certificate
 // key-id into the data field. The daemon will return a matching AuthorizedPrincipalsFile line. 
@@ -1813,11 +1832,10 @@ static void do_sshcerthash(tac_session *session)
 	} else
 	    hint = hint_denied;
 
-	if (res == S_permit) {
-	    if (res != S_permit && session->ctx->host->reject_banner)
-		resp = eval_log_format(session, session->ctx, NULL, session->ctx->host->reject_banner, io_now.tv_sec, NULL);
+	if (res == S_permit)
 	    user_expiry_check(&res, session->user, &hint);
-	}
+	else if (session->ctx->host->reject_banner)
+	    resp = eval_log_format(session, session->ctx, NULL, session->ctx->host->reject_banner, io_now.tv_sec, NULL);
     }
 
     if (res == S_permit)
@@ -1825,6 +1843,42 @@ static void do_sshcerthash(tac_session *session)
     report_auth(session, info, hint, res);
 
     send_authen_reply(session, TAC_SYM_TO_CODE(res), resp, 0, (u_char *) key, 0, 0);
+}
+#endif
+
+#ifdef TAC_PLUS_AUTHEN_TYPE_LOCAL
+// This is proof-of-concept code that adds MFA push support for users pre-authenticated by the NAD
+// (e.g. via public SSH keys available to the NAD, or via X.509 certificates).
+//
+static void do_local(tac_session *session)
+{
+    char *info = "local login";
+    enum token res = S_deny;
+    enum hint_enum hint = hint_nosuchuser;
+    char *resp = NULL;
+
+    if (set_tac_user(session, info))
+	return;
+
+    if (query_mavis_info(session, do_sshkeyhash, PW_LOGIN))
+	return;
+
+    if (session->user) {
+	res = session->authorized ? S_permit : ((S_deny == author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first)
+						 || S_permit != eval_ruleset(session, session->ctx->realm)) ? S_deny : S_permit);
+
+	hint = (res == S_permit) ? hint_permitted : hint_denied_by_acl;
+
+	if (res == S_permit)
+	    user_expiry_check(&res, session->user, &hint);
+	else if (session->ctx->host->reject_banner)
+	    resp = eval_log_format(session, session->ctx, NULL, session->ctx->host->reject_banner, io_now.tv_sec, NULL);
+    }
+
+    if (res == S_permit)
+	hint = hint_permitted;
+
+    authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
 #endif
 
@@ -1885,7 +1939,7 @@ void get_revmap_nac(tac_session *session)
 	    for (int i = 0; i < 3; i++) {
 		if (r->dns_tree_ptr[i]) {
 		    struct revmap *rev = radix_lookup(r->dns_tree_ptr[i], &session->nac_address, NULL);
-		    if (rev && rev->name && rev->ttl >= io_now.tv_sec) {
+		    if (rev && rev->name && (!i || rev->ttl >= io_now.tv_sec)) {
 			str_set(&session->nac_dns_name, mem_strdup(session->mem, rev->name), 0);
 			report(NULL, LOG_DEBUG, DEBUG_DNS_FLAG, "NAC revmap(%s) = %s [TTL: %lld]", session->nac_addr_ascii.txt, rev->name,
 			       (long long) (rev->ttl - io_now.tv_sec));
@@ -1945,7 +1999,7 @@ void get_revmap_nas(tac_session *session)
 	    for (int i = 0; i < 3; i++) {
 		if (r->dns_tree_ptr[i]) {
 		    struct revmap *rev = radix_lookup(r->dns_tree_ptr[i], &ctx->device_addr, NULL);
-		    if (rev && rev->name && rev->ttl >= io_now.tv_sec) {
+		    if (rev && rev->name && (!i || rev->ttl >= io_now.tv_sec)) {
 			str_set(&ctx->device_dns_name, mem_strdup(ctx->mem, rev->name), 0);
 			report(NULL, LOG_DEBUG, DEBUG_DNS_FLAG, "NAS revmap(%s) = %s [TTL: %lld]", ctx->device_addr_ascii.txt, rev->name,
 			       (long long) (rev->ttl - io_now.tv_sec));
@@ -2085,21 +2139,23 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 			session->authfn = do_mschapv2;
 		    break;
 #endif
+#ifdef TAC_PLUS_AUTHEN_TYPE_SSHKEY
 		case TAC_PLUS_AUTHEN_TYPE_SSHKEY:
 		    // limit to hdr->version? 1.2 perhaps?
 		    session->authfn = do_sshkeyhash;
 		    break;
-#if 0
+#endif
+#ifdef TAC_PLUS_AUTHEN_TYPE_SSHCERT
 		case TAC_PLUS_AUTHEN_TYPE_SSHCERT:
 		    // limit to hdr->version? 1.2 perhaps?
 		    session->authfn = do_sshcerthash;
 		    break;
-#ifdef WITH_CRYPTO
-		case TAC_PLUS_AUTHEN_TYPE_EAP:
-		    // limit to hdr->version? 1.2 perhaps?
-		    session->authfn = do_eap;
-		    break;
 #endif
+#ifdef TAC_PLUS_AUTHEN_TYPE_LOCAL
+		case TAC_PLUS_AUTHEN_TYPE_LOCAL:
+		    // limit to hdr->version? 1.2 perhaps?
+		    session->authfn = do_local;
+		    break;
 #endif
 		}
 	    }
@@ -2153,21 +2209,10 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 	username_required = 0;
 	session->authen_data->msg_len = ntohs(cont->user_msg_len);
 	session->authen_data->data_len = ntohs(cont->user_data_len);
-#if 0
-#ifdef WITH_CRYPTO
-	if (session->authfn == do_eap) {
-	    // no need to duplicate, do_eap() doesn't need a local null-terminated copy right now.
-	    session->authen_data->msg = (char *) cont + TAC_AUTHEN_CONT_FIXED_FIELDS_SIZE;
-	    session->authen_data->data = (u_char *) cont + TAC_AUTHEN_CONT_FIXED_FIELDS_SIZE + session->authen_data->msg_len;
-	} else
-#endif
-#endif
-	{
-	    session->authen_data->msg = mem_copy(session->mem, (u_char *) cont + TAC_AUTHEN_CONT_FIXED_FIELDS_SIZE, session->authen_data->msg_len);
-	    session->authen_data->data =
-		(u_char *) mem_copy(session->mem, (u_char *) cont + TAC_AUTHEN_CONT_FIXED_FIELDS_SIZE + session->authen_data->msg_len,
-				    session->authen_data->data_len);
-	}
+	session->authen_data->msg = mem_copy(session->mem, (u_char *) cont + TAC_AUTHEN_CONT_FIXED_FIELDS_SIZE, session->authen_data->msg_len);
+	session->authen_data->data =
+	    (u_char *) mem_copy(session->mem, (u_char *) cont + TAC_AUTHEN_CONT_FIXED_FIELDS_SIZE + session->authen_data->msg_len,
+				session->authen_data->data_len);
     }
 
     if (session->authfn) {
@@ -2185,6 +2230,74 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
     } else
 	send_authen_error(session, "Invalid or unsupported AUTHEN/START (action=%d authen_type=%d)", start->action, start->type);
 }
+
+#ifdef WITH_CRYPTO
+static void encrypt_mppe_key(tac_session *session, u_char *plain /* 32 bytes */ , uint16_t salt)
+{
+    u_char digest[MD5_LEN];
+    u_char salt_be[2] = { (u_char) (salt >> 8), (u_char) (salt & 0xff) };
+
+    // b(1) = MD5(Secret + Request-Authenticator + Salt)
+    struct iovec iov[3] = {
+	{.iov_base = (void *) session->ctx->key->key,.iov_len = session->ctx->key->len },
+	{.iov_base = (void *) session->radius_data->pak_in->authenticator,.iov_len = 16 },
+	{.iov_base = salt_be,.iov_len = 2 }
+    };
+    md5v(digest, MD5_LEN, iov, 3);
+    for (int i = 0; i < 16; i++)
+	plain[i] ^= digest[i];
+
+    // b(2) = MD5(Secret + c(1))
+    iov[1].iov_base = plain;
+    iov[1].iov_len = 16;
+    md5v(digest, MD5_LEN, iov, 2);
+    for (int i = 0; i < 16; i++)
+	plain[16 + i] ^= digest[i];
+}
+
+static void mppe_add_key(tac_session *session, u_char *masterkey, u_char attribute, int magic, u_char **data, size_t *data_len)
+{
+    // Magic constants (RFC 3079)
+    const char Magic2[] = "On the client side, this is the send key; on the server side, it is the receive key.";
+    const char Magic3[] = "On the client side, this is the receive key; on the server side, it is the send key.";
+    const u_char SHApad1[40] = { 0 };
+    const u_char SHApad2[40] = {
+	0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2,
+	0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2,
+	0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2,
+	0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2, 0xf2
+    };
+
+    u_char key[SHA_DIGEST_LENGTH];
+    struct iovec iov[4] = {
+	{.iov_base = (void *) masterkey,.iov_len = 16 },
+	{.iov_base = (void *) SHApad1,.iov_len = sizeof(SHApad1) },
+	{.iov_base = (void *) (magic == 3 ? Magic3 : Magic2),.iov_len = sizeof(Magic2) - 1},
+	{.iov_base = (void *) SHApad2,.iov_len = sizeof(SHApad2) }
+    };
+    sha1v(key, sizeof(key), iov, 4);
+
+    *(*data)++ = RADIUS_A_VENDOR_SPECIFIC;
+    *(*data)++ = 42;
+    *data = set_uint(*data, RADIUS_VID_MICROSOFT, 4);
+    *(*data)++ = attribute;
+    *(*data)++ = 36;
+
+    uint16_t salt = arc4random_uniform(0xffff) | 0x8000;
+    *(*data)++ = (salt >> 8) & 0xff;
+    *(*data)++ = salt & 0xff;
+
+    u_char *plain = *data;
+    plain[0] = 16;
+    memcpy(plain + 1, key, 16);
+    memset(plain + 17, 0, 15);
+
+    encrypt_mppe_key(session, plain, salt);
+
+    *data += 32;
+    *data_len += 42;
+}
+#endif
 
 static void do_radius_login(tac_session *session)
 {
@@ -2210,47 +2323,51 @@ static void do_radius_login(tac_session *session)
     }
 
     if (rd->type == S_unknown) {
-	if (!rad_get(rd->pak_in, session->mem, -1, RADIUS_A_CHAP_PASSWORD, S_octets, &session->chap_response, &session->chap_response_len)
-	    && session->chap_response_len == 1 + MD5_LEN) {
-	    session->chap_pppid = session->chap_response[0];
-	    session->chap_response++;
-	    session->chap_response_len--;
-	    if (rad_get(rd->pak_in, session->mem, -1, RADIUS_A_CHAP_CHALLENGE, S_octets, &session->chap_challenge, &session->chap_challenge_len)) {
+	if (!rad_get(rd->pak_in, session->mem, -1, RADIUS_A_CHAP_PASSWORD, S_octets, &session->chap.response, &session->chap.response_len)
+	    && session->chap.response_len == 1 + MD5_LEN) {
+	    session->chap.pppid = session->chap.response[0];
+	    session->chap.response++;
+	    session->chap.response_len--;
+	    if (rad_get(rd->pak_in, session->mem, -1, RADIUS_A_CHAP_CHALLENGE, S_octets, &session->chap.challenge, &session->chap.challenge_len)) {
 		if (session->ctx->radius_1_1 == BISTATE_NO) {
-		    session->chap_challenge = rd->pak_in->authenticator;
-		    session->chap_challenge_len = 16;
+		    session->chap.challenge = rd->pak_in->authenticator;
+		    session->chap.challenge_len = 16;
 		}
 	    }
-	    if (session->chap_challenge_len)
+	    if (session->chap.challenge_len)
 		rd->type = S_chap;
 	}
     }
 #ifdef WITH_CRYPTO
     if (rd->type == S_unknown) {
+	u_char *s;
+	size_t s_len;
 	if (!rad_get
-	    (rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP_CHALLENGE, S_octets, &session->chap_challenge, &session->chap_challenge_len)
-	    && (session->chap_challenge_len == MSCHAPv1_CHALLENGE_LEN)
-	    && !rad_get(rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP_RESPONSE, S_octets, &session->chap_response,
-			&session->chap_response_len) && (session->chap_response_len == MSCHAP_RAD_RESPONSE_LEN)) {
+	    (rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP_CHALLENGE, S_octets, &session->mschap.challenge, &session->mschap.challenge_len)
+	    && (session->mschap.challenge_len == MSCHAPv1_CHALLENGE_LEN)
+	    && !rad_get(rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP_RESPONSE, S_octets, &s,
+			&s_len) && (s_len == MSCHAP_RAD_RESPONSE_LEN)) {
 	    rd->type = S_mschap;
-	    session->mschap_version = 1;
-	    session->chap_response += MSCHAP_RAD_PRE_LEN + MSCHAP_LM_RESPONSE_LEN;
-	    session->chap_response_len -= MSCHAP_RAD_PRE_LEN + MSCHAP_LM_RESPONSE_LEN;
+	    session->mschap.version = 1;
+	    session->mschap.ident = s[0];
+	    session->mschap.nt_response = s + MSCHAP_RAD_PRE_LEN + MSCHAP_LM_RESPONSE_LEN;
 	}
     }
 
     if (rd->type == S_unknown) {
+	u_char *s;
+	size_t s_len;
 	if (!rad_get
-	    (rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP_CHALLENGE, S_octets, &session->chap_challenge, &session->chap_challenge_len)
-	    && (session->chap_challenge_len == MSCHAPv2_CHALLENGE_LEN)
-	    && !rad_get(rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP2_RESPONSE, S_octets, &session->chap_response,
-			&session->chap_response_len) && (session->chap_response_len == MSCHAP_RAD_RESPONSE_LEN)) {
+	    (rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP_CHALLENGE, S_octets, &session->mschap.challenge, &session->mschap.challenge_len)
+	    && (session->mschap.challenge_len == MSCHAPv2_CHALLENGE_LEN)
+	    && !rad_get(rd->pak_in, session->mem, RADIUS_VID_MICROSOFT, RADIUS_A_MS_CHAP2_RESPONSE, S_octets, &s,
+			&s_len) && (s_len == MSCHAP_RAD_RESPONSE_LEN)) {
 	    rd->type = S_mschap;
-	    mschapv2_chal(session->chap_response + MSCHAP_RAD_PRE_LEN, session->chap_challenge, session->username.txt, session->chap_challenge);
-	    session->chap_challenge_len = MSCHAPv2_CHALLENGE_LEN;
-	    session->mschap_version = 2;
-	    session->chap_response += MSCHAP_RAD_PRE_LEN + MSCHAP_LM_RESPONSE_LEN;
-	    session->chap_response_len -= MSCHAP_RAD_PRE_LEN + MSCHAP_LM_RESPONSE_LEN;
+	    session->mschap.challenge_len = MSCHAPv2_CHALLENGE_LEN;
+	    session->mschap.version = 2;
+	    session->mschap.ident = s[0];
+	    session->mschap.nt_response = s + MSCHAP_RAD_PRE_LEN + MSCHAP_LM_RESPONSE_LEN;
+	    mschapv2_challenghash(s + MSCHAP_RAD_PRE_LEN /* peer challenge */ , session->mschap.challenge, session->username.txt, session->mschap.challenge);
 	}
     }
 #endif
@@ -2268,7 +2385,7 @@ static void do_radius_login(tac_session *session)
     else if (rd->type == S_chap)
 	info = "radius chap login";
     else if (rd->type == S_mschap)
-	info = session->mschap_version == 1 ? "radius mschap login" : "radius mschapv2 login";
+	info = session->mschap.version == 1 ? "radius mschap login" : "radius mschapv2 login";
 
     if (rd->type == S_unknown) {
 	report_auth(session, info, hint, res);
@@ -2283,6 +2400,10 @@ static void do_radius_login(tac_session *session)
 
     char *resp = NULL;
 
+#ifdef WITH_CRYPTO
+    u_char nt_hash[MSCHAP_NT_HASH_LEN];
+    int nt_hash_set = 0;
+#endif
     if (rd->type == S_pap) {
 	if (query_mavis_info_login(session, do_radius_login))
 	    return;
@@ -2302,7 +2423,7 @@ static void do_radius_login(tac_session *session)
 	    return;
 	if (refuse_rad_session(session, info, PW_CHAP))
 	    return;
-	if (query_mavis_chap_login(session, do_radius_login, PW_MSCHAP))
+	if (query_mavis_chap_login(session, do_radius_login, PW_CHAP))
 	    return;
 	chap_helper(session, &res, &hint, &resp);
     }
@@ -2314,7 +2435,7 @@ static void do_radius_login(tac_session *session)
 	    return;
 	if (query_mavis_mschap_login(session, do_radius_login, PW_MSCHAP))
 	    return;
-	mschap_helper(session, &res, &hint, &resp);
+	mschap_helper(session, &res, &hint, &resp, nt_hash, &nt_hash_set);
     }
 #endif
     else if (rd->type == S_authorization) {
@@ -2348,10 +2469,154 @@ static void do_radius_login(tac_session *session)
 	}
     }
 
-    report_auth(session, info, hint, res);
-
     if (!resp)
 	resp = session->user_msg.txt;
+
+#ifdef WITH_CRYPTO
+    if (rd->type == S_mschap && session->mschap.version == 2 && res == S_permit && session->ctx->key && nt_hash_set) {
+	size_t data_len = session->radius_data->data_len;
+	u_char *data = session->radius_data->data + data_len;
+	u_char *data_end = session->radius_data->data + sizeof(session->radius_data->data);
+
+	myMD4_CTX md4_ctx;
+	MD4Init(&md4_ctx);
+	MD4Update(&md4_ctx, nt_hash, MSCHAP_NT_HASH_LEN);
+	u_char nt_hashhash[MSCHAP_NT_HASH_LEN];
+	MD4Final(nt_hashhash, &md4_ctx);
+
+
+	// MS-CHAP2-Success: 1 + 1 + 4 + 45 = 51
+	if (data + 51 < data_end) {
+	    *data++ = RADIUS_A_VENDOR_SPECIFIC;
+	    *data++ = 51;
+	    data = set_uint(data, RADIUS_VID_MICROSOFT, 4);
+	    *data++ = RADIUS_A_MS_CHAP2_SUCCESS;
+	    *data++ = 45;
+	    data_len += 8;
+	    *data++ = session->mschap.ident;
+	    data_len++;
+	    *data++ = 'S';
+	    data_len++;
+	    *data++ = '=';
+	    data_len++;
+
+	    u_char digest[SHA_DIGEST_LENGTH];
+
+	    {
+		const char Magic1[] = "Magic server to client signing constant";
+		struct iovec iov[3] = {
+		    {.iov_base = (void *) nt_hashhash,.iov_len = MSCHAP_NT_HASH_LEN },
+		    {.iov_base = (void *) session->mschap.nt_response,.iov_len = MSCHAP_NT_RESPONSE_LEN },
+		    {.iov_base = (void *) Magic1,.iov_len = sizeof(Magic1) - 1}
+		};
+		sha1v(digest, sizeof(digest), iov, 3);
+	    }
+
+	    {
+		const char Magic2[] = "Pad to make it do more than one iteration";
+		struct iovec iov[3] = {
+		    {.iov_base = (void *) digest,.iov_len = SHA_DIGEST_LENGTH },
+		    {.iov_base = (void *) session->mschap.challenge,.iov_len = 8 },
+		    {.iov_base = (void *) Magic2,.iov_len = sizeof(Magic2) - 1}
+		};
+		sha1v(digest, sizeof(digest), iov, 3);
+	    }
+
+	    dump_hex_mschap(digest, SHA_DIGEST_LENGTH, (char **) &data);
+	    data_len += 40;
+	    session->radius_data->data_len = data_len;
+	}
+	// MS-MPPE-Encryption-Types: 1 + 1 + 4 + 6 = 12
+	if (data + 12 < data_end) {
+	    *data++ = RADIUS_A_VENDOR_SPECIFIC;
+	    *data++ = 12;
+	    data = set_uint(data, RADIUS_VID_MICROSOFT, 4);
+	    data_len += 6;
+	    *data++ = RADIUS_A_MS_MPPE_ENCRYPTION_TYPES;
+	    *data++ = 6;
+	    data_len += 2;
+	    data = set_uint(data, 6 /* S (4) 128bit, L (2) 40bit */ , 4);	// FIXME, make this configurable?
+	    data_len += 4;
+	}
+	// MS-MPPE-Encryption-Policy: 1 + 1 + 4 + 6 = 12
+	if (data + 12 < data_end) {
+	    *data++ = RADIUS_A_VENDOR_SPECIFIC;
+	    *data++ = 12;
+	    data = set_uint(data, RADIUS_VID_MICROSOFT, 4);
+	    data_len += 6;
+	    *data++ = RADIUS_A_MS_MPPE_ENCRYPTION_POLICY;
+	    *data++ = 6;
+	    data_len += 2;
+	    data = set_uint(data, 1 /* 1 Encryption-Allowed, 2 Encryption-Required */ , 4);	// FIXME make this configurable?
+	    data_len += 4;
+	}
+#ifdef WITH_RADIUS_A_MS_CHAP_MPPE_KEYS
+	// MS-CHAP-MPPE-Keys: 1 + 1 + 4 + 34 = 40  (legacy, optional)
+	if (data + 40 < data_end) {
+	    *data++ = RADIUS_A_VENDOR_SPECIFIC;
+	    *data++ = 40;
+	    data = set_uint(data, RADIUS_VID_MICROSOFT, 4);
+	    data_len += 6;
+	    *data++ = RADIUS_A_MS_CHAP_MPPE_KEYS;
+	    *data++ = 34;
+	    data_len += 2;
+	    u_char *enc_start = data;
+	    // insert 8 byte LM key (mschap_lmhash() will actually copy 16 bytes)
+	    mschap_lmhash(session->user->passwd[PW_MSCHAP]->value, data);
+	    data += 8;
+	    data_len += 8;
+	    // insert 16 byte NT key
+	    memcpy(data, nt_hash, MSCHAP_NT_HASH_LEN);
+	    data += MSCHAP_NT_HASH_LEN;
+	    data_len += MSCHAP_NT_HASH_LEN;
+	    // padding -- 8 bytes
+	    memset(data, 0, 8);
+	    data += 8;
+	    data_len += 8;
+
+	    // Encryption (RFC 2548 style, 32 byte payload)
+	    u_char digest[MD5_LEN];
+	    struct iovec iov[2] = {
+		{.iov_base = (void *) session->ctx->key->key,.iov_len = session->ctx->key->len },
+		{.iov_base = (void *) session->radius_data->pak_in->authenticator,.iov_len = 16 }
+	    };
+	    md5v(digest, MD5_LEN, iov, 2);
+	    for (int i = 0; i < 16; i++)
+		enc_start[i] ^= digest[i];
+
+	    iov[1].iov_base = enc_start;
+	    enc_start += 16;
+	    md5v(digest, MD5_LEN, iov, 2);
+	    for (int i = 0; i < 16; i++)
+		enc_start[i] ^= digest[i];
+	}
+#endif				// WITH_RADIUS_A_MS_CHAP_MPPE_KEYS
+
+	// MS-MPPE-Send-/Recv-Key: 1 + 1 + 4 + 2 + 2 + 32 = 42
+	if (data + 84 < data_end) {
+	    // Magic constants (RFC 3079)
+	    const char Magic1[] = "This is the MPPE Master Key";
+	    // MasterKey = SHA1(PasswordHashHash || NT-Response || Magic1)[0..15]
+	    u_char masterkey[SHA_DIGEST_LENGTH];
+	    struct iovec iov[3] = {
+		{.iov_base = (void *) nt_hashhash,.iov_len = MSCHAP_NT_HASH_LEN },
+		{.iov_base = (void *) session->mschap.nt_response,.iov_len = MSCHAP_NT_RESPONSE_LEN },
+		{.iov_base = (void *) Magic1,.iov_len = sizeof(Magic1) - 1 },
+	    };
+	    sha1v(masterkey, sizeof(masterkey), iov, 3);
+
+	    mppe_add_key(session, masterkey, RADIUS_A_MS_MPPE_SEND_KEY, 3, &data, &data_len);
+	    mppe_add_key(session, masterkey, RADIUS_A_MS_MPPE_RECV_KEY, 2, &data, &data_len);
+
+	    session->radius_data->data_len = data_len;
+	}
+    }
+#endif
+
+    if (rd->type != S_authorization && init_rad_mfa(session, res, info, hint, resp))
+	return;
+
+    report_auth(session, info, hint, res);
 
     rad_send_authen_reply(session, RAD_SYM_TO_CODE(res), resp);
 }

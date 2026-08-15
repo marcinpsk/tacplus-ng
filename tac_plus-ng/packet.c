@@ -72,22 +72,26 @@ static void md5_xor(tac_pak_hdr *hdr, char *key, int keylen)
 {
     if (key && *key) {
 	u_char *data = tac_payload(hdr, u_char *);
-	int data_len = ntohl(hdr->datalength), h = 0;
-	u_char hash[MD5_LEN][2];
+	int data_len = ntohl(hdr->datalength), h = 0, iovcnt = 4;
+	u_char digest[MD5_LEN][2];
+
+	struct iovec iov[5] = {
+	    {.iov_base = &hdr->session_id,.iov_len = sizeof(hdr->session_id) },
+	    {.iov_base = key,.iov_len = keylen },
+	    {.iov_base = &hdr->version,.iov_len = sizeof(hdr->version) },
+	    {.iov_base = &hdr->seq_no,.iov_len = sizeof(hdr->seq_no) },
+	    {.iov_base = NULL,.iov_len = MD5_LEN }
+	};
 
 	for (int i = 0; i < data_len; i += 16) {
 	    int min = minimum(data_len - i, 16);
-	    struct iovec iov[5] = {
-		{.iov_base = &hdr->session_id,.iov_len = sizeof(hdr->session_id) },
-		{.iov_base = key,.iov_len = keylen },
-		{.iov_base = &hdr->version,.iov_len = sizeof(hdr->version) },
-		{.iov_base = &hdr->seq_no,.iov_len = sizeof(hdr->seq_no) },
-		{.iov_base = hash[h ^ 1],.iov_len = MD5_LEN }
-	    };
-	    md5v(hash[h], MD5_LEN, iov, i ? 5 : 4);
+	    md5v(digest[h], MD5_LEN, iov, iovcnt);
 
 	    for (int j = 0; j < min; j++)
-		data[i + j] ^= hash[h][j];
+		data[i + j] ^= digest[h][j];
+
+	    iovcnt = 5;
+	    iov[4].iov_base = digest[h];
 	    h ^= 1;
 	}
 	hdr->flags ^= TAC_PLUS_UNENCRYPTED_FLAG;
@@ -535,6 +539,7 @@ void tac_read(struct context *ctx, int cur)
 {
     ssize_t len;
     int detached = 0;
+    ctx->fragmented = BISTATE_NO;
 
     ctx->last_io = io_now.tv_sec;
     context_lru_append(ctx);
@@ -553,8 +558,10 @@ void tac_read(struct context *ctx, int cur)
 	    return;
 
 	ctx->hdroff += len;
-	if (ctx->hdroff != TAC_PLUS_HDR_SIZE)
+	if (ctx->hdroff != TAC_PLUS_HDR_SIZE) {
+	    ctx->fragmented = BISTATE_YES;
 	    return;
+	}
     }
 #define CHECK_PROTOCOL(A,B) \
 	if (ctx->realm->allowed_protocol_ ## A != TRISTATE_YES && ctx->aaa_protocol != S_unknown \
@@ -636,8 +643,10 @@ void tac_read(struct context *ctx, int cur)
 	return;
     }
 
-    if (ctx->hdroff != TAC_PLUS_HDR_SIZE)
+    if (ctx->hdroff != TAC_PLUS_HDR_SIZE) {
+	ctx->fragmented = BISTATE_YES;
 	return;
+    }
 
 #ifdef WITH_SSL
     if (ctx->tls) {
@@ -699,8 +708,10 @@ void tac_read(struct context *ctx, int cur)
 	return;
 
     ctx->in->offset += len;
-    if (ctx->in->offset != ctx->in->length)
+    if (ctx->in->offset != ctx->in->length) {
+	ctx->fragmented = BISTATE_YES;
 	return;
+    }
 
     tac_session *session = RB_lookup_session(ctx->sessions, ctx->hdr.tac.session_id);
 
@@ -982,7 +993,9 @@ static void rad_set_fields(tac_session *session)
     if (memcmp(&session->radius_data->device_addr, &session->ctx->device_addr, sizeof(session->ctx->device_addr))) {
 	radixtree_t *rxt = lookup_hosttree(session->ctx->realm);
 	if (rxt) {
-	    tac_host *h = radix_lookup(rxt, &session->radius_data->device_addr, NULL);
+	    struct in6_addr agg_addr = session->radius_data->device_addr;
+	    check_aggregate(session->ctx->realm, &agg_addr, S_device);
+	    tac_host *h = radix_lookup(rxt, &agg_addr, NULL);
 	    if (h) {
 		complete_host(h);
 		session->host = h;
@@ -1001,6 +1014,7 @@ void rad_read(struct context *ctx, int cur)
 {
     ssize_t len;
     int detached = 0;
+    ctx->fragmented = BISTATE_NO;
 
     ctx->last_io = io_now.tv_sec;
     context_lru_append(ctx);
@@ -1019,8 +1033,10 @@ void rad_read(struct context *ctx, int cur)
 	    return;
 
 	ctx->hdroff += len;
-	if (ctx->hdroff != RADIUS_HDR_SIZE)
+	if (ctx->hdroff != RADIUS_HDR_SIZE) {
+	    ctx->fragmented = BISTATE_YES;
 	    return;
+	}
     }
 
     switch (ctx->hdr.rad.code) {
@@ -1038,7 +1054,12 @@ void rad_read(struct context *ctx, int cur)
 	return;
     }
 
-    u_int data_len = RADIUS_DATA_LEN(&ctx->hdr.rad);
+    int data_len = RADIUS_DATA_LEN(&ctx->hdr.rad);
+    if (data_len < 0 || (data_len > (int) (0xffff - RADIUS_HDR_SIZE))) {
+	//report(NULL, LOG_ERR, ~0, "%s: Illegal data size: %u", ctx->device_addr_ascii.txt, data_len);
+	cleanup(ctx, cur);
+	return;
+    }
 
     if (!ctx->in) {
 	ctx->in = mem_alloc(ctx->mem, sizeof(tac_pak) + data_len);
@@ -1059,8 +1080,10 @@ void rad_read(struct context *ctx, int cur)
 	return;
 
     ctx->in->offset += len;
-    if (ctx->in->offset != ctx->in->length)
+    if (ctx->in->offset != ctx->in->length) {
+	ctx->fragmented = BISTATE_YES;
 	return;
+    }
 
     rad_pak_hdr *pak = &ctx->in->pak.rad;
 

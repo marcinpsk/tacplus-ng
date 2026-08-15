@@ -181,6 +181,11 @@ struct fingerprint {
 	struct fingerprint *next;
     };
 };
+
+struct tls_psk_key {
+	str_t key;
+	enum token type;
+};
 #endif
 
 struct tac_host {
@@ -218,6 +223,7 @@ struct tac_host {
     tac_tags *tags;
     int tcp_timeout;		/* tcp connection idle timeout */
     int udp_timeout;		/* udp connection idle timeout */
+    int fragment_timeout;	/* timeout for fragmented packets */
     int session_timeout;	/* session idle timeout */
     int context_timeout;	/* shell context idle timeout */
     int dns_timeout;
@@ -231,8 +237,7 @@ struct tac_host {
     u_int debug;
 #ifdef WITH_SSL
     char *tls_psk_id;
-    u_char *tls_psk_key;
-    size_t tls_psk_key_len;
+    struct tls_psk_key *tls_psk_key;
     struct fingerprint *fingerprint;	// set via MAVIS
     enum token tls_peer_cert_validation;
     u_char tls_client_cert_type[2];
@@ -306,6 +311,7 @@ typedef struct {
     struct pwdat *passwd[PW_MAVIS + 1];
     struct ssh_key *ssh_key;
     struct ssh_key_id *ssh_key_id;
+    struct tac_acl *mavis_mfa_acl;
     tac_groups *groups;
     tac_tags *tags;
     mem_t *mem;
@@ -369,6 +375,23 @@ struct tac_rule {
 };
 
 struct sni_list;
+
+struct rewrite_expr {
+    char *name;
+#ifdef WITH_PCRE2
+    pcre2_code *code;
+    PCRE2_SPTR replacement;
+#endif
+    struct rewrite_expr *next;
+};
+typedef struct rewrite_expr tac_rewrite_expr;
+
+typedef struct {
+    TAC_NAME_ATTRIBUTES;
+    tac_rewrite_expr *expr;
+} tac_rewrite;
+
+struct tac_aggregate;
 
 struct realm {
     TAC_NAME_ATTRIBUTES;
@@ -440,7 +463,9 @@ struct realm {
     int caching_period;		/* user caching period */
     int warning_period;		/* password expiration warning period */
     int backend_failure_period;
+    char *backend_failure_file;
     struct tac_acl *mavis_user_acl;
+    struct tac_acl *mavis_mfa_acl;
     struct tac_acl *enable_user_acl;
     struct tac_acl *password_acl;
     time_t last_backend_failure;
@@ -456,6 +481,8 @@ struct realm {
     char *tls_key;
     char *tls_pass;
     char *tls_ciphers;
+    char *tls_cipher_suites;
+    char *tls_psk_dhe_groups;
     char *tls_cafile;
     int tls_verify_depth;
     struct sni_list *sni_list;
@@ -463,17 +490,19 @@ struct realm {
     size_t alpn_vec_len;
     rb_tree_t *fingerprints;
     char *tls_psk_hint;
+    enum token tls_psk_key_exchange;
     str_t crl_basedir;
 #endif
     u_int debug;
     int rulecount;
     struct io_dns_ctx *idc;
     radixtree_t *dns_tree_ptr[3];	// 0: static, 1-2: dynamic
+    struct tac_aggregate *aggregate_dev;
+    struct tac_aggregate *aggregate_net;
 };
 
 struct tac_session;
 typedef struct tac_session tac_session;
-
 
 struct radius_data {
     enum token type;
@@ -516,6 +545,15 @@ struct author_data {
     char **out_args;		/* output arguments */
     int is_shell;
     int is_cmd;
+    // out args:
+    char **attrs_m;		/* mandatory */
+    char **attrs_o;		/* optional (from NAS) */
+    char **attrs_a;		/* add optional (to NAS) */
+    int cnt_m;
+    int cnt_o;
+    int cnt_a;
+    u_char authen_type;
+    u_char authen_method;
 };
 
 struct authen_data {
@@ -561,9 +599,6 @@ struct tac_session {
     str_t *msgid;
     str_t *result;
     str_t *acct_type;
-
-    struct radius_data *radius_data;
-
     u_char arg_cnt;
     u_char *arg_len;
     u_char *argp;
@@ -583,23 +618,39 @@ struct tac_session {
     time_t session_timeout;
     struct author_data *author_data;
     struct authen_data *authen_data;
+    struct radius_data *radius_data;
     struct mavis_data *mavis_data;
     struct pwdat *enable;
     struct autonumber *autonumber;
     tac_profile *profile;
     union {
-	u_char mschap_version;
-	u_char chap_pppid;
+	struct {
+	    u_char *challenge;
+	    size_t challenge_len;
+	    u_char *response;
+	    size_t response_len;
+	    u_char pppid;
+	} chap;
+	struct {
+	    u_char *challenge;
+	    size_t challenge_len;
+	    u_char *nt_response;
+	    char *nt_key; // plain hex text, mavis only
+	    u_char version;
+	    u_char ident;
+	} mschap;
+	struct { // placed here to save memory, doesn't conflict with chap/mschap
+	    char *mfa_info;
+	    enum hint_enum mfa_hint;
+	    char *mfa_msg;
+	};
     };
-    u_char *chap_response;
-    size_t chap_response_len;
-    u_char *chap_challenge;
-    size_t chap_challenge_len;
     struct {
 	BISTATE(nac_addr_valid);
 	BISTATE(flag_mavis_info);
 	BISTATE(flag_mavis_auth);
 	BISTATE(flag_chalresp);
+	BISTATE(flag_mavis_mfa);
 	BISTATE(mavis_pending);
 	BISTATE(revmap_pending);
 	BISTATE(revmap_timedout);
@@ -612,22 +663,16 @@ struct tac_session {
 	BISTATE(chpass);
 	BISTATE(authorized);
 	BISTATE(eval_log_raw);
+	BISTATE(want_mfa);
     } __attribute__((__packed__));
     enum token mavisauth_res;
     u_int authfail_delay;
     u_int debug;
     u_char seq_no;		/* seq. no. of last packet exchanged */
     u_char version;
-    u_char pak_authen_type;
-    u_char pak_authen_method;
     void (*authfn)(tac_session *);
     void (*resumefn)(tac_session *);
-    char **attrs_m;		/* mandatory */
-    char **attrs_o;		/* optional (from NAS) */
-    char **attrs_a;		/* add optional (to NAS) */
-    int cnt_m;
-    int cnt_o;
-    int cnt_a;
+    char *mavis_custom_attr[S_custom_3 - S_custom_0 + 1];
     enum token attr_dflt;
     time_t password_expiry;
     u_long mavis_latency;
@@ -722,6 +767,8 @@ struct context {
 	BISTATE(udp);
 	BISTATE(radius_1_1);
 	BISTATE(use_tls_psk);
+	BISTATE(fragmented);
+	TRISTATE(tls_autodetect);
     } __attribute__((__packed__));
     enum token mavis_result;
     enum token aaa_protocol;
@@ -851,6 +898,7 @@ tac_user *lookup_user(tac_session *);
 mavis_ctx *lookup_mcx(tac_realm *);
 tac_realm *lookup_realm(char *, tac_realm *);
 radixtree_t *lookup_hosttree(tac_realm *);
+tac_rewrite *lookup_rewrite(char *name, tac_realm *r);
 
 struct revmap {
     time_t ttl;
@@ -865,7 +913,7 @@ void resume_session(tac_session *, int);
 void get_pkt_data(tac_session *, struct authen_start *, struct author *);
 
 enum token tac_script_eval_r(tac_session *, struct mavis_action *);
-void tac_script_parse(struct sym *sym, struct mavis_action **p, mem_t *mem, tac_realm *realm, tac_user *user);
+void tac_script_parse(struct sym *sym, struct mavis_action **p, mem_t * mem, tac_realm * realm, tac_user * user);
 void tac_script_expire_exec_context(struct context *);
 void tac_script_set_exec_context(tac_session *, char *);
 char *tac_script_get_exec_context(tac_session *);
@@ -904,6 +952,9 @@ void update_bio(struct context *);
 
 ssize_t sendto_spoof(sockaddr_union * from_addr, sockaddr_union * dest_addr, void *buf, size_t len);
 void dump_hex(u_char * data, size_t data_len, char **buf);
+void dump_hex_mschap(u_char *data, size_t data_len, char **buf);
+
+char hexbyte(char *);
 
 int compare_fingerprint(const void *a, const void *b);
 struct fingerprint *lookup_fingerprint(struct context *ctx);
@@ -919,8 +970,12 @@ extern int die_when_idle;
 #define CLIENT_BUG_NO_MESSAGE_AUTHENTICATOR	0x20
 #define CLIENT_BUG_NOT_OBFUSCATED	0x40
 #define CLIENT_BUG_BAD_TLS_VERSION	0x80
+#define CLIENT_BUG_MALFORMED_NAS_ARGS	0x100
+#define CLIENT_BUG_NO_INHERIT		0x80000000
 
 char *check_client_bug_invalid_remote_address(tac_session *);
+
+void check_aggregate(tac_realm * r, struct in6_addr *, enum token);
 
 #endif				/* __HEADERS_H_ */
 /*

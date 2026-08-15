@@ -145,7 +145,8 @@ static void parse_listen(struct sym *sym)
 	    parse(sym, S_equal);
 	    if (strlen(sym->buf) >= SCM_REALM_SIZE)
 		parse_error(sym, "Maximum tag length is limited to %d characters.", SCM_REALM_SIZE - 1);
-	    strncpy(ctx->tag, sym->buf, SCM_REALM_SIZE + 1);
+	    strncpy(ctx->tag, sym->buf, SCM_REALM_SIZE);
+	    ctx->tag[SCM_REALM_SIZE] = 0;
 	    ctx->tag_len = strlen(ctx->tag);
 	    sym_get(sym);
 	    break;
@@ -207,6 +208,20 @@ static void parse_listen(struct sym *sym)
 		ctx->dtls_versions = 0;
 		sym_get(sym);
 		break;
+	    case S_auto:
+		sym_get(sym);
+		ctx->sd_flags |= SCM_FLAG_TLSAUTO;
+		if (!ctx->tls_versions) {
+		    ctx->tls_versions = (TLS1_2_VERSION & 0xff)
+			| ((TLS1_3_VERSION & 0xff) << 8);
+		    ctx->dtls_versions = (DTLS1_VERSION & 0xff)
+			| ((DTLS1_2_VERSION & 0xff) << 16)
+#ifdef DTLS1_3_VERSION
+			| ((DTLS1_3_VERSION & 0xff) << 24)
+#endif
+			;
+		}
+		break;
 	    case S_TLS1_2:
 	    case S_TLS1_3:
 		ctx->tls_versions = 0;
@@ -240,15 +255,15 @@ static void parse_listen(struct sym *sym)
 			ctx->dtls_versions <<= 8;
 			ctx->dtls_versions |= DTLS1_2_VERSION & 0xff;	// ~2
 			break;
-#ifdef DTLS1_2_VERSION
+#ifdef DTLS1_3_VERSION
 		    case S_DTLS1_3:
 			ctx->dtls_versions <<= 8;
-			ctx->dtls_versions |= DTLS1_2_VERSION & 0xff;	// ~3
+			ctx->dtls_versions |= DTLS1_3_VERSION & 0xff;	// ~3
 			break;
 #endif
 		    default:
 			parse_error_expect(sym, S_DTLS1_0, S_DTLS1_2,
-#ifdef DTLS1_2_VERSION
+#ifdef DTLS1_3_VERSION
 					   S_DTLS1_3,
 #endif
 					   S_unknown);

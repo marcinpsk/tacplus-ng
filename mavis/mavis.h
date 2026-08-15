@@ -206,6 +206,7 @@ extern struct av_char av_char[];
 #define AV_V_TACTYPE_DACL		"DACL"
 #define AV_V_TACTYPE_MSCHAP		"MSCH"
 #define AV_V_TACTYPE_CHAP		"CHAP"
+#define AV_V_TACTYPE_MFA		"MFA"
 typedef struct av_ctx av_ctx;
 
 struct av_ctx {
@@ -374,6 +375,7 @@ struct common_data {
     char *gcorepath;
     char *debug_cmd;
     int debugtty;
+    int debugstderr;
     pid_t pid;
     int users_min;
     int users_max;

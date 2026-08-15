@@ -39,6 +39,7 @@
 
 #include "headers.h"
 #include "misc/md5crypt.h"
+#include <utime.h>
 
 static const char rcsid[] __attribute__((used)) = "$Id$";
 
@@ -111,9 +112,9 @@ static void mavis_callback(tac_session *session)
     mavis_switch(session, avc, rc);
 }
 
-static void dump_hex_mschap(u_char *data, size_t data_len, char **buf)
+void dump_hex_mschap(u_char *data, size_t data_len, char **buf)
 {
-    char hex[16] = "0123456789ABCDEF";
+    char *hex = "0123456789ABCDEF";
     for (size_t i = 0; i < data_len; i++) {
 	*(*buf)++ = hex[data[i] >> 4];
 	*(*buf)++ = hex[data[i] & 15];
@@ -170,23 +171,43 @@ void mavis_lookup(tac_session *session, void (*f)(tac_session *), const char *co
     if (r->name.txt)
 	av_set(avc, AV_A_REALM, r->name.txt);
 
-    if (session->password && strcmp(type, AV_V_TACTYPE_INFO))
-	av_set(avc, AV_A_PASSWORD, session->password);
-    if (session->password_new && !strcmp(type, AV_V_TACTYPE_CHPW))
-	av_set(avc, AV_A_PASSWORD_NEW, session->password_new);
+    if (strcmp(type, AV_V_TACTYPE_INFO)) {
+	if (session->password)
+	    av_set(avc, AV_A_PASSWORD, session->password);
+	if (session->password_new)
+	    av_set(avc, AV_A_PASSWORD_NEW, session->password_new);
+    }
 
-    if (session->chap_challenge_len && session->chap_response_len && (!strcmp(type, AV_V_TACTYPE_CHAP) || !strcmp(type, AV_V_TACTYPE_MSCHAP))) {
-	char buf[((session->chap_challenge_len + session->chap_response_len) << 1) + 5];
-	char *b = buf;
-	if (!strcmp(type, AV_V_TACTYPE_CHAP)) {
-	    dump_hex_mschap(&session->chap_pppid, 1, &b);
+
+    if (!strcmp(type, AV_V_TACTYPE_CHAP)) {
+	if (session->chap.challenge_len && session->chap.response_len) {
+	    char buf[((session->chap.challenge_len + session->chap.response_len) << 1) + 5];
+	    char *b = buf;
+	    if (!strcmp(type, AV_V_TACTYPE_CHAP)) {
+		dump_hex_mschap(&session->chap.pppid, 1, &b);
+		*b++ = ' ';
+	    }
+	    dump_hex_mschap(session->chap.challenge, session->chap.challenge_len, &b);
 	    *b++ = ' ';
+	    dump_hex_mschap(session->chap.response, session->chap.response_len, &b);
+	    *b = 0;
+	    av_set(avc, AV_A_CHALLENGE, buf);
 	}
-	dump_hex_mschap(session->chap_challenge, session->chap_challenge_len, &b);
-	*b++ = ' ';
-	dump_hex_mschap(session->chap_response, session->chap_response_len, &b);
-	*b = 0;
-	av_set(avc, AV_A_CHALLENGE, buf);
+    }
+
+    if (!strcmp(type, AV_V_TACTYPE_MSCHAP)) {
+	if (session->mschap.challenge_len && session->mschap.nt_response) {
+#ifndef MSCHAP_NT_RESPONSE_LEN
+#define MSCHAP_NT_RESPONSE_LEN 24
+#endif
+	    char buf[((session->mschap.challenge_len + MSCHAP_NT_RESPONSE_LEN) << 1) + 5];
+	    char *b = buf;
+	    dump_hex_mschap(session->mschap.challenge, session->mschap.challenge_len, &b);
+	    *b++ = ' ';
+	    dump_hex_mschap(session->mschap.nt_response, MSCHAP_NT_RESPONSE_LEN, &b);
+	    *b = 0;
+	    av_set(avc, AV_A_CHALLENGE, buf);
+	}
     }
 
     if (!session->ctx->realm->caching_period && !strcmp(type, AV_V_TACTYPE_INFO) && session->author_data) {
@@ -211,7 +232,9 @@ void mavis_lookup(tac_session *session, void (*f)(tac_session *), const char *co
 
     session->eval_log_raw = 1;
     for (int i = 0; i < 4; i++)
-	if (session->ctx->realm->mavis_custom_attr[i])
+	if (session->mavis_custom_attr[i])
+	    av_set(avc, custom_attrs[i], session->mavis_custom_attr[i]);
+	else if (session->ctx->realm->mavis_custom_attr[i])
 	    av_set(avc, custom_attrs[i], eval_log_format(session, session->ctx, NULL, session->ctx->realm->mavis_custom_attr[i], io_now.tv_sec, NULL));
     session->eval_log_raw = 0;
 
@@ -299,7 +322,8 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	    if (verdict && !session->ctx->realm->caching_period && !strcmp(verdict, AV_V_BOOL_TRUE))
 		session->authorized = 1;
 
-	    if (!u || (u->dynamic && strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHAP) && strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_MSCHAP))) {
+	    if (!u || (u->dynamic && (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_AUTH) || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHPW)
+				      || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_INFO)))) {
 		struct sym sym = {.filename = session->username.txt,.line = 1,.flag_prohibit_include = 1 };
 
 		if (!r->caching_period && session->user) {
@@ -378,12 +402,17 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	if (u->dynamic)
 	    u->dynamic = io_now.tv_sec + r->caching_period;
 
-	if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHAP) || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_MSCHAP)) {
+	if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHAP)) {
 	    session->mavisauth_res = S_permit;
+	} else if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_MSCHAP)) {
+	    session->mavisauth_res = S_permit;
+	    char *s = av_get(avc, AV_A_PASSWORD);
+	    if (s)
+	        session->mschap.nt_key = mem_strdup(session->mem, s);
 	}
 
 	session->passwd_mustchange = av_get(avc, AV_A_PASSWORD_MUSTCHANGE) ? 1 : 0;
-	// password changes are supported for ASCII login anc CHPASS only
+	// password changes are supported for ASCII login and CHPASS only
 	if (session->passwd_mustchange && !session->passwd_changeable) {
 	    session->passwd_mustchange = 0;
 	    av_set(avc, AV_A_RESULT, AV_V_RESULT_FAIL);
@@ -414,7 +443,7 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 		salt[1] = '1';
 		salt[2] = '$';
 		for (int i = 3; i < 11; i++)
-		    salt[i] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"[random() % 64];
+		    salt[i] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"[arc4random_uniform(64)];
 		salt[11] = '$';
 		salt[12] = 0;
 		crypt = md5crypt(pass, salt);
@@ -428,6 +457,13 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	}
     } else if (result && !strcmp(result, AV_V_RESULT_ERROR)) {
 	session->mavisauth_res = S_error;
+	if (session->ctx->realm->backend_failure_file) {
+	    if (utime(session->ctx->realm->backend_failure_file, NULL)) {
+		int fd = open(session->ctx->realm->backend_failure_file, O_WRONLY | O_CREAT | O_EXCL, 0644);
+		if (fd > -1)
+		    close(fd);
+	    }
+	}
 	r->last_backend_failure = io_now.tv_sec;
 	for (; r && session->mavisauth_res; r = r->parent)
 	    if (r->usertable) {

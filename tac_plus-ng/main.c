@@ -302,14 +302,21 @@ static void periodics(struct context *ctx, int cur __attribute__((unused)))
 
 static void periodics_ctx(struct context *ctx, int cur __attribute__((unused)))
 {
-    if (!ctx->out && !ctx->delayed && (ctx->host->tcp_timeout || ctx->dying) && (ctx->last_io + ctx->host->tcp_timeout < io_now.tv_sec)) {
-	cleanup(ctx, ctx->sock);
-	return;
-    }
+    if (!ctx->out && !ctx->delayed) {
+	if ((ctx->udp != BISTATE_NO) && (ctx->host->tcp_timeout || ctx->dying) && (ctx->last_io + ctx->host->tcp_timeout < io_now.tv_sec)) {
+	    cleanup(ctx, ctx->sock);
+	    return;
+	}
 
-    if (!ctx->out && !ctx->delayed && (ctx->host->udp_timeout || ctx->dying) && (ctx->last_io + ctx->host->udp_timeout < io_now.tv_sec)) {
-	cleanup(ctx, ctx->sock);
-	return;
+	if ((ctx->udp == BISTATE_YES) && (ctx->host->udp_timeout || ctx->dying) && (ctx->last_io + ctx->host->udp_timeout < io_now.tv_sec)) {
+	    cleanup(ctx, ctx->sock);
+	    return;
+	}
+
+	if (!ctx->fragmented && (ctx->host->fragment_timeout || ctx->dying) && (ctx->last_io + ctx->host->fragment_timeout < io_now.tv_sec)) {
+	    cleanup(ctx, ctx->sock);
+	    return;
+	}
     }
 
     for (rb_node_t * rbnext, *rbn = RB_first(ctx->sessions); rbn; rbn = rbnext) {
@@ -587,7 +594,7 @@ static struct context_px *new_context_px(struct io_context *io, struct scm_data_
 {
     struct context_px *c = calloc(1, sizeof(struct context_px));
     c->io = io;
-    memcpy(&c->sd, sd, sizeof(*sd));
+    c->sd = *sd;
     return c;
 }
 
@@ -812,6 +819,26 @@ static void set_host_by_psk_identity(struct context *ctx, char *t)
 static int check_rpk(struct context *ctx, tac_host * h);
 #endif
 
+#ifdef OPENSSL_IS_BORINGSSL
+static int ASN1_TIME_to_tm(const ASN1_TIME *s, struct tm *tm)
+{
+    memset(tm, 0, sizeof(struct tm));
+    const char *data = (const char *) s->data;
+
+    if (sscanf(data, "%2d%2d%2d%2d%2d%2d", &tm->tm_year, &tm->tm_mon, &tm->tm_mday, &tm->tm_hour, &tm->tm_min, &tm->tm_sec) != 6)
+	return 0;
+
+    tm->tm_mon -= 1;
+
+    if (s->type == V_ASN1_GENERALIZEDTIME)
+	tm->tm_year -= 1900;
+    else if (s->type == V_ASN1_UTCTIME && tm->tm_year < 70)
+	tm->tm_year += 100;
+
+    return 1;
+}
+#endif
+
 static int cert_verify(struct context *ctx);
 
 static void accept_control_tls(struct context *ctx, int cur)
@@ -863,9 +890,9 @@ static void accept_control_tls(struct context *ctx, int cur)
 #ifndef OPENSSL_NO_PSK
     if (ctx->tls_psk_identity.txt) {
 	if (SSL_version(ctx->tls) == TLS1_3_VERSION) {
-	    unsigned char buf[ctx->host->tls_psk_key_len];
-	    if (ctx->host->tls_psk_key_len != SSL_SESSION_get_master_key(SSL_get_session(ctx->tls), buf, ctx->host->tls_psk_key_len)
-		|| memcmp(buf, ctx->host->tls_psk_key, ctx->host->tls_psk_key_len)) {
+	    unsigned char buf[ctx->host->tls_psk_key->key.len];
+	    if (ctx->host->tls_psk_key->key.len != SSL_SESSION_get_master_key(SSL_get_session(ctx->tls), buf, ctx->host->tls_psk_key->key.len)
+		|| memcmp(buf, ctx->host->tls_psk_key->key.txt, ctx->host->tls_psk_key->key.len)) {
 		// OpenSSL fall-through due to wrong client psk
 		reject_conn(ctx, "PSK", __func__, __LINE__);
 		return;
@@ -1075,15 +1102,15 @@ static void accept_control_tls(struct context *ctx, int cur)
 	    }
 
 	    if (ctx->tls_peer_cert_subject.txt) {
-		char *cn = alloca(ctx->tls_peer_cert_subject.len + 1);
+		char subj[ctx->tls_peer_cert_subject.len + 1];
 
 		// normalize subject
-		cn[ctx->tls_peer_cert_subject.len] = 0;
 		for (size_t i = 0; i < ctx->tls_peer_cert_subject.len; i++)
-		    cn[i] = tolower(ctx->tls_peer_cert_subject.txt[i]);
+		    subj[i] = tolower(ctx->tls_peer_cert_subject.txt[i]);
+		subj[ctx->tls_peer_cert_subject.len] = 0;
 
 		// set cn
-		cn = strstr(cn, "/cn=");
+		char *cn = strstr(subj, "/cn=");
 		if (cn) {
 		    cn += 4;
 		    char *e = strchr(cn, '/');
@@ -1133,7 +1160,9 @@ static void accept_control_tls(struct context *ctx, int cur)
 				    continue;
 				radixtree_t *rxt = lookup_hosttree(ctx->realm);
 				if (rxt) {
-				    tac_host *h = radix_lookup(rxt, &addr, NULL);
+				    struct in6_addr agg_addr = addr;
+				    check_aggregate(ctx->realm, &agg_addr, S_device);
+				    tac_host *h = radix_lookup(rxt, &agg_addr, NULL);
 				    if (h) {
 					ctx->host = h;
 					prio = CERT_SAN_PRIO;
@@ -1304,10 +1333,7 @@ void complete_host(tac_host *h)
 	HS(tls_peer_cert_san_validation, TRISTATE_DUNNO);
 #ifndef OPENSSL_NO_PSK
 	HS(tls_psk_id, NULL);
-	if (!h->tls_psk_key) {
-	    h->tls_psk_key = hp->tls_psk_key;
-	    h->tls_psk_key_len = hp->tls_psk_key_len;
-	}
+	HS(tls_psk_key, NULL);
 #endif
 	HS(tls_peer_cert_validation, S_unknown);
 	if (!h->tls_client_cert_type_len) {
@@ -1332,7 +1358,8 @@ void complete_host(tac_host *h)
 	HS(max_rounds);
 #undef HS
 	h->debug |= hp->debug;
-	h->bug_compatibility |= hp->bug_compatibility;
+	if (!(h->bug_compatibility & CLIENT_BUG_NO_INHERIT))
+	    h->bug_compatibility |= hp->bug_compatibility;
 
 	if (h->enable) {
 	    if (hp->enable) {
@@ -1633,8 +1660,11 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 
     tac_host *h = NULL;
     radixtree_t *rxt = lookup_hosttree(r);
-    if (rxt)
-	h = radix_lookup(rxt, &ctx->device_addr, NULL);
+    if (rxt) {
+	struct in6_addr agg_addr = ctx->device_addr;
+	check_aggregate(r, &agg_addr, S_device);
+	h = radix_lookup(rxt, &agg_addr, NULL);
+    }
 
     if (h) {
 	complete_host(h);
@@ -1644,7 +1674,9 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 	    ctx->realm = r;
 	    rxt = lookup_hosttree(r);
 	    if (rxt) {
-		h = radix_lookup(rxt, &ctx->device_addr, NULL);
+		struct in6_addr agg_addr = ctx->device_addr;
+		check_aggregate(r, &agg_addr, S_device);
+		h = radix_lookup(rxt, &agg_addr, NULL);
 		if (h)
 		    complete_host(h);
 	    }
@@ -1655,10 +1687,32 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
     io_register(ctx->io, ctx->sock, ctx);
 
     context_lru_append(ctx);
+#ifdef WITH_SSL
+    ctx->tls_autodetect = ctx->realm->tls_autodetect;
+    if (ctx->tls_autodetect == TRISTATE_DUNNO && sd_ext->sd.flags & SCM_FLAG_TLSAUTO)
+	ctx->tls_autodetect = TRISTATE_YES;
     ctx->tls_versions = sd_ext->sd.tls_versions;
-    ctx->use_tls = (sd_ext->sd.tls_versions && sd_ext->sd.type == SCM_ACCEPT) ? BISTATE_YES : BISTATE_NO;
-    ctx->use_dtls = (sd_ext->sd.tls_versions && sd_ext->sd.type == SCM_UDPDATA) ? BISTATE_YES : BISTATE_NO;
+    if ((ctx->tls_autodetect == TRISTATE_YES) && !ctx->tls_versions) {
+	if (ctx->realm->tls && sd_ext->sd.type == SCM_ACCEPT) {
+	    ctx->tls_versions = TLS1_2_VERSION & 0xff;
+	    ctx->tls_versions <<= 8;
+	    ctx->tls_versions |= TLS1_3_VERSION & 0xff;
+	} else if (ctx->realm->dtls && sd_ext->sd.type == SCM_UDPDATA) {
+	    ctx->tls_versions = DTLS1_VERSION & 0xff;
+	    ctx->tls_versions <<= 8;
+	    ctx->tls_versions |= DTLS1_2_VERSION & 0xff;
+#ifdef DTLS1_3_VERSION
+	    ctx->tls_versions <<= 8;
+	    ctx->tls_versions |= DTLS1_3_VERSION & 0xff;
+#endif
+	}
+    }
+    if (ctx->tls_versions && !ctx->tls_autodetect) {
+	ctx->use_tls = (sd_ext->sd.type == SCM_ACCEPT) ? BISTATE_YES : BISTATE_NO;
+	ctx->use_dtls = (sd_ext->sd.type == SCM_UDPDATA) ? BISTATE_YES : BISTATE_NO;
+    }
     ctx->use_tls_psk = (r->use_tls_psk && (sd_ext->sd.flags & SCM_FLAG_TLSPSK)) ? BISTATE_YES : BISTATE_NO;
+#endif
     if (inject_buf) {
 	ctx->udp = BISTATE_YES;
 	ctx->inject_buf = mem_alloc(ctx->mem, INJECT_BUF_SIZE);
@@ -1914,11 +1968,11 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 	    // DTLS Application Data, but we haven't seen the handshake, possibly due to a daemon
 	    // restart. Just return some junk data back , the peer is likely to retry with a new handshake.
 	    char junk[128] = { 0 };
-	    write(ctx->sock, junk, sizeof(junk));
+	    UNUSED_RESULT(write(ctx->sock, junk, sizeof(junk)));
 	    cleanup(ctx, ctx->sock);
 	    return;
 	}
-	if (ctx->realm->tls_autodetect == TRISTATE_YES && tmp[0] == 0x16) {
+	if (ctx->tls_autodetect == TRISTATE_YES && tmp[0] == 0x16) {
 	    if (ctx->udp)
 		ctx->use_dtls = (tmp[1] == 0xfe && dtls_ver_ok(ctx->tls_versions, tmp[2])) ? BISTATE_YES : BISTATE_NO;
 	    else
@@ -1957,7 +2011,7 @@ static void accept_control_check_tls_final(struct context *ctx)
     if (ctx->host && (ctx->use_tls || ctx->use_dtls)) {
 	if ((ctx->use_tls && !ctx->realm->tls && !ctx->realm->use_tls_psk) || (ctx->use_dtls && !ctx->realm->dtls && !ctx->realm->use_tls_psk)) {
 	    report(NULL, LOG_ERR, ~0, "%s but realm %s isn't configured suitably",
-		   (ctx->realm->tls_autodetect == TRISTATE_YES) ? "TLS detected" : "spawnd set TLS flag", ctx->realm->name.txt);
+		   (ctx->tls_autodetect == TRISTATE_YES) ? "TLS detected" : "spawnd set TLS flag", ctx->realm->name.txt);
 	    cleanup(ctx, ctx->sock);
 	    return;
 	}
@@ -2005,7 +2059,9 @@ static void accept_control_check_tls_final(struct context *ctx)
 	    SSL_set_min_proto_version(ctx->tls, ver);
 	    SSL_set_fd(ctx->tls, ctx->sock);
 	    SSL_set_session_id_context(ctx->tls, (const unsigned char *) &ctx, sizeof(ctx));
+#ifndef OPENSSL_IS_BORINGSSL
 	    SSL_set_num_tickets(ctx->tls, 0);
+#endif
 
 	    if (!ctx->use_tls_psk) {
 #if OPENSSL_VERSION_NUMBER >= 0x30200000
@@ -2026,15 +2082,17 @@ static void accept_control_check_tls_final(struct context *ctx)
 	accept_control_tls(ctx, ctx->sock);
 	return;
     }
-    if (!ctx->host)
-	reject_conn(ctx, ctx->hint, __func__, __LINE__);
-    else
-	accept_control_final(ctx);
+    accept_control_final(ctx);
 }
 #endif
 
 static void accept_control_final(struct context *ctx)
 {
+    if (!ctx->host) {
+	reject_conn(ctx, ctx->hint, __func__, __LINE__);
+	return;
+    }
+
     static int count = 0;
     tac_session session = {.ctx = ctx };
 
@@ -2122,9 +2180,9 @@ static void accept_control(struct context *ctx, int cur)
 	    rad_pak_hdr *hdr = (rad_pak_hdr *) (&u.sd_udp.data);
 	    if (u.sd_udp.data_len != ntohs(hdr->length))
 		return;
-	    memcpy(&sd_ext.sd, &u.sd_udp, sizeof(struct scm_data_udp));
+	    sd_ext.sd_udp = u.sd_udp;
 	    users_inc();
-	    set_sd_realm(cur, &sd_ext);
+	    set_sd_realm(s, &sd_ext);
 	    accept_control_common(s, &sd_ext, NULL, u.sd_udp.data, u.sd_udp.data_len);
 	    return;
 	}
@@ -2132,12 +2190,12 @@ static void accept_control(struct context *ctx, int cur)
 	users_dec();
 	return;
     case SCM_ACCEPT:
-	memcpy(&sd_ext.sd, &u.sd, sizeof(struct scm_data_accept));
+	sd_ext.sd = u.sd;
 	users_inc();
 	int one = 1;
 	setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char *) &one, (socklen_t) sizeof(one));
 	setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *) &one, (socklen_t) sizeof(one));
-	set_sd_realm(cur, &sd_ext);
+	set_sd_realm(s, &sd_ext);
 	if ((sd_ext.sd.flags & SCM_FLAG_HAPROXY) || (sd_ext.realm->haproxy_autodetect == TRISTATE_YES))
 	    accept_control_px(s, &sd_ext);
 	else

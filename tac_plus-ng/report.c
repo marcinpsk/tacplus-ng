@@ -85,7 +85,7 @@ void report(tac_session *session, int priority, int level, char *fmt, ...)
 	    fflush(stderr);
 	    return;
 	}
-	if (common_data.debugtty || common_data.debug_redirected) {
+	if (common_data.debugtty || common_data.debug_redirected || common_data.debugstderr) {
 	    static pid_t pid = 0;
 	    if (!pid)
 		pid = getpid();

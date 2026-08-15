@@ -71,6 +71,8 @@ int spawnd_spawn_child(pid_t * pidp)
 	snprintf(deb, 20, "%u", common_data.debug);
 	argv[i++] = deb;
     }
+    if (common_data.debugstderr)
+	argv[i++] = "-D";
     argv[i++] = spawnd_data.child_config;
     argv[i++] = spawnd_data.child_id;
     argv[i++] = NULL;

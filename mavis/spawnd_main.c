@@ -410,7 +410,7 @@ int spawnd_main(int argc, char **argv, char **envp, char *id)
 	    spawnd_data.inetd = 1;
 	}
 
-    while ((c = getopt(argc, argv, "vPd:i:p:bf1I:")) != EOF)
+    while ((c = getopt(argc, argv, "vPd:i:p:bf1I:D")) != EOF)
 	switch (c) {
 	case 'v':
 	    common_data.version_only = 1;
@@ -420,6 +420,9 @@ int spawnd_main(int argc, char **argv, char **envp, char *id)
 	    break;
 	case 'd':
 	    common_data.debug = atoi(optarg) & DEBUG_ALL_FLAG;
+	    break;
+	case 'D':
+	    common_data.debugstderr = 1;
 	    break;
 	case 'b':
 	    spawnd_data.background = 1;
@@ -643,7 +646,7 @@ void scm_main(int argc, char **argv, char **envp)
 	exit(0);
     }
 
-    while ((c = getopt(argc, argv, "vPd:")) != EOF)
+    while ((c = getopt(argc, argv, "vPd:D")) != EOF)
 	switch (c) {
 	case 'v':
 	    fprintf(stderr, "%s version %s\n", common_data.progname, common_data.version);
@@ -659,6 +662,9 @@ void scm_main(int argc, char **argv, char **envp)
 		    common_data.debug |= (i & DEBUG_ALL_FLAG);
 		break;
 	    }
+	case 'D':
+	    common_data.debugtty = 1;
+	    break;
 	default:
 	    common_usage();
 	}

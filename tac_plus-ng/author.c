@@ -101,7 +101,6 @@ void author(tac_session *session, tac_pak_hdr *hdr)
     u_char *p, *argsizep;
     char **cmd_argp;
     struct author *pak = tac_payload(hdr, struct author *);
-    struct author_data *data;
 
 #define DEBAUTHZ session, LOG_DEBUG, DEBUG_AUTHOR_FLAG
 
@@ -115,8 +114,9 @@ void author(tac_session *session, tac_pak_hdr *hdr)
     /* arg length data starts here */
     p += pak->arg_cnt;
 
-    session->pak_authen_type = pak->authen_type;
-    session->pak_authen_method = pak->authen_method;
+    session->author_data = mem_alloc(session->mem, sizeof(struct author_data));
+    session->author_data->authen_type = pak->authen_type;
+    session->author_data->authen_method = pak->authen_method;
 
     str_set(&session->username, mem_strndup(session->mem, p, pak->user_len), pak->user_len);
     p += pak->user_len;
@@ -136,8 +136,7 @@ void author(tac_session *session, tac_pak_hdr *hdr)
     if (session->nac_addr_valid)
 	get_revmap_nac(session);
 
-    data = mem_alloc(session->mem, sizeof(struct author_data));
-    data->in_cnt = pak->arg_cnt;
+    session->author_data->in_cnt = pak->arg_cnt;
 
     eval_args(session, p, argsizep, pak->arg_cnt);
 
@@ -148,14 +147,13 @@ void author(tac_session *session, tac_pak_hdr *hdr)
 	p += *argsizep++;
     }
 
-    data->in_args = cmd_argp;	/* input command arguments */
-    session->author_data = data;
+    session->author_data->in_args = cmd_argp;	/* input command arguments */
 
     session->author_data->is_cmd = session->cmdline.len;
     if (session->service.txt)
 	session->author_data->is_shell = !strcmp(session->service.txt, "shell");
 
-    if (bad_nas_args(session, data)) {
+    if (bad_nas_args(session, session->author_data)) {
 	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_FAIL, session->message.txt, NULL, 0, NULL);
 	return;
     }
@@ -193,13 +191,26 @@ static int bad_nas_args(tac_session *session, struct author_data *data)
 	    size_t k = strcspn(data->in_args[i], "=*");
 	    if (!k || !data->in_args[i][k]) {
 		char buf[MAX_INPUT_LINE_LEN];
-		snprintf(buf, sizeof(buf), "Illegal arg from NAS: %s", data->in_args[i]);
-		data->status = TAC_PLUS_AUTHOR_STATUS_ERROR;
-		data->admin_msg = mem_strdup(session->mem, buf);
-		report(session, LOG_ERR, ~0, "%s: %s", session->ctx->device_addr_ascii.txt, buf);
-		return -1;
+		if (session->ctx->host->bug_compatibility & CLIENT_BUG_MALFORMED_NAS_ARGS) {
+		    snprintf(buf, sizeof(buf), "Ignoring illegal arg from NAS: %s", data->in_args[i]);
+		    report(session, LOG_ERR, ~0, "%s: %s", session->ctx->device_addr_ascii.txt, buf);
+		    data->in_args[i] = NULL;
+		} else {
+		    snprintf(buf, sizeof(buf), "Illegal arg from NAS: %s", data->in_args[i]);
+		    report(session, LOG_ERR, ~0, "%s: %s", session->ctx->device_addr_ascii.txt, buf);
+		    data->status = TAC_PLUS_AUTHOR_STATUS_ERROR;
+		    data->admin_msg = mem_strdup(session->mem, buf);
+		    return -1;
+		}
 	    }
 	}
+    }
+    if (session->ctx->host->bug_compatibility & CLIENT_BUG_MALFORMED_NAS_ARGS) {
+	int j = 0;
+	for (int i = 0; i < data->in_cnt; i++)
+	    if (data->in_args[i])
+		data->in_args[j++] = data->in_args[i];
+	data->in_cnt = j;
     }
     return 0;
 }
@@ -289,15 +300,15 @@ static void do_author(tac_session *session)
 	    return;
     }
 
-    if (session->mavisauth_res == TAC_PLUS_AUTHEN_STATUS_ERROR) {
+    if (session->mavisauth_res == S_error && session->ctx->host->authfallback != TRISTATE_YES) {
 	report(DEBAUTHZ, "user '%s': backend failure", session->username.txt);
 	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_ERROR, session->message.txt, NULL, 0, NULL);
 	return;
     }
 
     if (!session->user) {
-	if ((session->ctx->host->authz_if_authc == TRISTATE_YES) && session->pak_authen_method != TAC_PLUS_AUTHEN_METH_TACACSPLUS
-	    && session->pak_authen_type == TAC_PLUS_AUTHEN_TYPE_ASCII) {
+	if ((session->ctx->host->authz_if_authc == TRISTATE_YES) && session->author_data->authen_method != TAC_PLUS_AUTHEN_METH_TACACSPLUS
+	    && session->author_data->authen_type == TAC_PLUS_AUTHEN_TYPE_ASCII) {
 	    report(DEBAUTHZ, "user '%s' not found but authenticated locally, permitted by default", session->username.txt);
 	    send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_PASS_ADD, session->message.txt, NULL, 0, NULL);
 	    return;
@@ -358,16 +369,16 @@ static void do_author(tac_session *session)
 	    for (; *t && *t != '\n' && !attr_p; t++) {
 		switch (*t) {
 		case '*':
-		    attr_p = &session->attrs_o;
-		    cnt_p = &session->cnt_o;
+		    attr_p = &session->author_data->attrs_o;
+		    cnt_p = &session->author_data->cnt_o;
 		    break;
 		case '=':
-		    attr_p = &session->attrs_m;
-		    cnt_p = &session->cnt_m;
+		    attr_p = &session->author_data->attrs_m;
+		    cnt_p = &session->author_data->cnt_m;
 		    break;
 		case '+':
-		    attr_p = &session->attrs_a;
-		    cnt_p = &session->cnt_a;
+		    attr_p = &session->author_data->attrs_a;
+		    cnt_p = &session->author_data->cnt_a;
 		    plus = t;
 		    *plus = '*';
 		    break;
@@ -386,7 +397,7 @@ static void do_author(tac_session *session)
     }
 
     /* Allocate space for in + out args */
-    out_args = mem_alloc(session->mem, sizeof(char *) * (data->in_cnt + session->cnt_m + session->cnt_a));
+    out_args = mem_alloc(session->mem, sizeof(char *) * (data->in_cnt + session->author_data->cnt_m + session->author_data->cnt_a));
 
     outp = out_args;
 
@@ -406,13 +417,13 @@ static void do_author(tac_session *session)
 	if (na[strcspn(na, "*=")] == '=') {
 	    /* NAS AV pair is mandatory */
 
-	    if ((da = lookup_attrval(session->attrs_m, session->cnt_m, na))) {
+	    if ((da = lookup_attrval(session->author_data->attrs_m, session->author_data->cnt_m, na))) {
 		report(DEBAUTHZ, "nas:%s, svr:%s -> add %s (%c)", na, da, da, 'a');
 		*outp++ = da, out_cnt++;
 		continue;
 	    }
 
-	    if ((da = lookup_attr(session->attrs_o, session->cnt_o, na))) {
+	    if ((da = lookup_attr(session->author_data->attrs_o, session->author_data->cnt_o, na))) {
 		report(DEBAUTHZ, "nas:%s, svr:%s -> add %s (%c)", na, da, na, 'b');
 		*outp++ = na, out_cnt++;
 		continue;
@@ -429,10 +440,10 @@ static void do_author(tac_session *session)
 	    char c;
 	    /* NAS AV pair is optional */
 
-	    if ((c = 'e', da = lookup_attrval(session->attrs_m, session->cnt_m, na)) ||	// exact match in mandatory list
-		(c = 'f', da = lookup_attr(session->attrs_m, session->cnt_m, na)) ||	// attribute match in mandatory list
-		(c = 'g', da = lookup_attrval(session->attrs_o, session->cnt_o, na)) ||	// exact match in optional list
-		(c = 'h', da = lookup_attr(session->attrs_o, session->cnt_o, na))	// attribute match in optional list
+	    if ((c = 'e', da = lookup_attrval(session->author_data->attrs_m, session->author_data->cnt_m, na)) ||	// exact match in mandatory list
+		(c = 'f', da = lookup_attr(session->author_data->attrs_m, session->author_data->cnt_m, na)) ||	// attribute match in mandatory list
+		(c = 'g', da = lookup_attrval(session->author_data->attrs_o, session->author_data->cnt_o, na)) ||	// exact match in optional list
+		(c = 'h', da = lookup_attr(session->author_data->attrs_o, session->author_data->cnt_o, na))	// attribute match in optional list
 		) {
 		report(DEBAUTHZ, "nas:%s svr:%s -> replace with %s (%c)", na, da, da, c);
 		*outp++ = da, out_cnt++, replaced++;
@@ -460,13 +471,13 @@ static void do_author(tac_session *session)
      */
 
     for (int i = 0; i < out_cnt; i++)
-	clear_attrval(session->attrs_m, session->cnt_m, out_args[i]);
+	clear_attrval(session->author_data->attrs_m, session->author_data->cnt_m, out_args[i]);
 
-    for (int i = 0; i < session->cnt_m; i++) {
-	if (session->attrs_m[i]) {
+    for (int i = 0; i < session->author_data->cnt_m; i++) {
+	if (session->author_data->attrs_m[i]) {
 	    /* Attr is required by daemon but not present. Add it */
-	    report(DEBAUTHZ, "nas:absent srv:%s -> add %s (k)", session->attrs_m[i], session->attrs_m[i]);
-	    added++, *outp++ = session->attrs_m[i], out_cnt++;
+	    report(DEBAUTHZ, "nas:absent srv:%s -> add %s (k)", session->author_data->attrs_m[i], session->author_data->attrs_m[i]);
+	    added++, *outp++ = session->author_data->attrs_m[i], out_cnt++;
 	}
     }
 
@@ -478,13 +489,13 @@ static void do_author(tac_session *session)
      */
 
     for (int i = 0; i < out_cnt; i++)
-	clear_attrval(session->attrs_a, session->cnt_a, out_args[i]);
+	clear_attrval(session->author_data->attrs_a, session->author_data->cnt_a, out_args[i]);
 
-    for (int i = 0; i < session->cnt_a; i++)
-	if (session->attrs_a[i]) {
+    for (int i = 0; i < session->author_data->cnt_a; i++)
+	if (session->author_data->attrs_a[i]) {
 	    /* Attr is required by daemon but not present. Add it */
-	    report(DEBAUTHZ, "nas:absent srv:%s -> add %s (l)", session->attrs_a[i], session->attrs_a[i]);
-	    added++, *outp++ = session->attrs_a[i];
+	    report(DEBAUTHZ, "nas:absent srv:%s -> add %s (l)", session->author_data->attrs_a[i], session->author_data->attrs_a[i]);
+	    added++, *outp++ = session->author_data->attrs_a[i];
 	    out_cnt++;
 	}
 

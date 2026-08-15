@@ -12,8 +12,11 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <ctype.h>
 #include <arpa/inet.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include "misc/mymd5.h"
 #include "tac_plus-ng/protocol_tacacs.h"
 #include "tac_plus-ng/protocol_radius.h"
@@ -570,7 +573,7 @@ static int aaa_authc_radius(struct aaa *aaa, char *user, char *remoteaddr, char 
 	    *t++ = RADIUS_A_VENDOR_SPECIFIC;
 	    vlenp = t;
 	    *t++ = 6;
-	    u_char u = htonl(attr->dict->id);
+	    u_int u = htonl(attr->dict->id);
 	    memcpy(t, &u, 4);
 	    t += 4;
 	}
@@ -589,20 +592,20 @@ static int aaa_authc_radius(struct aaa *aaa, char *user, char *remoteaddr, char 
 		}
 		u = val->id;
 	    }
-	    *t++ = attr->id;
-	    *t++ = 6;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, 4 + dict->type_len + dict->vendor_len, dict->type_len);
 	    u = htonl(u);
 	    memcpy(t, &u, 4);
 	    t += 4;
 	} else if (attr->type == S_string_keyword) {
 	    size_t val_len = strlen(v_str);
-	    *t++ = attr->id;
-	    *t += 2 + val_len;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, val_len + dict->type_len + dict->vendor_len, dict->type_len);
 	    memcpy(t, v_str, val_len);
 	    t += val_len;
 	} else if (attr->type == S_address || attr->type == S_ipaddr || attr->type == S_ipv4addr) {
-	    *t++ = attr->id;
-	    *t++ = 6;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, 4 + dict->type_len + dict->vendor_len, dict->type_len);
 	    u_char ipv4[4];
 	    if (!inet_pton(AF_INET, v_str, ipv4)) {
 		fprintf(stderr, "IPv4 address %s not recognized\n", v_str);
@@ -611,8 +614,8 @@ static int aaa_authc_radius(struct aaa *aaa, char *user, char *remoteaddr, char 
 	    memcpy(t, ipv4, 4);
 	    t += 4;
 	} else if (attr->type == S_ipv6addr) {
-	    *t++ = attr->id;
-	    *t++ = 18;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, 16 + dict->type_len + dict->vendor_len, dict->type_len);
 	    u_char ipv6[16];
 	    if (!inet_pton(AF_INET6, v_str, ipv6)) {
 		fprintf(stderr, "IPv6 address %s not recognized\n", v_str);
@@ -706,6 +709,7 @@ static int aaa_authc_radius(struct aaa *aaa, char *user, char *remoteaddr, char 
 	HMAC(EVP_md5(), aaa->conn->key, strlen(aaa->conn->key), (u_char *) ipkt, ipkt_len, cma, &ma_len);
 	if (memcmp(ima, cma, 16))
 	    return -1;
+	memcpy(t + 2, ima, 16);
     }
     if (ipkt->code == RADIUS_CODE_ACCESS_ACCEPT) {
 	u_char *data = RADIUS_DATA(ipkt);
@@ -809,7 +813,7 @@ static int aaa_acct_radius(struct aaa *aaa, char *user, char *remoteaddr, char *
 	    *t++ = RADIUS_A_VENDOR_SPECIFIC;
 	    vlenp = t;
 	    *t++ = 6;
-	    u_char u = htonl(attr->dict->id);
+	    u_int u = htonl(attr->dict->id);
 	    memcpy(t, &u, 4);
 	    t += 4;
 	}
@@ -828,20 +832,20 @@ static int aaa_acct_radius(struct aaa *aaa, char *user, char *remoteaddr, char *
 		}
 		u = val->id;
 	    }
-	    *t++ = attr->id;
-	    *t++ = 6;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, 4 + dict->type_len + dict->vendor_len, dict->type_len);
 	    u = htonl(u);
 	    memcpy(t, &u, 4);
 	    t += 4;
 	} else if (attr->type == S_string_keyword) {
 	    size_t val_len = strlen(v_str);
-	    *t++ = attr->id;
-	    *t += 2 + val_len;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, val_len + dict->type_len + dict->vendor_len, dict->type_len);
 	    memcpy(t, v_str, val_len);
 	    t += val_len;
 	} else if (attr->type == S_address || attr->type == S_ipaddr || attr->type == S_ipv4addr) {
-	    *t++ = attr->id;
-	    *t++ = 6;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, 4 + dict->type_len + dict->vendor_len, dict->type_len);
 	    u_char ipv4[4];
 	    if (!inet_pton(AF_INET, v_str, ipv4)) {
 		fprintf(stderr, "IPv4 address %s not recognized\n", v_str);
@@ -850,8 +854,8 @@ static int aaa_acct_radius(struct aaa *aaa, char *user, char *remoteaddr, char *
 	    memcpy(t, ipv4, 4);
 	    t += 4;
 	} else if (attr->type == S_ipv6addr) {
-	    *t++ = attr->id;
-	    *t++ = 18;
+	    t = set_uint(t, attr->id, dict->type_len);
+	    t = set_uint(t, 16 + dict->type_len + dict->vendor_len, dict->type_len);
 	    u_char ipv6[16];
 	    if (!inet_pton(AF_INET6, v_str, ipv6)) {
 		fprintf(stderr, "IPv6 address %s not recognized\n", v_str);
