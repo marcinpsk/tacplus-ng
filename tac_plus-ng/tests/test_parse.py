@@ -220,5 +220,17 @@ class OwnConfigs(unittest.TestCase):
             self.assertEqual(code, 0, out)
 
 
+class LongToken(unittest.TestCase):
+    def test_token_longer_than_the_parse_buffer_is_a_parse_error(self):
+        """buf_add() swapped the arguments of its "Line too long" error: SIGSEGV in vsnprintf()."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "long.cfg")
+            with open(path, "w") as f:
+                f.write("id = tac_plus-ng {\n\t" + "x" * 70000 + "\n}\n")
+            code, out = check(path)
+            self.assertGreater(code, 0, out[:500])
+            self.assertIn("Line too long", out)
+
+
 if __name__ == "__main__":
     unittest.main()

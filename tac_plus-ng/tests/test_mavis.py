@@ -348,5 +348,18 @@ class Children(DaemonTestCase):
                     self.assertEqual(c.pap("alice", "pw").status_name, "PASS")
 
 
+class LongToken(DaemonTestCase):
+    """A backend sends a token that fits the reply buffer of the external module but not sym.buf."""
+
+    CONFIG = Stub.module(childs=(1, 1)) + BACKEND + PERMIT
+
+    def test_token_longer_than_the_parse_buffer_denies_the_user(self):
+        stub = Stub(self.daemon)
+        stub.set(users={"alice": {"password": "pw", "member": "x" * 65535}})
+        self.assertEqual(self.connect().pap("alice", "pw").status_name, "FAIL")
+        stub.set(users={"alice": {"password": "pw"}})
+        self.assertEqual(self.connect().pap("alice", "pw").status_name, "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()
