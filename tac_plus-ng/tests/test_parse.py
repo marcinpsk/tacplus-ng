@@ -211,6 +211,32 @@ class OwnConfigs(unittest.TestCase):
                 self.assertEqual(sanitizer_findings(out), [], out)
                 self.assertIn(os.path.basename(path), out, "the error doesn't name the file")
 
+    def test_errors_name_the_real_line(self):
+        """Lines count from 1. A keyword on the first line of a file was reported as line 0."""
+        spawnd = "id = spawnd { listen = { port = 4949 } }\n"
+        begin = spawnd + "id = tac_plus-ng {\n"
+        bad = "\tNOSUCHKEYWORD\n"
+        cases = [
+            ("first line", "NOSUCHKEYWORD\n" + spawnd, {}, "main.cfg", 1),
+            ("in the section", begin + bad + "}\n", {}, "main.cfg", 3),
+            ("after blanks and comments", "\n# one\n" + begin + "\n\t# two\n" + bad + "}\n", {}, "main.cfg", 7),
+            ("after a multi-line string", begin + '\tuser x { password login = clear "a\nb\nc" }\n' + bad + "}\n",
+             {}, "main.cfg", 6),
+            ("first line of an include", begin + '\tinclude = "$TMP/inc.cfg"\n}\n', {"inc.cfg": bad}, "inc.cfg", 1),
+            ("third line of an include", begin + '\tinclude = "$TMP/inc.cfg"\n}\n', {"inc.cfg": "# 1\n# 2\n" + bad},
+             "inc.cfg", 3),
+            ("after an include", begin + '\tinclude = "$TMP/inc.cfg"\n' + bad + "}\n", {"inc.cfg": "# 1\n# 2\n"},
+             "main.cfg", 4),
+        ]
+        for name, main, files, where, line in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                for fname, text in dict(files, **{"main.cfg": main}).items():
+                    with open(os.path.join(tmp, fname), "w") as f:
+                        f.write(text.replace("$TMP", tmp))
+                code, out = check(os.path.join(tmp, "main.cfg"))
+                self.assertGreater(code, 0, out)
+                self.assertIn("%s:%d: " % (where, line), out)
+
     def test_harness_base_config_parses(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "base.cfg")

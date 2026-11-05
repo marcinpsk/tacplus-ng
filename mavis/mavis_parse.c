@@ -621,6 +621,7 @@ static int sym_from_file(char *url, struct sym *sym)
     }
 
     sym->filename = strdup(url);
+    sym->line = 1;
     sym->tlen = sym->len = buflen;
     sym->tin = sym->in = buf;
 
@@ -1020,7 +1021,7 @@ void cfg_read_config(char *url, void (*parsefunction)(struct sym *), char *id)
 
     clear_alias();
     sym.filename = url;
-    sym.line = 0;
+    sym.line = 1;
 
     sym.env_valid = 1;
     if (setjmp(sym.env)) {
