@@ -79,7 +79,7 @@
 #endif
 
 #ifdef WITH_PCRE2
-#include <pcre2.h>
+#include "misc/mypcre2.h"
 #endif
 
 #include <regex.h>
@@ -287,14 +287,15 @@ static char *confdir_strdup(char *in)
     char b[in_len + cd_len];
     memcpy(b, common_data.conffile, cd_len);
     b[cd_len] = 0;
+    // r points to the last '/' of the configuration file path, the copy starts with the '/' of "$CONFDIR/"
     char *r = strrchr(b, '/');
     if (!r) {
-	r = b + cd_len;
+	r = b;
 	*r++ = '.';
-	*r++ = '/';
     }
-    memcpy(r, in + sizeof(S) - 2, in_len - sizeof(S) - 2);
-    return strndup(b, r - b + in_len - sizeof(S) - 2);
+    size_t tail_len = in_len - (sizeof(S) - 2);
+    memcpy(r, in + sizeof(S) - 2, tail_len);
+    return strndup(b, r - b + tail_len);
 #undef S
 }
 
@@ -1085,6 +1086,7 @@ static void parse_tls_psk_key(struct sym *sym, tac_host *host)
 		parse_error(sym, "base64 psk is malformed");
 	    host->tls_psk_key->key.txt = mem_alloc(host->mem, buflen);
 	    host->tls_psk_key->key.len = buflen;
+	    memcpy(host->tls_psk_key->key.txt, buf, buflen);
 	    sym_get(sym);
 	    return;
 	}
@@ -1375,8 +1377,8 @@ int rad_check_dacl(tac_session *session)
 			if (vp[1] - 1 == sizeof(A) && !strncasecmp((char *) vp + 2, A, sizeof(A) - 1))
 #undef A
 			    found |= 2;
-			vp += vp[1];
 		    }
+		    vp += vp[1];
 		}
 	    }
 	    if (found == 3)
@@ -1863,6 +1865,7 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		switch (sym->code) {
 		case S_acl:
 		    sym_get(sym);
+		    parse(sym, S_equal);
 		    r->mavis_mfa_acl = tac_acl_lookup(sym->buf, r);
 		    if (!r->mavis_mfa_acl)
 			parse_error(sym, "ACL '%s' not found", sym->buf);
@@ -2541,17 +2544,32 @@ static void parse_ruleset(struct sym *sym, tac_realm *realm)
     sym_get(sym);
 }
 
-static enum token lookup_user_profile(tac_session *session)
+static uint32_t calc_user_profile_crc(tac_session *session)
 {
     uint32_t crc32 = INITCRC32;
+    if (session->user)
+	 crc32 = crc32_update(crc32, (u_char *) session->user->name.txt, session->user->name.len);
     if (session->nac_addr_ascii.txt)
 	crc32 = crc32_update(crc32, (u_char *) session->nac_addr_ascii.txt, session->nac_addr_ascii.len);
     if (session->port.txt)
 	crc32 = crc32_update(crc32, (u_char *) session->port.txt, session->port.len);
+    return crc32;
+}
+
+static enum token lookup_user_profile(tac_session *session)
+{
+    if (!session->user || session->user_is_session_specific)
+	return S_unknown;
+
+    uint32_t crc32 = calc_user_profile_crc(session);
+
     for (int i = 0; i < USER_PROFILE_CACHE_SIZE; i++) {
-	if (session->ctx->user_profile_cache[i].user == session->user && session->ctx->user_profile_cache[i].crc32 == crc32) {
+	if (session->ctx->user_profile_cache[i].user == session->user && session->ctx->user_profile_cache[i].crc32 == crc32 &&
+	    session->ctx->user_profile_cache[i].serial == session->user->serial) {
 	    if (session->ctx->user_profile_cache[i].valid_until >= io_now.tv_sec) {
 		session->profile = session->ctx->user_profile_cache[i].profile;
+		if (session->ctx->user_profile_cache[i].motd_banner)
+		    session->motd_banner = session->ctx->user_profile_cache[i].motd_banner;
 		return session->ctx->user_profile_cache[i].res;
 	    }
 	    session->ctx->user_profile_cache[i].user = NULL;
@@ -2564,11 +2582,10 @@ static enum token lookup_user_profile(tac_session *session)
 
 static void cache_user_profile(tac_session *session, enum token res)
 {
-    uint32_t crc32 = INITCRC32;
-    if (session->nac_addr_ascii.txt)
-	crc32 = crc32_update(crc32, (u_char *) session->nac_addr_ascii.txt, session->nac_addr_ascii.len);
-    if (session->port.txt)
-	crc32 = crc32_update(crc32, (u_char *) session->port.txt, session->port.len);
+    if (!session->user || session->user_is_session_specific)
+	return;
+
+    uint32_t crc32 = calc_user_profile_crc(session);
 
     int j = 0;
     for (int i = 0; i < USER_PROFILE_CACHE_SIZE; i++) {
@@ -2587,10 +2604,28 @@ static void cache_user_profile(tac_session *session, enum token res)
     }
   set:
     session->ctx->user_profile_cache[j].user = session->user;
+    session->ctx->user_profile_cache[j].serial = session->user->serial;
     session->ctx->user_profile_cache[j].crc32 = crc32;
     session->ctx->user_profile_cache[j].profile = session->profile;
+    session->ctx->user_profile_cache[j].motd_banner = session->motd_banner;
     session->ctx->user_profile_cache[j].res = res;
     session->ctx->user_profile_cache[j].valid_until = io_now.tv_sec + 120;
+}
+
+// A cache hit skips the profile acl, too. Keep the motd banner it may have set.
+static void cache_user_profile_motd(tac_session *session)
+{
+    if (!session->user || session->user_is_session_specific)
+	return;
+
+    uint32_t crc32 = calc_user_profile_crc(session);
+    for (int i = 0; i < USER_PROFILE_CACHE_SIZE; i++)
+	if (session->ctx->user_profile_cache[i].user == session->user && session->ctx->user_profile_cache[i].crc32 == crc32
+	    && session->ctx->user_profile_cache[i].serial == session->user->serial
+	    && session->ctx->user_profile_cache[i].valid_until >= io_now.tv_sec) {
+	    session->ctx->user_profile_cache[i].motd_banner = session->motd_banner;
+	    return;
+	}
 }
 
 enum token eval_ruleset_r(tac_session *session, tac_realm *realm, int parent_first)
@@ -2657,13 +2692,57 @@ enum token eval_ruleset(tac_session *session, tac_realm *realm)
 	return res;
     }
     res = eval_ruleset_r(session, realm, session->ctx->realm->script_realm_parent_first);
-    if (res == S_permit && session->profile && session->profile->acl)
+    if (res == S_permit && session->profile && session->profile->acl) {
 	res = eval_profile_acl(session, session->profile, session->ctx->realm->script_realm_parent_first);
+	cache_user_profile_motd(session);
+    }
     if (res == S_permit)
 	return res;
     return S_deny;
 }
 
+// Set if any script uses "message PASSWORD". Without it there's no need for a prompt pass.
+static int script_password_prompt = 0;
+
+static enum token eval_ruleset_prompt_r(tac_session *session, tac_realm *realm, int parent_first)
+{
+    enum token res = S_unknown;
+
+    if (!realm || (session->user && session->user->profile))
+	return res;
+
+    if (parent_first == TRISTATE_YES && realm->skip_parent_script != BISTATE_YES)
+	res = eval_ruleset_prompt_r(session, realm->parent, parent_first);
+
+    for (struct tac_rule * rule = realm->rules; rule && res != S_permit && res != S_deny; rule = rule->next)
+	if (rule->enabled) {
+	    res = eval_tac_acl(session, &rule->acl);
+	    report(DEBACL | DEBUG_REGEX_FLAG,
+		   "%s@%s: ACL %s: %s (prompt pass)", session->username.txt, session->nac_addr_valid ? session->nac_addr_ascii.txt : "<unknown>",
+		   rule->acl.name.txt, codestring[res].txt);
+	}
+
+    if (parent_first != TRISTATE_YES && res != S_permit && res != S_deny && realm->skip_parent_script != BISTATE_YES)
+	res = eval_ruleset_prompt_r(session, realm->parent, parent_first);
+    return res;
+}
+
+/*
+ * Runs the ruleset once before the ASCII login password prompt is sent, to
+ * pick up "message PASSWORD". Only conditions, ACLs and permit/deny/return
+ * are evaluated, other actions are skipped. The result is discarded: the
+ * profile, rule name and profile cache are left to the full evaluation after
+ * authentication, so this pass never denies.
+ */
+void eval_ruleset_prompt(tac_session *session)
+{
+    if (!script_password_prompt || session->flag_rule_prompt)
+	return;
+    session->flag_rule_prompt = BISTATE_YES;
+    session->eval_prompt_only = BISTATE_YES;
+    eval_ruleset_prompt_r(session, session->ctx->realm, session->ctx->realm->script_realm_parent_first);
+    session->eval_prompt_only = BISTATE_NO;
+}
 
 static void parse_user(struct sym *sym, tac_realm *r)
 {
@@ -2756,36 +2835,26 @@ char hexbyte(char *s)
 
 static int c7decode(char *in)
 {
-    char *out = in;
     size_t len = strlen(in);
-    static char *c7 = NULL;
-    static size_t c7_len = 0;
-
-    if (!c7) {
-	char *e = "051207055A0A070E204D4F08180416130A0D052B2A2529323423120617020057585952550F021917585956525354550A5A07065956";
-	char *u, *t = e;
-
-	c7 = calloc(1, strlen(e) / 2 + 1);
-	u = c7;
-	while (*t) {
-	    *u = 'a' ^ hexbyte(t);
-	    u++, t += 2;
-	}
-	c7_len = strlen(c7);
-    }
-
     if (len & 1 || len < 4)
 	return -1;
 
-    len -= 2;
     int seed = 10 * (in[0] - '0') + in[1] - '0';
+    char *out = in;
     in += 2;
+    len -= 2;
+
+    static const char c7[53] = {
+	0x64, 0x73, 0x66, 0x64, 0x3B, 0x6B, 0x66, 0x6F, 0x41, 0x2C, 0x2E, 0x69, 0x79, 0x65,
+	0x77, 0x72, 0x6B, 0x6C, 0x64, 0x4A, 0x4B, 0x44, 0x48, 0x53, 0x55, 0x42, 0x73, 0x67,
+	0x76, 0x63, 0x61, 0x36, 0x39, 0x38, 0x33, 0x34, 0x6E, 0x63, 0x78, 0x76, 0x39, 0x38,
+	0x37, 0x33, 0x32, 0x35, 0x34, 0x6B, 0x3B, 0x66, 0x67, 0x38, 0x37
+    };
 
     while (len) {
-	*out = hexbyte(in) ^ c7[seed % c7_len];
+	*out = hexbyte(in) ^ c7[seed % sizeof(c7)];
 	in += 2, seed++, len -= 2, out++;
     }
-
     *out = 0;
 
     return 0;
@@ -2944,6 +3013,16 @@ static void parse_member(struct sym *sym, tac_groups **groups, mem_t *mem, tac_r
     if (!*groups)
 	*groups = mem_alloc(mem, sizeof(tac_groups));
 
+    // We install our own setjmp() below to turn a "Group not found" parse
+    // error into a warning and carry on. That overwrites sym->env, the
+    // jmp_buf the caller (e.g. parse_user_profile()) set for its own parse
+    // errors. Save it and put it back before returning: once this frame is
+    // gone, a longjmp() into our setjmp() target -- which the next parse
+    // error would do -- lands in a dead stack frame (crash, or a silent
+    // "success" that admits the user).
+    jmp_buf env;
+    memcpy(env, sym->env, sizeof(jmp_buf));
+
     do {
 	tac_group *g = lookup_group(sym->buf, r);
 	if (g)
@@ -2956,6 +3035,8 @@ static void parse_member(struct sym *sym, tac_groups **groups, mem_t *mem, tac_r
 	sym_get(sym);
     }
     while (parse_comma(sym));
+
+    memcpy(sym->env, env, sizeof(jmp_buf));
 }
 
 static void parse_enable(struct sym *sym, mem_t *mem, struct pwdat **enable)
@@ -3056,12 +3137,6 @@ static void parse_profile_attr(struct sym *sym, tac_profile *profile, tac_realm 
 // The server then has the option to require one or more fingerprints to match, e.g.
 // MD5 *and* SHA256.
 //
-
-struct ssh_key {
-    struct ssh_key *next;
-    char *key;
-    char hash[1];
-};
 
 enum token validate_ssh_hash(tac_session *session, char *hash, char **key)
 {
@@ -3177,19 +3252,6 @@ static char *calc_ssh_key_hash(char *hashname, unsigned char *in, size_t in_len)
     size_t md_len = sizeof(md);
     size_t hashname_len;
     unsigned char *o;
-    char *t = strchr(hashname, ':');
-    if (t) {
-	// <HASHNAME>:<HASH> => <HASHNAME>
-	ssize_t len = t - hashname;
-	t = alloca(len);
-	len--;
-	t[len] = 0;
-	while (len > -1) {
-	    len--;
-	    t[len] = hashname[len];
-	}
-	hashname = t;
-    }
     if (!in_len)
 	in_len = strlen((char *) in);
 #if OPENSSL_VERSION_NUMBER < 0x30000000
@@ -3333,18 +3395,17 @@ static void parse_sshkey(struct sym *sym, tac_user *user)
 	if (is_rfc4716)
 	    key = mem_strdup(user->mem, sym->buf);
 	else {
-	    int l = slen;
-	    char ck[slen + 200];
+	    // p isn't NUL-terminated at slen; split it into lines of 72 characters
+	    char ck[slen + slen / 72 + 200];
 	    char *t = ck;
 	    memcpy(t, begin_marker, begin_marker_len);
 	    t += begin_marker_len;
 	    *t++ = '\n';
-	    while (l > 0) {
-		strncpy(t, p, 72);
-		while (*t)
-		    t++;
+	    for (size_t l = 0; l < slen; l += 72) {
+		size_t n = (slen - l < 72) ? slen - l : 72;
+		memcpy(t, p + l, n);
+		t += n;
 		*t++ = '\n';
-		l -= 72;
 	    }
 	    memcpy(t, end_marker, end_marker_len);
 	    t += end_marker_len;
@@ -3353,7 +3414,7 @@ static void parse_sshkey(struct sym *sym, tac_user *user)
 	    key = mem_strdup(user->mem, ck);
 	}
 	(*ssh_key)->key = key;
-	memcpy((*ssh_key)->hash, hash, len + 1);
+	memcpy((*ssh_key)->hash, hash, hash_len + 1);
 	ssh_key = &((*ssh_key)->next);
 
 	hash = calc_ssh_key_hash("SHA256", t, len);
@@ -3365,8 +3426,9 @@ static void parse_sshkey(struct sym *sym, tac_user *user)
 	    hash[hash_len] = 0;
 	}
 	*ssh_key = mem_alloc(user->mem, sizeof(struct ssh_key) + len);
-	memcpy((*ssh_key)->hash, hash, len + 1);
+	memcpy((*ssh_key)->hash, hash, hash_len + 1);
 	(*ssh_key)->key = key;
+	(*ssh_key)->key_len = len;
 
 	sym_get(sym);
 	ssh_key = &((*ssh_key)->next);
@@ -3424,6 +3486,7 @@ static void parse_user_attr(struct sym *sym, tac_user *user)
 	    switch (sym->code) {
 	    case S_acl:
 		sym_get(sym);
+		parse(sym, S_equal);
 		user->mavis_mfa_acl = tac_acl_lookup(sym->buf, r);
 		if (!user->mavis_mfa_acl)
 		    parse_error(sym, "ACL '%s' not found", sym->buf);
@@ -3651,7 +3714,7 @@ static void parse_rewrite(struct sym *sym, tac_realm *r)
 	if (sym->code == S_slash) {
 	    PCRE2_SIZE erroffset;
 	    (*e)->code =
-		pcre2_compile((PCRE2_SPTR8) sym->buf, PCRE2_ZERO_TERMINATED, PCRE2_MULTILINE | common_data.regex_pcre_flags, &errcode, &erroffset, NULL);
+		mypcre2_compile((PCRE2_SPTR8) sym->buf, PCRE2_ZERO_TERMINATED, PCRE2_MULTILINE | common_data.regex_pcre_flags, &errcode, &erroffset, NULL);
 	    if (!(*e)->code) {
 		PCRE2_UCHAR buffer[256];
 		pcre2_get_error_message(errcode, buffer, sizeof(buffer));
@@ -4204,6 +4267,9 @@ static void parse_host_attr(struct sym *sym, tac_realm *r, tac_host *host)
 	    }
 
 	    if (fp->type == S_tls_peer_cert_sha1 || fp->type == S_tls_peer_cert_sha256) {
+		// "=" as documented; configurations written without it keep working
+		if (sym->code == S_equal)
+		    sym_get(sym);
 		char *t = sym->buf;
 		for (int i = 0; i < len;) {
 		    char k[2];
@@ -4354,20 +4420,22 @@ dacl test {
 
 static struct rad_dacl *add_dacl(char *name, size_t name_len, struct sym *sym, tac_realm *r, int dynamic)
 {
-    struct rad_dacl *dacl = alloca(sizeof(struct rad_dacl));
-    str_set(&dacl->name, name, name_len);
+    struct rad_dacl key = { 0 };
+    str_set(&key.name, name, name_len);
     char *prefix = "ip:inacl";
+    char *data = NULL;
+    uint32_t version = 0;
     mem_t *mem = NULL;		// for now
 
     if (!r->dacls)
 	r->dacls = RB_tree_new(compare_name, (void (*)(void *)) free_dacl);
 
-    struct rad_dacl *n = (struct rad_dacl *) RB_lookup(r->dacls, (void *) dacl);
+    struct rad_dacl *n = (struct rad_dacl *) RB_lookup(r->dacls, (void *) &key);
     if (n)
-	parse_error(sym, "DACL '%s' already defined at line %u", dacl->name, n->line);
+	parse_error(sym, "DACL '%s' already defined at line %u", key.name.txt, n->line);
 
+    // Collect everything first: prefix, version and data may come in any order.
     parse(sym, S_openbra);
-    int data_seen = 0;
     while (sym->code != S_closebra) {
 	switch (sym->code) {
 	case S_prefix:
@@ -4378,33 +4446,35 @@ static struct rad_dacl *add_dacl(char *name, size_t name_len, struct sym *sym, t
 	    break;
 	case S_data:
 	    sym_get(sym);
-	    if (data_seen)
+	    if (data)
 		parse_error(sym, "data portion already defined");
-	    data_seen = 1;
 	    parse(sym, S_equal);
-	    int count = 0;
-	    for (char *s = sym->buf; *s; s++)
-		if (*s == '\n' || *s == '\r')
-		    count++;
-	    dacl = mem_alloc(mem, sizeof(struct rad_dacl) + count * sizeof(struct iovec));
-	    str_set(&dacl->name, mem_strdup(mem, name), name_len);
-	    dacl->data = mem_strdup(mem, sym->buf);
+	    data = mem_strdup(mem, sym->buf);
 	    sym_get(sym);
-	    str_set(&dacl->prefix, prefix, 0);
-	    dacl->realm = r;
 	    break;
 	case S_version:
 	    sym_get(sym);
 	    parse(sym, S_equal);
-	    dacl->version = parse_uint(sym);
+	    version = parse_uint(sym);
 	    break;
 	default:
 	    parse_error_expect(sym, S_prefix, S_data, S_closebra, S_unknown);
 	}
     }
 
-    if (!data_seen)
+    if (!data)
 	parse_error(sym, "dacl data portion not defined");
+
+    int count = 0;
+    for (char *s = data; *s; s++)
+	if (*s == '\n' || *s == '\r')
+	    count++;
+    struct rad_dacl *dacl = mem_alloc(mem, sizeof(struct rad_dacl) + count * sizeof(struct iovec));
+    str_set(&dacl->name, mem_strdup(mem, name), name_len);
+    dacl->data = data;
+    str_set(&dacl->prefix, prefix, 0);
+    dacl->version = version;
+    dacl->realm = r;
 
     sym_get(sym);
 
@@ -4445,7 +4515,9 @@ static struct rad_dacl *add_dacl(char *name, size_t name_len, struct sym *sym, t
     if (dynamic)
 	dacl->dynamic = io_now.tv_sec + r->caching_period;
 
-    if (r->caching_period)
+    // A static dACL (from the configuration) must stay in the tree so that
+    // lookup_dacl() finds it; only a dynamic (MAVIS) dACL depends on caching.
+    if (!dynamic || r->caching_period)
 	RB_insert(r->dacls, dacl);
     return dacl;
 }
@@ -4471,7 +4543,7 @@ static void parse_dacl(struct sym *sym, tac_realm *r)
 
     size_t name_len = strlen(sym->buf);
     char name[name_len + 1];
-    strncpy(name, sym->buf, name_len);
+    memcpy(name, sym->buf, name_len + 1);
     sym_get(sym);
     add_dacl(name, name_len, sym, r, 0);
 }
@@ -4765,7 +4837,7 @@ int cfg_get_enable(tac_session *session, struct pwdat **p)
     }
     if (session->profile && session->profile->enable) {
 #ifdef WITH_SSL
-	type6key[m] = session->user->realm->default_host->type6key;
+	type6key[m] = session->profile->realm->default_host->type6key;
 #endif
 	d[m++] = session->profile->enable;
     }
@@ -5138,7 +5210,7 @@ static struct mavis_cond *tac_script_cond_parse_r(struct sym *sym, mem_t *mem, t
 		    PCRE2_SIZE erroffset;
 		    m->type = S_slash;
 		    m->s.rhs =
-			pcre2_compile((PCRE2_SPTR8) sym->buf,
+			mypcre2_compile((PCRE2_SPTR8) sym->buf,
 				      PCRE2_ZERO_TERMINATED, PCRE2_MULTILINE | common_data.regex_pcre_flags, &errcode, &erroffset, NULL);
 		    mem_add_free(mem, pcre2_code_free, m->s.rhs);
 		    if (!m->s.rhs) {
@@ -5228,7 +5300,7 @@ static int tac_mavis_cond_compare(tac_session *session, struct mavis_cond *m, ch
     } else if (m->type == S_slash) {
 #ifdef WITH_PCRE2
 	pcre2_match_data *match_data = pcre2_match_data_create_from_pattern((pcre2_code *) m->s.rhs, NULL);
-	res = pcre2_match((pcre2_code *) m->s.rhs, (PCRE2_SPTR) name, (PCRE2_SIZE) name_len, 0, 0, match_data, NULL);
+	res = mypcre2_match((pcre2_code *) m->s.rhs, (PCRE2_SPTR) name, (PCRE2_SIZE) name_len, 0, 0, match_data, NULL);
 	pcre2_match_data_free(match_data);
 	hint = "pcre2";
 #endif
@@ -5722,9 +5794,21 @@ int rad_attr_add_dacl(tac_session *session, struct rad_dacl *dacl, uint32_t *i)
 
 enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 {
-    enum token r;
-    if (!m)
+    if (!session || !m)
 	return S_unknown;
+    if (session->eval_prompt_only)
+	switch (m->code) {
+	case S_return:
+	case S_permit:
+	case S_deny:
+	case S_if:
+	case S_acl:
+	case S_PASSWORD:
+	    break;
+	default:
+	    return m->n ? tac_script_eval_r(session, m->n) : S_unknown;
+	}
+    enum token r;
     switch (m->code) {
     case S_return:
     case S_permit:
@@ -5735,9 +5819,20 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 	tac_script_set_exec_context(session, m->b.v);
 	report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, m->b.v);
 	break;
+    case S_PASSWORD:
+	// Only the prompt pass applies this, after authentication it's too late anyway.
+	if (session->eval_prompt_only) {
+	    session->password_prompt = m->b.v;
+	    report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, m->b.v);
+	}
+	break;
     case S_message:
 	str_set(&session->message, eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, &session->message.len), 0);
 	report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, session->message.txt ? session->message.txt : "");
+	break;
+    case S_motd:
+	session->motd_banner = (struct log_item *) m->b.v;
+	report(DEBACL, " line %u: [%s]", m->line, codestring[m->code].txt);
 	break;
 #ifdef WITH_PCRE2
     case S_rewrite:
@@ -5803,7 +5898,7 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
     case S_add:
     case S_set:
     case S_optional:
-	if (session->author_data){
+	if (session->author_data) {
 	    session->eval_log_raw = 1;
 	    size_t v_len = 0;
 	    char *v = eval_log_format(session, session->ctx, NULL, (struct log_item *) m->b.v, io_now.tv_sec, &v_len);
@@ -5817,6 +5912,12 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 	    report(DEBACL, " line %u: [%s] '%s'", m->line, codestring[m->code].txt, v);
 	    break;
 	}
+    case S_mfa:
+	if (session->author_data) {
+	    session->want_mfa = (S_permit == eval_tac_acl(session, (struct tac_acl *) m->b.v)) ? BISTATE_YES : BISTATE_NO;
+	    report(DEBACL, " line %u: [%s] '%d'", m->line, codestring[m->code].txt, session->want_mfa);
+	}
+	break;
     case S_if:
 	if (tac_script_cond_eval(session, m->a.c)) {
 	    r = tac_script_eval_r(session, m->b.a);
@@ -5883,8 +5984,24 @@ static struct mavis_action *tac_script_parse_r(struct sym *sym, mem_t *mem, int 
 	break;
     case S_message:
 	m = mavis_action_new(sym, mem);
+	if (sym->code == S_PASSWORD) {
+	    m->code = S_PASSWORD;
+	    sym_get(sym);
+	    parse(sym, S_equal);
+	    m->b.v = mem_strdup(mem, sym->buf);
+	    sym_get(sym);
+	    script_password_prompt = 1;
+	    break;
+	}
 	parse(sym, S_equal);
 	m->b.v = (char *) parse_log_format(sym, mem);
+	break;
+    case S_motd:
+	m = mavis_action_new(sym, mem);
+	parse(sym, S_banner);
+	parse(sym, S_equal);
+	m->b.v = (char *) parse_log_format(sym, mem);
+	fixup_banner((struct log_item **) &m->b.v, __FILE__, __LINE__);
 	break;
 #ifdef WITH_PCRE2
     case S_rewrite:
@@ -5903,9 +6020,9 @@ static struct mavis_action *tac_script_parse_r(struct sym *sym, mem_t *mem, int 
 	m->b.v = (char *) parse_log_format(sym, mem);
 	break;
     case S_attr:
-	sym_get(sym);
-	parse(sym, S_default);
 	m = mavis_action_new(sym, mem);
+	parse(sym, S_default);
+	parse(sym, S_equal);
 	m->b.v = (char *) (keycode(sym->buf));
 	sym_get(sym);
 	break;
@@ -5933,6 +6050,26 @@ static struct mavis_action *tac_script_parse_r(struct sym *sym, mem_t *mem, int 
 	parse(sym, S_equal);
 	m->b.v = mem_strdup(mem, sym->buf);
 	sym_get(sym);
+	break;
+    case S_mavis:
+	sym_get(sym);
+    case S_mfa:
+	m = mavis_action_new(sym, mem);
+	switch (sym->code) {
+	case S_acl:
+	    sym_get(sym);
+	    m->b.v = (char *) tac_acl_lookup(sym->buf, realm);
+	    if (!m->b.v)
+		parse_error(sym, "ACL '%s' not found", sym->buf);
+	    sym_get(sym);
+	    break;
+	case S_equal:
+	    sym_get(sym);
+	    m->b.v = (char *) tac_acl_lookup(parse_bool(sym) ? "__internal__permit__" : "__internal__deny__", realm);
+	    break;
+	default:
+	    parse_error_expect(sym, S_acl, S_equal, S_unknown);
+	}
 	break;
     case S_add:
     case S_optional:
@@ -5985,7 +6122,7 @@ static struct mavis_action *tac_script_parse_r(struct sym *sym, mem_t *mem, int 
 	}
 	break;
     default:
-	parse_error_expect(sym, S_openbra, S_closebra, S_return, S_permit, S_deny, S_context, S_message, S_if,
+	parse_error_expect(sym, S_openbra, S_closebra, S_return, S_permit, S_deny, S_context, S_message, S_motd, S_if,
 			   S_profile, S_rewrite, S_add, S_set, S_optional, S_unknown);
     }
     if (section && sym->code != S_closebra && sym->code != S_eof)
@@ -6338,8 +6475,8 @@ static void keylog_cb(const SSL *ssl __attribute__((unused)), const char *line)
 	fcntl(SSLKEYLOGFILE, F_SETLK, &flock);
 
 	lseek(SSLKEYLOGFILE, 0, SEEK_END);
-	UNUSED_RESULT(write(SSLKEYLOGFILE, line, strlen(line)));
-	UNUSED_RESULT(write(SSLKEYLOGFILE, "\n", 1));
+	UNUSED_RESULT(Write(SSLKEYLOGFILE, line, strlen(line)));
+	UNUSED_RESULT(Write(SSLKEYLOGFILE, "\n", 1));
 
 	struct flock funlock = {.l_type = F_UNLCK,.l_whence = SEEK_SET };
 	fcntl(SSLKEYLOGFILE, F_SETLK, &funlock);
@@ -6491,7 +6628,7 @@ static SSL_CTX *ssl_init(struct realm *r, int dtls, int use_tls_psk)
     char *sslkeylogfile = getenv("SSLKEYLOGFILE");
     if (sslkeylogfile) {
 	if (SSLKEYLOGFILE < 0)
-	    SSLKEYLOGFILE = open(sslkeylogfile, O_CREAT | O_APPEND, 0644);
+	    SSLKEYLOGFILE = open(sslkeylogfile, O_WRONLY | O_CREAT | O_APPEND, 0600);
 	if (SSLKEYLOGFILE > -1)
 	    SSL_CTX_set_keylog_callback(ctx, keylog_cb);
     }

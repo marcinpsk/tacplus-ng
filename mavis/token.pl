@@ -471,6 +471,10 @@ tls.peer.cert.rpk		S_tls_peer_cert_rpk
 tls.peer.cn			S_tls_peer_cn
 tls.psk.identity		S_tls_psk_identity
 tls.conn.sni			S_tls_conn_sni
+tls.conn.error			S_tls_conn_error
+tls.conn.error.code		S_tls_conn_error_code
+tls.peer.cert.verify		S_tls_peer_cert_verify
+tls.peer.cert.verify.code	S_tls_peer_cert_verify_code
 tls.client.cert.type		S_tls_client_cert_type
 tls.server.cert.type		S_tls_server_cert_type
 x509				S_x509
@@ -623,4 +627,6 @@ aggregate			S_aggregate
 mfa				S_mfa
 hex				S_hex
 base64				S_base64
+more				S_more
+reuse-port			S_reuse_port
 #

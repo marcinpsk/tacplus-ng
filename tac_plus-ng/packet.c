@@ -73,7 +73,7 @@ static void md5_xor(tac_pak_hdr *hdr, char *key, int keylen)
     if (key && *key) {
 	u_char *data = tac_payload(hdr, u_char *);
 	int data_len = ntohl(hdr->datalength), h = 0, iovcnt = 4;
-	u_char digest[MD5_LEN][2];
+	u_char digest[2][MD5_LEN];
 
 	struct iovec iov[5] = {
 	    {.iov_base = &hdr->session_id,.iov_len = sizeof(hdr->session_id) },
@@ -171,7 +171,7 @@ void send_acct_reply(tac_session *session, u_char status, char *msg, char *data)
 }
 
 /* send an authorization reply packet */
-void send_author_reply(tac_session *session, u_char status, char *msg, char *data, int arg_cnt, char **args)
+void send_author_reply_final(tac_session *session, u_char status, char *msg, char *data, int arg_cnt, char **args)
 {
     int msg_len = msg ? (int) strlen(msg) : 0;
     int data_len = data ? (int) strlen(data) : 0;
@@ -268,6 +268,36 @@ static str_t msgid_ ## A = { .txt = B, .len = sizeof(B) - 1 }
     cleanup_session(session);
 }
 
+void send_author_reply_mfa(tac_session *session)
+{
+    if (!session->flag_mavis_mfa) {
+	session->flag_mavis_mfa = 1;
+	mavis_lookup(session, send_author_reply_mfa, AV_V_TACTYPE_MFA, PW_LOGIN);
+	return;
+    }
+    if (session->mavisauth_res != S_permit)
+	session->author_data->status = TAC_PLUS_AUTHOR_STATUS_FAIL;
+
+    send_author_reply_final(session, session->author_data->status, session->author_data->msg, session->author_data->data, session->author_data->out_cnt,
+			    session->author_data->out_args);
+}
+
+void send_author_reply(tac_session *session, u_char status, char *msg, char *data, int arg_cnt, char **args)
+{
+    if (session->user && session->want_mfa
+	&& (status == TAC_PLUS_AUTHEN_STATUS_PASS || status == TAC_PLUS_AUTHOR_STATUS_PASS_ADD || status == TAC_PLUS_AUTHOR_STATUS_PASS_REPL)) {
+	session->author_data->status = status;
+	session->author_data->msg = msg;
+	session->author_data->data = data;
+	session->author_data->out_cnt = arg_cnt;;
+	session->author_data->out_args = args;
+
+	send_author_reply_mfa(session);
+	return;
+    }
+    send_author_reply_final(session, status, msg, data, arg_cnt, args);
+}
+
 /* Send an authentication reply packet indicating an error has occurred. */
 
 void send_authen_error(tac_session *session, char *fmt, ...)
@@ -315,9 +345,12 @@ void send_authen_reply(tac_session *session, int status, char *msg, int msg_len,
     reply->flags = flags;
 
     u_char *p = (u_char *) reply + TAC_AUTHEN_REPLY_FIXED_FIELDS_SIZE;
-    memcpy(p, msg, msg_len);
+    // msg and data may be NULL with length 0, memcpy() wants valid pointers even then
+    if (msg_len)
+	memcpy(p, msg, msg_len);
     p += msg_len;
-    memcpy(p, data, data_len);
+    if (data_len)
+	memcpy(p, data, data_len);
 
     if (status == TAC_PLUS_AUTHEN_STATUS_FAIL)
 	session->authfail_delay++;
@@ -908,9 +941,10 @@ static int rad_check_failed(struct context *ctx, rad_pak_hdr *pak)
 	return -1;
     }
 #ifdef WITH_SSL
-// The Message-Authenticator attribute is mandatory for RADIUS BLAST mitigation
-    int message_authenticator_required = pak->code == RADIUS_CODE_ACCESS_ACCEPT || pak->code == RADIUS_CODE_ACCESS_REJECT
-	|| pak->code == RADIUS_CODE_ACCESS_CHALLENGE;
+// The Message-Authenticator attribute is mandatory for RADIUS BLAST mitigation (but optional with TLS/DTLS)
+    int message_authenticator_required = ctx->aaa_protocol != S_radius_dtls && ctx->aaa_protocol != S_radius_tls &&
+	(pak->code == RADIUS_CODE_ACCESS_REQUEST || pak->code == RADIUS_CODE_ACCESS_ACCEPT || pak->code == RADIUS_CODE_ACCESS_REJECT
+	 || pak->code == RADIUS_CODE_ACCESS_CHALLENGE);
     if ((ctx->radius_1_1 == BISTATE_NO) && !message_authenticator && message_authenticator_required
 	&& !(ctx->host->bug_compatibility & CLIENT_BUG_NO_MESSAGE_AUTHENTICATOR)) {
 	report(NULL, LOG_INFO_CONN, ~0, "%s did not set Message-Authenticator attribute", ctx->device_addr_ascii.txt);
@@ -1147,7 +1181,7 @@ void rad_read(struct context *ctx, int cur)
 
 static ssize_t write_ex(int fd, const void *buf, size_t count, enum io_status *status)
 {
-    ssize_t len = write(fd, buf, count);
+    ssize_t len = Write(fd, buf, count);
     if (len == 0)
 	*status = io_status_close;
     else if (len < -1) {
@@ -1274,7 +1308,7 @@ void cleanup_session(tac_session *session)
 	mavis_cancel(mcx, session);
     mem_destroy(session->mem);
     mem_free(ctx->mem, &session);
-    if ((ctx->cleanup_when_idle == TRISTATE_YES)
+    if ((ctx->host->cleanup_when_idle == TRISTATE_YES)
 	&& (!ctx->single_connection_flag || (die_when_idle && !RB_first(ctx->sessions) && !RB_first(ctx->shellctxcache)))) {
 	if (ctx->out || ctx->delayed)	// pending output
 	    ctx->dying = 1;

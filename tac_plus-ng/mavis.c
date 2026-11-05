@@ -312,6 +312,9 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	(t = av_get(avc, AV_A_TIMESTAMP)) && (atoi(t) == session->session_id) &&	//
 	(result = av_get(avc, AV_A_RESULT)) && !strcmp(result, AV_V_RESULT_OK)) {
 
+	if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_MFA))
+	    session->mavisauth_res = S_permit;
+
 	tac_user *u = lookup_user(session);
 
 	if (u)
@@ -399,8 +402,12 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	    }
 	}
 
-	if (u->dynamic)
+	if (u->dynamic) {
+	    static uint32_t serial = 1;
 	    u->dynamic = io_now.tv_sec + r->caching_period;
+	    u->serial = serial;
+	    serial += 2;
+	}
 
 	if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHAP)) {
 	    session->mavisauth_res = S_permit;

@@ -45,12 +45,6 @@
 #include "misc/mymd5.h"
 #include <setjmp.h>
 
-#ifdef WITH_PCRE2
-#include <pcre2.h>
-#endif
-
-#include <regex.h>
-
 #ifdef WITH_SSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -260,7 +254,7 @@ static void rad_attr_val_dump_helper(u_char *data, size_t data_len, char **buf, 
 		    *buf_len -= val->name.len;
 		} else {
 		    int len = snprintf(*buf, *buf_len, "%u", i);
-		    if (len > 0) {
+		    if (len < (int) *buf_len) {
 			*buf += len;
 			*buf_len -= len;
 		    }

@@ -328,7 +328,7 @@ static void periodics_ctx(struct context *ctx, int cur __attribute__((unused)))
 
     tac_script_expire_exec_context(ctx);
 
-    if (ctx->cleanup_when_idle && !ctx->out && !ctx->delayed && !RB_first(ctx->sessions) && !RB_first(ctx->shellctxcache))
+    if (ctx->host->cleanup_when_idle && !ctx->out && !ctx->delayed && !RB_first(ctx->sessions) && !RB_first(ctx->shellctxcache))
 	cleanup(ctx, ctx->sock);
     else
 	io_sched_renew_proc(ctx->io, ctx, (void *) periodics_ctx);
@@ -414,7 +414,7 @@ void update_bio(struct context *ctx)
 {
     if (ctx->rbio) {
 	char buf[8192];
-	ssize_t len = read(ctx->sock, buf, sizeof(buf));
+	ssize_t len = Read(ctx->sock, buf, sizeof(buf));
 	if (len > 0)
 	    BIO_write(ctx->rbio, buf, len);
     }
@@ -603,7 +603,7 @@ static void read_px(struct context_px *ctx, int cur)
     char tmp[240] = { 0 };
     struct proxy_hdr_v2 *hdr = (struct proxy_hdr_v2 *) tmp;
     union proxy_addr *addr = (union proxy_addr *) &tmp[sizeof(struct proxy_hdr_v2)];
-    ssize_t len = recv(cur, &tmp, sizeof(tmp), MSG_PEEK);
+    ssize_t len = Recv(cur, &tmp, sizeof(tmp), MSG_PEEK);
     ctx->last_io = io_now.tv_sec;
     uint16_t hlen;
     if ((len < (ssize_t) sizeof(struct proxy_hdr_v2))
@@ -618,7 +618,7 @@ static void read_px(struct context_px *ctx, int cur)
 	    cleanup_px(ctx, cur);
 	return;
     }
-    UNUSED_RESULT(read(cur, &tmp, sizeof(struct proxy_hdr_v2) + hlen));
+    UNUSED_RESULT(Read(cur, &tmp, sizeof(struct proxy_hdr_v2) + hlen));
 
     sockaddr_union from = { 0 };
     switch (hdr->fam) {
@@ -629,7 +629,7 @@ static void read_px(struct context_px *ctx, int cur)
 	break;
     case 0x21:
 	from.sin6.sin6_family = AF_INET6;
-	from.sin6.sin6_port = addr->ipv6_addr.dst_port;
+	from.sin6.sin6_port = addr->ipv6_addr.src_port;
 	memcpy(&from.sin6.sin6_addr, addr->ipv6_addr.src_addr, 16);
 	break;
     case 0x00:
@@ -662,6 +662,8 @@ void reject_conn(struct context *ctx, const char *hint, const char *func, int li
 
     if (!hint)
 	hint = "";
+    if (*hint && hint != ctx->hint)
+	ctx->hint = mem_strdup(ctx->mem, (char *) hint);	// ${hint} for the connection log
     char *prehint = "", *posthint = "";
     if (*hint)
 	prehint = " (", posthint = ")";
@@ -841,6 +843,28 @@ static int ASN1_TIME_to_tm(const ASN1_TIME *s, struct tm *tm)
 
 static int cert_verify(struct context *ctx);
 
+// SSL_accept() failed: keep what OpenSSL knows about the failure for the connection log
+// before the error queue is consumed and the SSL object is freed by cleanup()
+static void set_tls_error(struct context *ctx)
+{
+    char buf[40];
+    str_set(&ctx->tls_conn_version, (char *) SSL_get_version(ctx->tls), 0);
+    unsigned long e = ERR_peek_error();
+    if (e) {
+	const char *reason = ERR_reason_error_string(e);
+	snprintf(buf, sizeof(buf), "%08lX", e);
+	str_set(&ctx->tls_conn_error_code, mem_strdup(ctx->mem, buf), 0);
+	if (reason)
+	    str_set(&ctx->tls_conn_error, mem_strdup(ctx->mem, (char *) reason), 0);
+    }
+    long v = SSL_get_verify_result(ctx->tls);
+    if (v != X509_V_OK) {
+	snprintf(buf, sizeof(buf), "%ld", v);
+	str_set(&ctx->tls_peer_cert_verify_code, mem_strdup(ctx->mem, buf), 0);
+	str_set(&ctx->tls_peer_cert_verify, mem_strdup(ctx->mem, (char *) X509_verify_cert_error_string(v)), 0);
+    }
+}
+
 static void accept_control_tls(struct context *ctx, int cur)
 {
     const char *hint = "";
@@ -861,11 +885,13 @@ static void accept_control_tls(struct context *ctx, int cur)
 	    io_set_o(ctx->io, cur);
 	    return;
 	default:
+	    set_tls_error(ctx);
 	    hint = (ctx->hint && *ctx->hint) ? ctx->hint : ERR_error_string(ERR_get_error(), NULL);
 	    reject_conn(ctx, hint, __func__, __LINE__);
 	    return;
 	}
     case 0:
+	set_tls_error(ctx);
 	hint = ERR_error_string(ERR_get_error(), NULL);
 	reject_conn(ctx, hint, __func__, __LINE__);
 	return;
@@ -887,6 +913,8 @@ static void accept_control_tls(struct context *ctx, int cur)
 	reject_conn(ctx, "SNI", __func__, __LINE__);
 	return;
     }
+    tac_host *by_address = ctx->host;	// before the PSK branch: "goto done" uses it
+
 #ifndef OPENSSL_NO_PSK
     if (ctx->tls_psk_identity.txt) {
 	if (SSL_version(ctx->tls) == TLS1_3_VERSION) {
@@ -908,7 +936,6 @@ static void accept_control_tls(struct context *ctx, int cur)
 	return;
     }
 
-    tac_host *by_address = ctx->host;
     //ctx->host = NULL;
 
 #if OPENSSL_VERSION_NUMBER < 0x30000000
@@ -929,15 +956,22 @@ static void accept_control_tls(struct context *ctx, int cur)
 	    ASN1_INTEGER *serial_asn1 = X509_get_serialNumber(cert);
 	    if (serial_asn1) {
 		char *b = buf;
-		for (int i = 0; i < serial_asn1->length; i++) {
-		    *b++ = hex[serial_asn1->data[i] >> 4];
-		    *b++ = hex[serial_asn1->data[i] & 0xf];
+#if OPENSSL_VERSION_NUMBER < 0x40100000
+		u_char *data = serial_asn1->data;
+		int data_len = serial_asn1->length;
+#else
+		const u_char *data = ASN1_STRING_get0_data(serial_asn1);
+		int data_len = ASN1_STRING_get_length(serial_asn1);
+#endif
+		for (int i = 0; i < data_len; i++) {
+		    *b++ = hex[data[i] >> 4];
+		    *b++ = hex[data[i] & 0xf];
 		}
 		*b = 0;
 		str_set(&ctx->tls_peer_serial, mem_strdup(ctx->mem, buf), 0);
 	    }
 
-	    X509_NAME *x;
+	    const X509_NAME *x;
 
 	    if ((x = X509_get_subject_name(cert))) {
 		char *t = X509_NAME_oneline(x, buf, sizeof(buf));
@@ -952,13 +986,23 @@ static void accept_control_tls(struct context *ctx, int cur)
 
 	    AUTHORITY_KEYID *aki = (AUTHORITY_KEYID *) X509_get_ext_d2i(cert, NID_authority_key_identifier, NULL, NULL);
 	    if (aki) {
-		char *s = mem_alloc(ctx->mem, 2 * aki->keyid->length + 1);
-		char *p = s;
-		for (int i = 0; i < aki->keyid->length; i++) {
-		    *p++ = hex[aki->keyid->data[i] >> 4];
-		    *p++ = hex[aki->keyid->data[i] & 0xf];
+		if (aki->keyid) {
+#if OPENSSL_VERSION_NUMBER < 0x40100000
+		    u_char *data = aki->keyid->data;
+		    int data_len = aki->keyid->length;
+#else
+		    const u_char *data = ASN1_STRING_get0_data(aki->keyid);
+		    int data_len = ASN1_STRING_get_length(aki->keyid);
+#endif
+		    char *s = mem_alloc(ctx->mem, 2 * data_len + 1);
+		    char *p = s;
+
+		    for (int i = 0; i < data_len; i++) {
+			*p++ = hex[data[i] >> 4];
+			*p++ = hex[data[i] & 0xf];
+		    }
+		    str_set(&ctx->tls_peer_cert_aki, s, 2 * data_len);
 		}
-		str_set(&ctx->tls_peer_cert_aki, s, 2 * aki->keyid->length);
 		AUTHORITY_KEYID_free(aki);
 	    }
 
@@ -1001,22 +1045,39 @@ static void accept_control_tls(struct context *ctx, int cur)
 			do {
 			    AUTHORITY_KEYID *aki = (AUTHORITY_KEYID *) X509_get_ext_d2i(cer, NID_authority_key_identifier, NULL, NULL);
 			    size_t aki_len = 0;
-			    if (aki)
+			    if (aki && aki->keyid)
+#if OPENSSL_VERSION_NUMBER < 0x40100000
 				aki_len = aki->keyid->length * 2;
+#else
+				aki_len = ASN1_STRING_get_length(aki->keyid) * 2;
+#endif
 			    char aki_txt[aki_len + 1];
 
 			    if (aki) {
-				char *p = aki_txt;
-				for (int i = 0; i < aki->keyid->length; i++) {
-				    *p++ = hex[aki->keyid->data[i] >> 4];
-				    *p++ = hex[aki->keyid->data[i] & 0xf];
+				if (aki->keyid) {
+				    char *p = aki_txt;
+#if OPENSSL_VERSION_NUMBER < 0x40100000
+				    u_char *data = aki->keyid->data;
+				    int data_len = aki->keyid->length;
+#else
+				    const u_char *data = ASN1_STRING_get0_data(aki->keyid);
+				    int data_len = ASN1_STRING_get_length(aki->keyid);
+#endif
+				    for (int i = 0; i < data_len; i++) {
+					*p++ = hex[data[i] >> 4];
+					*p++ = hex[data[i] & 0xf];
+				    }
 				}
 				AUTHORITY_KEYID_free(aki);
 			    }
 			    aki_txt[aki_len] = 0;
 
 			    ASN1_INTEGER *serial_asn1 = X509_get_serialNumber(cer);
+#if OPENSSL_VERSION_NUMBER < 0x40100000
 			    size_t serial_len = serial_asn1->length * 2;
+#else
+			    size_t serial_len = ASN1_STRING_get_length(serial_asn1) * 2;
+#endif
 			    size_t crlfile_len = ctx->host->realm->crl_basedir.len + 1 + (aki_len ? aki_len : (2 * MD5_LEN)) + 1 + serial_len + 1;
 
 			    char crlfile[crlfile_len];
@@ -1080,10 +1141,17 @@ static void accept_control_tls(struct context *ctx, int cur)
 			    }
 			    *p++ = '/';
 
+#if OPENSSL_VERSION_NUMBER < 0x40100000
+				u_char *data = serial_asn1->data;
+				int data_len = serial_asn1->length;
+#else
+				const u_char *data = ASN1_STRING_get0_data(serial_asn1);
+				int data_len = ASN1_STRING_get_length(serial_asn1);
+#endif
 			    if (serial_asn1) {
-				for (int i = 0; i < serial_asn1->length; i++) {
-				    *p++ = hex[serial_asn1->data[i] >> 4];
-				    *p++ = hex[serial_asn1->data[i] & 0xf];
+				for (int i = 0; i < data_len; i++) {
+				    *p++ = hex[data[i] >> 4];
+				    *p++ = hex[data[i] & 0xf];
 				}
 			    }
 			    *p = 0;
@@ -1131,15 +1199,26 @@ static void accept_control_tls(struct context *ctx, int cur)
 		    int current_dn_len = 0;
 		    int current_cn_len = 0;
 		    int san_count = sk_GENERAL_NAME_num(san);
-		    ctx->tls_peer_cert_san = mem_alloc(ctx->mem, san_count);
+		    ctx->tls_peer_cert_san = mem_alloc(ctx->mem, san_count * sizeof(char *));
 		    for (int i = 0; i < san_count; i++) {
 			GENERAL_NAME *val = sk_GENERAL_NAME_value(san, i);
-			switch (val->type) {
+#if OPENSSL_VERSION_NUMBER < 0x40100000
+			int type = val->type;
+#else
+			int type;
+			GENERAL_NAME_get0_value(val, &type);
+#endif
+			switch (type) {
 			case GEN_IPADD:
 #define CERT_SAN_PRIO 8
 			    if (prio < CERT_SAN_PRIO /* just once, so no <= */ ) {
+#if OPENSSL_VERSION_NUMBER < 0x40100000
 				u_char *data = val->d.iPAddress->data;
 				int data_len = val->d.iPAddress->length;
+#else
+				const u_char *data = ASN1_STRING_get0_data(val->d.iPAddress);
+				int data_len = ASN1_STRING_get_length(val->d.iPAddress);
+#endif
 				sockaddr_union su = { 0 };
 				switch (data_len) {
 				case 4:
@@ -1156,7 +1235,7 @@ static void accept_control_tls(struct context *ctx, int cur)
 				su_convert(&su, AF_INET);
 				struct in6_addr addr = { };
 				su_ptoh(&su, &addr);
-				if (by_address->tls_peer_cert_san_validation == TRISTATE_YES && memcmp(&addr, &ctx->device_addr, data_len))
+				if (by_address->tls_peer_cert_san_validation == TRISTATE_YES && memcmp(&addr, &ctx->device_addr, sizeof(addr)))
 				    continue;
 				radixtree_t *rxt = lookup_hosttree(ctx->realm);
 				if (rxt) {
@@ -1707,7 +1786,7 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 #endif
 	}
     }
-    if (ctx->tls_versions && !ctx->tls_autodetect) {
+    if (ctx->tls_versions && ctx->tls_autodetect != TRISTATE_YES) {
 	ctx->use_tls = (sd_ext->sd.type == SCM_ACCEPT) ? BISTATE_YES : BISTATE_NO;
 	ctx->use_dtls = (sd_ext->sd.type == SCM_UDPDATA) ? BISTATE_YES : BISTATE_NO;
     }
@@ -1739,7 +1818,7 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 	ctx->device_port_ascii = ctx->peer_port_ascii;
     } else {
 	str_set(&ctx->device_addr_ascii, mem_strdup(ctx->mem, su_ntoa(device_addr, buf, sizeof(buf)) ? buf : "<unknown>"), 0);
-	snprintf(buf, sizeof(buf), "%u", (short) su_get_port(device_addr));
+	snprintf(buf, sizeof(buf), "%u", su_get_port(device_addr));
 	str_set(&ctx->device_port_ascii, mem_strdup(ctx->mem, buf), 0);
     }
     ctx->host = h;
@@ -1799,7 +1878,7 @@ ssize_t recv_inject(struct context *ctx, void *buf, size_t len, int flags, enum 
 
     if (ctx->inject_buf) {
 	if (!ctx->inject_len) {
-	    res = recv(ctx->sock, ctx->inject_buf, INJECT_BUF_SIZE, 0);
+	    res = Recv(ctx->sock, ctx->inject_buf, INJECT_BUF_SIZE, 0);
 	    if (res > -1)
 		ctx->inject_len = res;
 	}
@@ -1816,7 +1895,7 @@ ssize_t recv_inject(struct context *ctx, void *buf, size_t len, int flags, enum 
 		ctx->inject_off = ctx->inject_len = 0;
 	}
     } else
-	res = recv(ctx->sock, buf, len, flags);
+	res = Recv(ctx->sock, buf, len, flags);
 
     if (res < 0) {
 	if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -1968,7 +2047,7 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 	    // DTLS Application Data, but we haven't seen the handshake, possibly due to a daemon
 	    // restart. Just return some junk data back , the peer is likely to retry with a new handshake.
 	    char junk[128] = { 0 };
-	    UNUSED_RESULT(write(ctx->sock, junk, sizeof(junk)));
+	    UNUSED_RESULT(Write(ctx->sock, junk, sizeof(junk)));
 	    cleanup(ctx, ctx->sock);
 	    return;
 	}
@@ -2024,10 +2103,16 @@ static void accept_control_check_tls_final(struct context *ctx)
 	if (ctx->realm->tls_sni_required != TRISTATE_YES)
 	    ctx->sni_passed = BISTATE_YES;
 
+	SSL_CTX *ssl_ctx = NULL;
+	ctx->tls = NULL;
+
 	if (ctx->use_tls_psk)
-	    ctx->tls = SSL_new(ctx->use_tls ? ctx->realm->tls_psk : (ctx->use_dtls ? ctx->realm->dtls_psk : NULL));
+	    ssl_ctx = ctx->use_tls ? ctx->realm->tls_psk : (ctx->use_dtls ? ctx->realm->dtls_psk : NULL);
 	else
-	    ctx->tls = SSL_new(ctx->use_tls ? ctx->realm->tls : (ctx->use_dtls ? ctx->realm->dtls : NULL));
+	    ssl_ctx = ctx->use_tls ? ctx->realm->tls : (ctx->use_dtls ? ctx->realm->dtls : NULL);
+
+	if (ssl_ctx)
+	    ctx->tls = SSL_new(ssl_ctx);
 
 	if (ctx->tls) {
 	    SSL_set_app_data(ctx->tls, ctx);

@@ -347,7 +347,7 @@ int io_poll(struct io_context *io, int poll_timeout)
 {
     int cax = 0;
     int res = mech_io_poll(io, poll_timeout, &cax);
-    int unreg[cax];
+    int unreg[cax + 1];		// a zero-length VLA is undefined, cax may be 0
     int unreg_count = 0;
 
     for (int i = 0; i < cax; i++) {
@@ -651,7 +651,9 @@ static int select_io_poll(struct io_context *io, int poll_timeout, int *cax)
     wfds = io->Select.wfds;
     efds = io->Select.efds;
 
-    r = res = select(io->Select.nfds + 1, &rfds, &wfds, &efds, poll_timeout < 0 ? NULL : &timeout);
+    do {
+	r = res = select(io->Select.nfds + 1, &rfds, &wfds, &efds, poll_timeout < 0 ? NULL : &timeout);
+    } while (r < 0 && errno == EINTR);
 
     if (r < 0) {
 	logerr("Fatal select(2) error (%ld, ..., (%lu, %lu))", (long int) io->Select.nfds + 1, (u_long) timeout.tv_sec, (u_long) timeout.tv_usec);
@@ -768,7 +770,9 @@ static int poll_io_poll(struct io_context *io, int poll_timeout, int *cax)
 
     *cax = 0;
 
-    r = res = poll(io->Poll.ufds, (nfds_t) (io->Poll.nfds), poll_timeout);
+    do {
+	r = res = poll(io->Poll.ufds, (nfds_t) (io->Poll.nfds), poll_timeout);
+    } while (r < 0 && errno == EINTR);
 
     Debug((DEBUG_PROC, "io_poll (%p) timeout: %d, res: %d\n", io, poll_timeout, res));
 
@@ -847,11 +851,15 @@ static void poll_io_register(struct io_context *io, int fd)
 #ifdef WITH_EPOLL
 static void epoll_io_close(struct io_context *io, int fd)
 {
-    if (io->Epoll.changemap[fd] > -1) {
-	io->Epoll.changelist[io->Epoll.changemap[fd]] = -1;
-	io->Epoll.changemap[fd] = -1;
-	io->Epoll.nchanges--;
+    int i = io->Epoll.changemap[fd];
+    if (i > -1 && i < io->Epoll.nchanges && io->Epoll.changelist[i] == fd) {
+	// Move the last pending change into the slot of fd. Just decrementing
+	// nchanges would drop the change of whatever fd is queued last.
+	int last = io->Epoll.changelist[--io->Epoll.nchanges];
+	io->Epoll.changelist[i] = last;
+	io->Epoll.changemap[last] = i;
     }
+    io->Epoll.changemap[fd] = -1;
 }
 
 static void epoll_addchange(struct io_context *io, int fd)
@@ -992,18 +1000,23 @@ static int epoll_io_poll(struct io_context *io, int poll_timeout, int *cax)
 	    struct epoll_event e;
 	    e.data.fd = fd;
 	    e.events = (io->handler[fd].want_read ? EPOLLIN : 0) | (io->handler[fd].want_write ? EPOLLOUT : 0);
+	    // Unmap first, so io_close() below doesn't reorder the list while it's being walked.
+	    io->Epoll.changemap[fd] = -1;
 	    if (epoll_ctl(io->Epoll.fd, EPOLL_CTL_MOD, fd, &e) < 0) {
 #ifndef DEBUG
 		logerr("epoll_ctl (%s:%d)", __FILE__, __LINE__);
 #endif
 		io_close(io, fd);
 	    }
-	    io->Epoll.changemap[fd] = -1;
 	}
     }
     io->Epoll.nchanges = 0;
 
-    int res = epoll_wait(io->Epoll.fd, io->Epoll.eventlist, io->nfds_max, io->Epoll.ndiskfile ? 0 : poll_timeout);
+    int res;
+    do {
+	res = epoll_wait(io->Epoll.fd, io->Epoll.eventlist, io->nfds_max, io->Epoll.ndiskfile ? 0 : poll_timeout);
+    } while (res < 0 && errno == EINTR);
+
     if (res < 0) {
 	logerr("epoll_wait (%s:%d)", __FILE__, __LINE__);
 	exit(EX_SOFTWARE);
@@ -1164,13 +1177,16 @@ static int devpoll_io_poll(struct io_context *io, int poll_timeout, int *cax)
     dvp.dp_timeout = poll_timeout > -1 ? poll_timeout : 0;
 
     if (io->Devpoll.nchanges &&
-	(write(io->Devpoll.fd, io->Devpoll.changelist,
+	(Write(io->Devpoll.fd, io->Devpoll.changelist,
 	       sizeof(struct pollfd) * io->Devpoll.nchanges) != (ssize_t) sizeof(struct pollfd) * io->Devpoll.nchanges)) {
 	logerr("devpoll write (%s:%d)", __FILE__, __LINE__);
 	abort();
     }
 
-    res = ioctl(io->Devpoll.fd, DP_POLL, &dvp);
+    do {
+	res = ioctl(io->Devpoll.fd, DP_POLL, &dvp);
+    } while (res < 0 && errno == EINTR);
+
     Debug((DEBUG_PROC, "devpoll ioctl returns %d\n", res));
 
     if (0 > res) {
@@ -1498,7 +1514,12 @@ static int port_io_poll(struct io_context *io, int poll_timeout, int *cax)
     timeout.tv_sec = poll_timeout / 1000;
     timeout.tv_nsec = 1000000 * (poll_timeout - 1000 * timeout.tv_sec);
 
-    if (-1 == port_getn(io->Port.fd, io->Port.eventlist, io->Port.nevents_max, &nevents, poll_timeout < 0 ? NULL : &timeout)) {
+    int res;
+    do {
+	res = port_getn(io->Port.fd, io->Port.eventlist, io->Port.nevents_max, &nevents, poll_timeout < 0 ? NULL : &timeout);
+    } while (res < 0 && errno == EINTR);
+
+    if (res < 0) {
 	if (errno != ETIME) {
 	    logerr("port_getn (errno = %d)", errno);
 	    abort();

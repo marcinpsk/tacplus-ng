@@ -294,7 +294,13 @@ struct tac_profile {
     u_int debug;		/* debug flags */
 };
 
-struct ssh_key;
+struct ssh_key {
+    struct ssh_key *next;
+    char *key;
+    size_t key_len;
+    char hash[1];
+};
+
 struct ssh_key_id;
 struct tac_alias;
 typedef struct tac_alias tac_alias;
@@ -304,6 +310,7 @@ typedef struct {
     TAC_NAME_ATTRIBUTES;
     char *msg;			/* message for this user */
     u_int line;			/* line number defined on */
+    uint32_t serial;
     time_t valid_from;		/* validity period start */
     time_t valid_until;		/* validity period end */
     time_t dynamic;		/* caching timeout. Always 0 for static users */
@@ -537,14 +544,18 @@ typedef struct tac_pak tac_pak;
 typedef struct rad_pak rad_pak;
 
 struct author_data {
+    char *msg;
+    char *data;
     char *admin_msg;		/* admin message (optional) */
     int status;			/* return status */
     int in_cnt;			/* input arg count */
     char **in_args;		/* input arguments */
     int out_cnt;		/* output arg cnt */
     char **out_args;		/* output arguments */
-    int is_shell;
-    int is_cmd;
+    struct {
+	BISTATE(is_shell);
+	BISTATE(is_cmd);
+    } __attribute__((__packed__));
     // out args:
     char **attrs_m;		/* mandatory */
     char **attrs_o;		/* optional (from NAS) */
@@ -609,11 +620,14 @@ struct tac_session {
     char *password;
     char *password_new;
     char *password_bad;
+    char *password_prompt;	/* set by "message PASSWORD" in a rule */
     char *challenge;
     char *motd;
     char *welcome_banner;
+    struct log_item *motd_banner;	/* set by script action */
     char *ssh_key_hash;
     char *ssh_key_id;
+    struct ssh_key *ssh_key;
     int session_id;
     time_t session_timeout;
     struct author_data *author_data;
@@ -664,6 +678,8 @@ struct tac_session {
 	BISTATE(authorized);
 	BISTATE(eval_log_raw);
 	BISTATE(want_mfa);
+	BISTATE(eval_prompt_only);
+	BISTATE(flag_rule_prompt);
     } __attribute__((__packed__));
     enum token mavisauth_res;
     u_int authfail_delay;
@@ -681,9 +697,11 @@ struct tac_session {
 struct user_profile_cache {
     tac_user *user;
     tac_profile *profile;
+    struct log_item *motd_banner;
     time_t valid_until;
     enum token res;
     uint32_t crc32;
+    uint32_t serial;
 };
 
 struct context {
@@ -730,6 +748,10 @@ struct context {
     str_t tls_peer_serial;
     str_t tls_psk_identity;
     str_t tls_sni;
+    str_t tls_conn_error;
+    str_t tls_conn_error_code;
+    str_t tls_peer_cert_verify;
+    str_t tls_peer_cert_verify_code;
     char **tls_peer_cert_san;
     size_t tls_peer_cert_san_count;
     BIO *rbio;
@@ -749,7 +771,6 @@ struct context {
 	BISTATE(sni_passed);
 	BISTATE(fingerprint_matched);
 #endif
-	TRISTATE(cleanup_when_idle);	/* cleanup context when idle */
 	BISTATE(unencrypted_flag);	/* not MD5 encrypted? */
 	BISTATE(single_connection_flag);	/* single-connection enabled? */
 	BISTATE(single_connection_test);	/* single-connection capable, but not telling? */
@@ -791,6 +812,8 @@ struct context_logfile {
     struct buffer *buf;
     pid_t pid;
     int dying;
+    int logwrite_retry_scheduled;
+    suseconds_t logwrite_retry_usec;
     struct logfile *lf;
     char path[1];		/* current log file name */
 };
@@ -873,6 +896,7 @@ void free_user(tac_user *);
 void cfg_init(void);
 enum token tac_keycode(char *);
 enum token eval_ruleset(tac_session *, tac_realm *);
+void eval_ruleset_prompt(tac_session *);
 
 static __inline__ int minimum(int a, int b)
 {

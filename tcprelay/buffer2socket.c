@@ -13,7 +13,7 @@ static const char rcsid[] __attribute__((used)) = "$Id$";
 
 void buffer2socket(struct context *ctx, int cur)
 {
-    size_t l;
+    ssize_t l;
     off_t o;
     int fd_in;
     struct buffer *b;
@@ -43,7 +43,7 @@ void buffer2socket(struct context *ctx, int cur)
     else
 #endif
 #endif
-	l = write(cur, b->buf + b->offset, b->length - b->offset);
+	l = Write(cur, b->buf + b->offset, b->length - b->offset);
 
     if (l <= 0) {
 	if (errno != EAGAIN)

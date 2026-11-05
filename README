@@ -35,9 +35,7 @@ Build environment
 
 Required tools:
 
-- A supported C compiler, plus linker. LLVM is fine, GCC should work too
-  (but I don't check this regulary, and it might have issues with
-  optimization, so that's disabled for now).
+- A supported C compiler, plus linker. LLVM is fine, GCC should work too.
 - GNU make
 - Perl
 - Various development header files and libraries (see PREREQUISITES.txt)
@@ -108,6 +106,10 @@ Original GIT:
 Project page:
 
   https://www.pro-bono-publico.de/projects
+
+Note
+====
+tac_plus-ng is continuously hardened by the community. A major 2026 security and stability audit by Aleksey Mochalin (utilizing Claude) resulted in about 50 solved issues, significantly elevating the software's resilience.
 
 Author
 ======

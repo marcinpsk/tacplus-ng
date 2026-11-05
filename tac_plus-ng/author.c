@@ -149,9 +149,9 @@ void author(tac_session *session, tac_pak_hdr *hdr)
 
     session->author_data->in_args = cmd_argp;	/* input command arguments */
 
-    session->author_data->is_cmd = session->cmdline.len;
+    session->author_data->is_cmd = session->cmdline.len ? BISTATE_YES : BISTATE_NO;
     if (session->service.txt)
-	session->author_data->is_shell = !strcmp(session->service.txt, "shell");
+	session->author_data->is_shell = strcmp(session->service.txt, "shell") ? BISTATE_NO : BISTATE_YES;
 
     if (bad_nas_args(session, session->author_data)) {
 	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_FAIL, session->message.txt, NULL, 0, NULL);
@@ -283,13 +283,6 @@ static void do_author(tac_session *session)
     enum token res = S_unknown;
     struct author_data *data = session->author_data;
 
-    res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
-    if (res == S_deny) {
-	report(DEBAUTHZ, "user %s realm %s denied by ACL", session->username.txt, session->ctx->realm->name.txt);
-	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_FAIL, session->message.txt,
-			  eval_log_format(session, session->ctx, NULL, li_denied_by_acl, io_now.tv_sec, NULL), 0, NULL);
-    }
-
     if (!session->user && session->username.len) {
 	if ((session->user = lookup_user(session))) {
 	    session->debug |= session->user->debug;
@@ -298,6 +291,14 @@ static void do_author(tac_session *session)
 	}
 	if (query_mavis_info(session, do_author, PW_LOGIN))
 	    return;
+    }
+
+    res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
+    if (res == S_deny) {
+	report(DEBAUTHZ, "user %s realm %s denied by ACL", session->username.txt, session->ctx->realm->name.txt);
+	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_FAIL, session->message.txt,
+			  eval_log_format(session, session->ctx, NULL, li_denied_by_acl, io_now.tv_sec, NULL), 0, NULL);
+	return;
     }
 
     if (session->mavisauth_res == S_error && session->ctx->host->authfallback != TRISTATE_YES) {

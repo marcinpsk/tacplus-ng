@@ -146,7 +146,7 @@ static struct hint_struct hints[hint_max] = {
 
 #undef HINT
 
-#define TAC_SYM_TO_CODE(A) (((A) == S_permit) ? TAC_PLUS_AUTHEN_STATUS_PASS : TAC_PLUS_AUTHEN_STATUS_FAIL)
+#define TAC_SYM_TO_CODE(A) (((A) == S_permit) ? TAC_PLUS_AUTHEN_STATUS_PASS : ((A) == S_more ? TAC_PLUS_AUTHEN_STATUS_MORE : TAC_PLUS_AUTHEN_STATUS_FAIL))
 #define RAD_SYM_TO_CODE(A) (((A) == S_permit) ? RADIUS_CODE_ACCESS_ACCEPT : RADIUS_CODE_ACCESS_REJECT)
 
 static char *get_hint(tac_session *session, enum hint_enum h)
@@ -370,7 +370,7 @@ static int verify_cisco_type89(char *password, char *p, char type)
 static int verify_cisco_asa_md5(const char *username, const char *password, const char *hash_in)
 {
     char buf[33] = { 0 };
-    char *bufp = stpncpy(buf, password, sizeof(buf));
+    char *bufp = stpncpy(buf, password, sizeof(buf) - 1);
     if (username && *username && (bufp - buf < 28)) {
 	char *e = bufp + 4;
 	while (bufp < e)
@@ -942,7 +942,7 @@ static char *set_welcome_banner(tac_session *session, struct log_item *fmt_dflt)
 
 static char *set_motd_banner(tac_session *session)
 {
-    struct log_item *fmt = session->ctx->host->motd;
+    struct log_item *fmt = session->motd_banner ? session->motd_banner : session->ctx->host->motd;
 
     if (!fmt)
 	fmt = li_motd_dflt;
@@ -1311,6 +1311,7 @@ static void do_ascii_login(tac_session *session)
 	}
 
 	if (!session->password) {
+	    eval_ruleset_prompt(session);
 	    send_password_prompt(session, pw_ix, do_ascii_login);
 	    return;
 	}
@@ -1576,7 +1577,8 @@ static void mschap_helper(tac_session *session, enum token *res, enum hint_enum 
 	    mschapv1_ntresp(session->mschap.challenge, session->user->passwd[PW_MSCHAP]->value, nt_response, nt_hash);
 	    if (!memcmp(nt_response, session->mschap.nt_response, MSCHAP_NT_RESPONSE_LEN)) {
 		*res = S_permit;
-		*nt_hash_set = 1;
+		if (nt_hash_set)
+		    *nt_hash_set = 1;
 	    }
 	} else {
 	    *hint = hint_no_cleartext;
@@ -1652,7 +1654,10 @@ static void do_mschapv2(tac_session *session)
 	session->mschap.challenge_len = MSCHAPv2_CHALLENGE_LEN;
 	u_char *response = session->authen_data->data + session->authen_data->data_len - MSCHAP_TAC_RESPONSE_LEN;
 	u_char *chal = mem_alloc(session->mem, MSCHAPv1_CHALLENGE_LEN);
-	mschapv2_challenghash(session->mschap.nt_response, session->mschap.challenge, session->username.txt, chal);
+	// The peer challenge is the first MSCHAPv2_CHALLENGE_LEN bytes of the response.
+	// session->mschap.nt_response is still NULL here; it is set a few lines below.
+	// (The RADIUS path in this file already passes the response pointer, with that comment.)
+	mschapv2_challenghash(response, session->mschap.challenge, session->username.txt, chal);
 	session->mschap.challenge = chal;
 	session->mschap.challenge_len = MSCHAPv1_CHALLENGE_LEN;
 	session->mschap.nt_response = response + MSCHAP_LM_RESPONSE_LEN;
@@ -1746,6 +1751,81 @@ static void do_pap(tac_session *session)
 
     authen_final(session, res, info, hint, resp, 0, NULL, 0);
 }
+
+#ifdef TAC_PLUS_AUTHEN_TYPE_SSH
+static void do_ssh(tac_session *session)
+{
+    char *info = "ssh key retrieval";
+    enum token res = S_deny;
+    enum hint_enum hint = hint_nosuchuser;
+
+    if (set_tac_user(session, info))
+	return;
+
+    if (query_mavis_info(session, do_ssh, PW_LOGIN))
+	return;
+
+    u_char *data = NULL;
+    size_t data_len = 0;
+    if (session->user) {
+#define data_len_max 65535
+	data = calloc(1, data_len_max);
+
+	size_t tmp_len = 0;
+	if (session->seq_no == 1)
+	    session->ssh_key = session->user->ssh_key;
+
+	for (struct ssh_key * tmp_key = session->ssh_key; tmp_key; tmp_key = tmp_key->next)
+	    tmp_len += tmp_key->key_len;
+
+	res = tmp_len ? S_permit : S_deny; // FIXME -- is this actually correct, or does it break local fallback on the NAD?
+
+	if (res == S_permit) {
+	    res = session->authorized ? S_permit : ((S_deny == author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first)
+						     || S_permit != eval_ruleset(session, session->ctx->realm)) ? S_deny : S_permit);
+
+	    hint = (res == S_permit) ? hint_permitted : hint_denied_by_acl;
+	} else
+	    hint = hint_denied;
+
+	if (res == S_permit)
+	    user_expiry_check(&res, session->user, &hint);
+
+	if (res == S_permit) {
+	    u_char *tmp_ptr = data;
+	    while (session->ssh_key) {
+		if (session->ssh_key->key_len && session->ssh_key->key_len < data_len_max) {
+		    if (data_len_max >= 1 + session->ssh_key->key_len) {
+			memcpy(tmp_ptr, session->ssh_key->key, session->ssh_key->key_len);
+			tmp_ptr += session->ssh_key->key_len;
+			*tmp_ptr++ = session->ssh_key->key[0] == '-' ? 1 : 0;
+			data_len += 1 + session->ssh_key->key_len;
+		    }
+		}
+		session->ssh_key = session->ssh_key->next;
+	    }
+	}
+#if 0
+// FIXME, the specs are incomplete, and the client is under no obligation to
+// actually honor the MORE flag.
+	tmp_len = 0;
+	for (struct ssh_key * tmp_key = session->ssh_key; tmp_key; tmp_key = tmp_key->next)
+	    tmp_len += tmp_key->key_len;
+	if (tmp_len)
+	    res = S_more;
+#endif
+    }
+
+    if (res == S_permit || res == S_more)
+	hint = hint_permitted;
+
+    report_auth(session, info, hint, res);
+    send_authen_reply(session, TAC_SYM_TO_CODE(res), NULL, 0, data, data_len, 0);
+    if (data)
+	free(data);
+#undef data_len_max
+}
+#endif
 
 #ifdef TAC_PLUS_AUTHEN_TYPE_SSHKEY
 // This is proof-of-concept code for SSH key validation with minor protocol changes.
@@ -2157,6 +2237,12 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 		    session->authfn = do_local;
 		    break;
 #endif
+#ifdef TAC_PLUS_AUTHEN_TYPE_SSH
+		case TAC_PLUS_AUTHEN_TYPE_SSH:
+		    if (hdr->version == TAC_PLUS_VER_TWO)
+			session->authfn = do_ssh;
+		    break;
+#endif
 		}
 	    }
 	    break;
@@ -2272,7 +2358,7 @@ static void mppe_add_key(tac_session *session, u_char *masterkey, u_char attribu
     struct iovec iov[4] = {
 	{.iov_base = (void *) masterkey,.iov_len = 16 },
 	{.iov_base = (void *) SHApad1,.iov_len = sizeof(SHApad1) },
-	{.iov_base = (void *) (magic == 3 ? Magic3 : Magic2),.iov_len = sizeof(Magic2) - 1},
+	{.iov_base = (void *) (magic == 3 ? Magic3 : Magic2),.iov_len = sizeof(Magic2) - 1 },
 	{.iov_base = (void *) SHApad2,.iov_len = sizeof(SHApad2) }
     };
     sha1v(key, sizeof(key), iov, 4);
@@ -2507,7 +2593,7 @@ static void do_radius_login(tac_session *session)
 		struct iovec iov[3] = {
 		    {.iov_base = (void *) nt_hashhash,.iov_len = MSCHAP_NT_HASH_LEN },
 		    {.iov_base = (void *) session->mschap.nt_response,.iov_len = MSCHAP_NT_RESPONSE_LEN },
-		    {.iov_base = (void *) Magic1,.iov_len = sizeof(Magic1) - 1}
+		    {.iov_base = (void *) Magic1,.iov_len = sizeof(Magic1) - 1 }
 		};
 		sha1v(digest, sizeof(digest), iov, 3);
 	    }
@@ -2517,7 +2603,7 @@ static void do_radius_login(tac_session *session)
 		struct iovec iov[3] = {
 		    {.iov_base = (void *) digest,.iov_len = SHA_DIGEST_LENGTH },
 		    {.iov_base = (void *) session->mschap.challenge,.iov_len = 8 },
-		    {.iov_base = (void *) Magic2,.iov_len = sizeof(Magic2) - 1}
+		    {.iov_base = (void *) Magic2,.iov_len = sizeof(Magic2) - 1 }
 		};
 		sha1v(digest, sizeof(digest), iov, 3);
 	    }
