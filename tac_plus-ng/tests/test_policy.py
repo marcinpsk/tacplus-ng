@@ -131,6 +131,41 @@ class NestedNets(PolicyTestCase):
 
 
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+class NetsFromHostsFile(PolicyTestCase):
+    """Each name on a "dns preload file" line gives a net of that name the address."""
+
+    CONFIG = None
+
+    def test_every_name_on_the_line_has_the_address(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts = os.path.join(tmp, "hosts")
+            with open(hosts, "w") as f:
+                f.write("127.0.6.1 primary alias1 alias2\n")
+                f.write("127.0.6.2 other alias1\n")
+            self.daemon = self.start_daemon(USER + """
+	dns preload file = "%s"
+	net primary { }
+	net alias1 { }
+	net alias2 { }
+	net other { }
+	net unlisted { }
+	device nas {
+		address = 127.0.6.0/24
+		key = tactest
+	}
+""" % hosts + shell_profile([
+                ("primary", "device == primary"),
+                ("alias1", "device == alias1"),
+                ("alias2", "device == alias2"),
+                ("other", "device == other"),
+                ("unlisted", "device == unlisted"),
+            ]))
+        self.assertEqual(self.holds("127.0.6.1"), ["alias1", "alias2", "primary"])
+        self.assertEqual(self.holds("127.0.6.2"), ["alias1", "other"])
+        self.assertEqual(self.holds("127.0.6.3"), [])
+
+
+@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
 class DeviceAddress(PolicyTestCase):
     """#134: "nas == <net>" stopped matching: the device address kept for the rules was not the one looked up.
 
