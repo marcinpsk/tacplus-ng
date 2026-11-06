@@ -414,6 +414,10 @@ class MtBackend(DaemonTestCase):
         """The sanitizer builds catch the use of the freed serial of the request."""
         self.login_with_profile("{ member = admins }")
 
+    def test_profile_longer_than_the_format_buffer(self):
+        """parse_user_profile_fmt() starts with a buffer of 131070 bytes, which the external module can't exceed."""
+        self.login_with_profile("{" + " " * 140000 + "member = admins }")
+
 
 if __name__ == "__main__":
     unittest.main()
