@@ -535,6 +535,7 @@ cache expire FTP = 0</pre></li>
 <p><tt class="literal">setenv</tt> <span class="emphasis"><i class="emphasis">Variable</i></span> <tt class="literal">=</tt> <span class="emphasis"><i class="emphasis">Value</i></span></p>
 <p>Set environment variables.</p>
 <p>In <span class="emphasis"><i class="emphasis">tac_plus-ng</i></span> context the value can be type6 encoded.</p>
+<p>With <tt class="literal">setenv</tt>, the child process gets only the variables that you set. It does not inherit the environment of the daemon. So also set each other variable that the program needs, for example <tt class="literal">PATH</tt> or <tt class="literal">LD_LIBRARY_PATH</tt>. Without <tt class="literal">setenv</tt>, the child process inherits the complete environment.</p>
 </li>
 <li>
 <p><tt class="literal">exec =</tt> <span class="emphasis"><i class="emphasis">Path</i></span> <span class="emphasis"><i class="emphasis">Arguments ...</i></span></p>
@@ -571,6 +572,7 @@ cache expire FTP = 0</pre></li>
 <p><tt class="literal">setenv</tt> <span class="emphasis"><i class="emphasis">Variable</i></span> <tt class="literal">=</tt> <span class="emphasis"><i class="emphasis">Value</i></span></p>
 <p>Set environment variables.</p>
 <p>In <span class="emphasis"><i class="emphasis">tac_plus-ng</i></span> context the value can be type6 encoded.</p>
+<p>With <tt class="literal">setenv</tt>, the child process gets only the variables that you set. It does not inherit the environment of the daemon. So also set each other variable that the program needs, for example <tt class="literal">PATH</tt> or <tt class="literal">LD_LIBRARY_PATH</tt>. Without <tt class="literal">setenv</tt>, the child process inherits the complete environment.</p>
 </li>
 <li>
 <p><tt class="literal">exec =</tt> <span class="emphasis"><i class="emphasis">Path</i></span> <span class="emphasis"><i class="emphasis">Arguments ...</i></span></p>

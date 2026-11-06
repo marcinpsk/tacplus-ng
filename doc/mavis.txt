@@ -501,6 +501,11 @@ cache expire FTP = 0
      * setenv Variable = Value
        Set environment variables.
        In tac_plus-ng context the value can be type6 encoded.
+       With setenv, the child process gets only the variables that
+       you set. It does not inherit the environment of the daemon.
+       So also set each other variable that the program needs, for
+       example PATH or LD_LIBRARY_PATH. Without setenv, the child
+       process inherits the complete environment.
      * exec = Path Arguments ...
        Set path and arguments (including argv[0]) of the
        authentication program. It's recommended to enclose the
@@ -541,6 +546,11 @@ ename"
      * setenv Variable = Value
        Set environment variables.
        In tac_plus-ng context the value can be type6 encoded.
+       With setenv, the child process gets only the variables that
+       you set. It does not inherit the environment of the daemon.
+       So also set each other variable that the program needs, for
+       example PATH or LD_LIBRARY_PATH. Without setenv, the child
+       process inherits the complete environment.
      * exec = Path Arguments ...
        Set path and arguments (including argv[0]) of the
        authentication program. It's recommended to enclose the
