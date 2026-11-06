@@ -939,16 +939,14 @@ static void parse_etc_hosts(char *url, tac_realm *r)
 		continue;
 	}
 	if (sym.code != S_eof) {
-	    char *firstname = strdup(sym.buf);
-	    add_revmap(r, &a, firstname, cm, 0);
+	    add_revmap(r, &a, sym.buf, cm, 0);
 
 	    // add forward mapping for all hostnames:
 	    do {
-		dns_add_a(&r->dns_tree_a, &a, firstname);
+		dns_add_a(&r->dns_tree_a, &a, sym.buf);
 		sym_get(&sym);
 	    }
 	    while (sym.code != S_eof && sym.line == line);
-	    free(firstname);
 	}
     }
 
