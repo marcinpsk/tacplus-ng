@@ -30,6 +30,7 @@
 
 import base64
 import os
+import resource
 import struct
 import subprocess
 import sys
@@ -413,6 +414,18 @@ class MtBackend(DaemonTestCase):
     def test_login_uses_the_profile_of_the_backend(self):
         """The sanitizer builds catch the use of the freed serial of the request."""
         self.login_with_profile("{ member = admins }")
+
+    def test_profile_above_the_limit_of_the_external_module(self):
+        """external-mt can deliver a profile that the 66536 bytes reply buffer of external can't hold."""
+        self.login_with_profile("{" + " " * 140000 + "member = admins }")
+
+    def test_profile_larger_than_the_stack(self):
+        """16 MB is above the stack limit of 8 MB set here; a stack buffer of that size killed the worker."""
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        limit = 8 * 1024 * 1024 if hard == resource.RLIM_INFINITY else min(8 * 1024 * 1024, hard)
+        resource.setrlimit(resource.RLIMIT_STACK, (limit, hard))
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_STACK, (soft, hard))
+        self.login_with_profile("{" + " " * 16000000 + "member = admins }")
 
 
 if __name__ == "__main__":
