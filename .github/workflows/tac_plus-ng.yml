@@ -82,6 +82,8 @@ jobs:
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
+      # the TLS tests skip in a build without OpenSSL
+      - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /OpenSSL
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -101,6 +103,8 @@ jobs:
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
+      # the TLS tests skip in a build without OpenSSL
+      - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /OpenSSL
       - if: failure()
         run: mkdir -p build/tests-work && sudo journalctl --no-pager -t tac_plus-ng > build/tests-work/journal.txt || true
       - if: failure()
@@ -133,6 +137,8 @@ jobs:
       - run: nm build/*/tests-prefix/sbin/tac_plus-ng | grep -q __asan_init
       - run: nm build/*/tests-prefix/sbin/tac_plus-ng | grep -q __ubsan_handle_
       - run: TACTEST_PREFIX=$(echo $PWD/build/*/tests-prefix) tac_plus-ng/tests/run-tests
+      # the TLS tests skip in a build without OpenSSL
+      - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /OpenSSL
       - if: failure()
         run: mkdir -p build/tests-work && sudo journalctl --no-pager -t tac_plus-ng > build/tests-work/journal.txt || true
       - if: failure()

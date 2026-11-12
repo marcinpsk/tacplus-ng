@@ -26,7 +26,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 
-"""TACACS+ over TLS (RFC 9887), TLS 1.3 PSK and RADIUS over TLS.
+"""TACACS+ over TLS (RFC 9887), TLS 1.3 PSK, RADIUS over TLS and over DTLS.
 
 The certificates come from a CA made for the test class (tactest.tls.CA,
 the openssl command); nothing is kept in the tree. Skipped without the
@@ -557,6 +557,23 @@ class RadiusOverTls(TlsTestCase):
         except (TimeoutError, ConnectionError, ssl.SSLError):
             return
         self.assertNotEqual(r.code_name, "Access-Accept", r)
+
+
+class RadiusOverDtls(TlsTestCase):
+    """A "protocol = UDP tls = yes" listener (RADIUS over DTLS, RFC 7360) takes no plain RADIUS."""
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP tls = yes"}
+    BODY = TLS_REALM + DEVICES.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") + RADSEC
+
+    def test_plain_radius_on_the_dtls_listener_gets_no_answer(self):
+        """The same request that the plain UDP listener accepts."""
+        plain = self.radius("radsecret", source="127.0.0.9")
+        self.assertEqual(plain.access_request("alice", "alicepw", message_authenticator=True).code_name,
+                         "Access-Accept")
+        c = self.radius("radsecret", listener="dtls", source="127.0.0.9", timeout=2.0)
+        with self.assertRaises(TimeoutError):
+            c.access_request("alice", "alicepw", message_authenticator=True)
 
 
 @unittest.skipUnless(LINUX, "CPU time from /proc")
