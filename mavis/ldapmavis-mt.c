@@ -737,6 +737,9 @@ static void *run_thread(void *arg)
     av_ctx *ac = (av_ctx *) arg;
     LDAP *ldap = NULL;
     if (LDAP_SUCCESS != LDAP_init(&ldap, &capabilities)) {
+	// ldap_initialize() may have succeeded, and a failed bind keeps the connection open
+	if (ldap)
+	    ldap_unbind_ext_s(ldap, NULL, NULL);
 	av_set(ac, AV_A_RESULT, AV_V_RESULT_ERROR);
 	av_write(ac, MAVIS_FINAL);
 	return NULL;
@@ -761,6 +764,7 @@ static void *run_thread(void *arg)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
 
     if (rc == LDAP_SUCCESS && ldap_count_entries(ldap, res) != 1) {
+	ldap_msgfree(res);
 	av_set(ac, AV_A_RESULT, AV_V_RESULT_FAIL);
 	result = MAVIS_FINAL;
     } else if (rc == LDAP_SUCCESS) {
@@ -1048,13 +1052,13 @@ static void *run_thread(void *arg)
 	    result = MAVIS_FINAL;
 	}
 
-	if (ldap)
-	    ldap_unbind_ext_s(ldap, NULL, NULL);
 	ldap_memfree(dn);
     } else {
+	ldap_msgfree(res);
 	av_set(ac, AV_A_RESULT, AV_V_RESULT_ERROR);
 	result = MAVIS_FINAL;
     }
+    ldap_unbind_ext_s(ldap, NULL, NULL);
     av_write(ac, result);
     return NULL;
 }
