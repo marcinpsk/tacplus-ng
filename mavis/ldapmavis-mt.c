@@ -622,7 +622,7 @@ static void dnhash_add_entry(LDAP *ldap, struct dnhash **h, struct berval **dire
 
 static int dnhash_add_entry_groupOfNames(LDAP *ldap, struct dnhash **h, char *dn, int level)
 {
-    if (level < 1)
+    if (level < 1 && ldap_group_depth != -2)
 	return -1;
 
     struct dnlist list[2] = { 0 };
