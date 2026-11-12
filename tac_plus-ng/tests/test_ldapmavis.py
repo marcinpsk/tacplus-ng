@@ -307,6 +307,46 @@ class LdapMt(LdapTests, DaemonTestCase):
         return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER,
                                  exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
 
+    def test_filter_format_is_checked(self):
+        """LDAP_FILTER and LDAP_FILTER_GROUP take one %s and no other conversion, else ldapmavis-mt does not start.
+
+        %% is a percent sign.
+        """
+        slapd = Slapd(os.path.dirname(self.scratch_file("slapd.conf", "")))
+        self.addCleanup(slapd.stop)
+        slapd.start()
+        good = 'setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=%s))"'
+        cases = (("LDAP_FILTER", "(&(objectClass=inetOrgPerson)(uid=%s)(!(cn=100%%)))", True),
+                 ("LDAP_FILTER", "(&(uid=%s)(cn=%s))", False),
+                 ("LDAP_FILTER", "(uid=%d)", False),
+                 ("LDAP_FILTER_GROUP", "(member=%s)%n", False))
+        for i, (name, value, ok) in enumerate(cases):
+            with self.subTest(name=name, value=value):
+                # MAVIS logs the stderr of the back-end to syslog only
+                log = self.scratch_file(f"ldapmavis-mt-{i}.log", "")
+                wrapper = self.scratch_file(f"ldapmavis-mt-{i}.sh", f'#!/bin/sh\nexec "{LDAPMAVIS}" 2>>"{log}"\n')
+                os.chmod(wrapper, 0o755)
+                module = MODULE.substitute(module="external-mt", url=slapd.url, base=BASE, reader=READER,
+                                           exec=f'"{wrapper}" "ldapmavis-mt"')
+                setenv = f'setenv {name} = "{value}"'
+                module = module.replace(good, setenv if name == "LDAP_FILTER" else good + "\n\t\t" + setenv)
+                # the worker starts the back-end when it starts; check=False: the back-end exits on purpose
+                d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF), check=ok,
+                                      name=f"{self.id().split('.')[-1]}-{i}")
+                if ok:
+                    with d.connect() as c:
+                        self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+                    continue
+                message = f'{name} "{value}": the filter must have %s exactly once'
+                deadline = time.monotonic() + START_TIMEOUT
+                while time.monotonic() < deadline:
+                    with open(log, errors="replace") as f:
+                        text = f.read()
+                    if message in text:
+                        break
+                    select.select([], [], [], 0.05)
+                self.assertIn(message, text)
+
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
