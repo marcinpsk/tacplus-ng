@@ -67,7 +67,9 @@ env:
   # openssl: the command makes the certificates of the TLS tests and is their TLS-PSK client
   # libpam0g-dev, libldap-dev, libradcli-dev: the -mt backends
   # libc-ares-dev: the DNS code (WITH_DNS); the --minimum build still tests without it
-  UBUNTU_PACKAGES: build-essential clang llvm perl libpcre2-dev libssl-dev libcrypt-dev python3 openssl libpam0g-dev libldap-dev libradcli-dev libc-ares-dev
+  # slapd, libnet-ldap-perl, libio-socket-ssl-perl: the LDAP server and the Perl LDAP back-end of test_ldapmavis.py;
+  #   the AppArmor profile of slapd confines it to /etc/ldap and /var/lib/ldap, the tests run it in the build tree
+  UBUNTU_PACKAGES: build-essential clang llvm perl libpcre2-dev libssl-dev libcrypt-dev python3 openssl libpam0g-dev libldap-dev libradcli-dev libc-ares-dev slapd libnet-ldap-perl libio-socket-ssl-perl
 
 jobs:
   alpine-gcc:
@@ -76,11 +78,12 @@ jobs:
     container: alpine:3.20
     timeout-minutes: 15
     steps:
-      - run: apk add --no-cache gcc musl-dev make perl openssl-dev pcre2-dev linux-headers python3 openssl linux-pam-dev openldap-dev radcli-dev c-ares-dev
+      - run: apk add --no-cache gcc musl-dev make perl openssl-dev pcre2-dev linux-headers python3 openssl linux-pam-dev openldap-dev radcli-dev c-ares-dev openldap openldap-back-mdb perl-ldap perl-io-socket-ssl
       - uses: actions/checkout@v5
       - run: tac_plus-ng/tests/run-tests
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
+      - run: test -x /usr/sbin/slapd && perl -MNet::LDAP -MIO::Socket::SSL -e 1
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
       - if: failure()
         uses: actions/upload-artifact@v4
@@ -93,13 +96,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq $UBUNTU_PACKAGES
+      - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $UBUNTU_PACKAGES && sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd
       - uses: actions/checkout@v5
       - run: tac_plus-ng/tests/run-tests
         env:
           CC: gcc
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
+      - run: test -x /usr/sbin/slapd && perl -MNet::LDAP -MIO::Socket::SSL -e 1
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
       - if: failure()
         run: mkdir -p build/tests-work && sudo journalctl --no-pager -t tac_plus-ng > build/tests-work/journal.txt || true
@@ -124,7 +128,7 @@ jobs:
         clang -g -fno-omit-frame-pointer -fsanitize=address,undefined
         -fsanitize-ignorelist=${{ github.workspace }}/tac_plus-ng/tests/sanitizer-ignorelist.txt
     steps:
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq $UBUNTU_PACKAGES
+      - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $UBUNTU_PACKAGES && sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd
       # high mmap randomization on recent kernels breaks the ASan runtime
       - run: sudo sysctl -w vm.mmap_rnd_bits=28
       - uses: actions/checkout@v5
@@ -153,7 +157,7 @@ jobs:
       matrix:
         cc: [gcc, clang]
     steps:
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq $UBUNTU_PACKAGES
+      - run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $UBUNTU_PACKAGES && sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd
       - uses: actions/checkout@v5
       - run: tac_plus-ng/tests/run-tests --build-only
         env:
