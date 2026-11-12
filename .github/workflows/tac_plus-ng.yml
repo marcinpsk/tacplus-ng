@@ -64,7 +64,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # openssl: the command makes the certificates of the TLS tests and is their TLS-PSK client
+  # openssl: the command makes the certificates of the TLS tests and is their TLS-PSK and DTLS client
   # libpam0g-dev, libldap-dev, libradcli-dev: the -mt backends
   # libc-ares-dev: the DNS code (WITH_DNS); the --minimum build still tests without it
   UBUNTU_PACKAGES: build-essential clang llvm perl libpcre2-dev libssl-dev libcrypt-dev python3 openssl libpam0g-dev libldap-dev libradcli-dev libc-ares-dev
@@ -82,6 +82,9 @@ jobs:
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
+      # the TLS tests skip in a build without OpenSSL, the DTLS tests also if s_client has no DTLS
+      - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /OpenSSL
+      - run: openssl s_client -help 2>&1 | grep -- -dtls1_2
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -101,6 +104,9 @@ jobs:
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
+      # the TLS tests skip in a build without OpenSSL, the DTLS tests also if s_client has no DTLS
+      - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /OpenSSL
+      - run: openssl s_client -help 2>&1 | grep -- -dtls1_2
       - if: failure()
         run: mkdir -p build/tests-work && sudo journalctl --no-pager -t tac_plus-ng > build/tests-work/journal.txt || true
       - if: failure()
@@ -133,6 +139,9 @@ jobs:
       - run: nm build/*/tests-prefix/sbin/tac_plus-ng | grep -q __asan_init
       - run: nm build/*/tests-prefix/sbin/tac_plus-ng | grep -q __ubsan_handle_
       - run: TACTEST_PREFIX=$(echo $PWD/build/*/tests-prefix) tac_plus-ng/tests/run-tests
+      # the TLS tests skip in a build without OpenSSL, the DTLS tests also if s_client has no DTLS
+      - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /OpenSSL
+      - run: openssl s_client -help 2>&1 | grep -- -dtls1_2
       - if: failure()
         run: mkdir -p build/tests-work && sudo journalctl --no-pager -t tac_plus-ng > build/tests-work/journal.txt || true
       - if: failure()

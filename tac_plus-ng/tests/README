@@ -17,8 +17,8 @@ Quick start on a fresh Ubuntu:
     tac_plus-ng/tests/run-tests
 
 The openssl command makes the certificates of the TLS tests (in their
-scratch directories; none are kept in the tree) and is the TLS-PSK client;
-without it those tests are skipped.
+scratch directories; none are kept in the tree) and is the TLS-PSK and the
+DTLS client; without it those tests are skipped.
 
 run-tests configures and builds tac_plus-ng and the tactester client
 (only with OpenSSL; without it the tactester tests are skipped), installs
@@ -68,10 +68,11 @@ Layout
                        split packets; several sessions on one connection;
                        over TLS (RFC 9887); PROXY protocol v1/v2 headers
       tls.py           a throw-away CA (openssl command), client contexts,
-                       TLS 1.3 PSK through "openssl s_client"
+                       TLS 1.3 PSK and DTLS 1.2 through "openssl s_client"
       crypto.py        MD4 and DES for MS-CHAP (not in the standard library)
-      radius.py        RADIUS client: PAP Access-Request over UDP, TCP or
-                       TLS; Message-Authenticator in requests and replies
+      radius.py        RADIUS client: PAP Access-Request and
+                       Accounting-Request over UDP, TCP, TLS or DTLS;
+                       Message-Authenticator in requests and replies
       mavis_stub.py    a MAVIS backend for the "external" module, on top of
                        the installed mavis.py; tests change its answers
                        through a JSON file while the daemon runs

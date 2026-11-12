@@ -26,17 +26,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 
-"""Minimal RADIUS client (RFC 2865/2866, RADIUS/TCP RFC 6613, RADIUS/TLS RFC 6614), standard library only.
+"""Minimal RADIUS client (RFC 2865/2866, RADIUS/TCP RFC 6613, RADIUS/TLS RFC 6614, RADIUS/DTLS RFC 7360).
 
   Packet      code, identifier, authenticator and attributes as fields;
               encode() can override the length and the Message-Authenticator
-  Client      UDP, TCP or TLS over TCP: send_raw(), recv_raw() with a
-              timeout, exchange() checks the Response Authenticator,
-              access_request() with a PAP User-Password of arbitrary bytes
+  Client      UDP, TCP, TLS over TCP or a datagram socket-like object
+              (tls.DtlsSocket): send_raw(), recv_raw() with a timeout,
+              exchange() checks the Response Authenticator,
+              access_request() with a PAP User-Password of arbitrary bytes,
+              accounting_request()
 
 Message-Authenticator (RFC 3579 3.2) is added on request;
 reply_message_authenticator() checks the one in a reply. Over TLS the
-shared secret is "radsec" (RFC 6614 2.3).
+shared secret is "radsec" (RFC 6614 2.3), over DTLS "radius/dtls" (RFC 7360 2.1).
 """
 
 import hashlib
@@ -46,6 +48,7 @@ import socket
 import struct
 
 ACCESS_REQUEST = 1
+ACCOUNTING_REQUEST = 4
 
 CODES = {1: "Access-Request", 2: "Access-Accept", 3: "Access-Reject", 4: "Accounting-Request",
          5: "Accounting-Response", 11: "Access-Challenge", 12: "Status-Server", 13: "Status-Client"}
@@ -54,6 +57,7 @@ CODES = {1: "Access-Request", 2: "Access-Accept", 3: "Access-Reject", 4: "Accoun
 USER_NAME = 1
 USER_PASSWORD = 2
 REPLY_MESSAGE = 18
+ACCT_STATUS_TYPE = 40
 MESSAGE_AUTHENTICATOR = 80
 
 HEADER_LEN = 20
@@ -167,15 +171,20 @@ class Client:
     """One UDP socket (or TCP connection with tcp=True) to the daemon. Usable as a context manager.
 
     tls: an ssl.SSLContext for RADIUS over TLS (implies tcp); the secret
-    should then be "radsec".
+    should then be "radsec". sock: a connected datagram socket-like object
+    instead of a new UDP socket, e.g. tls.DtlsSocket.
     """
 
-    def __init__(self, addr, secret, timeout=5.0, source=None, tcp=False, tls=None):
+    def __init__(self, addr, secret, timeout=5.0, source=None, tcp=False, tls=None, sock=None):
         host, port = addr[0], addr[1]
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self.secret = _b(secret)
         self.timeout = timeout
         self.tcp = tcp or tls is not None
+        if sock is not None:
+            self.sock = sock
+            self.sock.settimeout(timeout)
+            return
         self.sock = socket.socket(family, socket.SOCK_STREAM if self.tcp else socket.SOCK_DGRAM)
         self.sock.settimeout(timeout)
         try:
@@ -241,3 +250,9 @@ class Client:
                           (USER_PASSWORD, encrypt_password(password, self.secret, req.authenticator))]
         req.attributes += [(t, _b(v)) for t, v in attributes]
         return self.exchange(req, message_authenticator)
+
+    def accounting_request(self, attributes):
+        """Accounting-Request; RFC 2866 3: the Request Authenticator is MD5(packet with 16 zero bytes + secret)."""
+        req = Packet(ACCOUNTING_REQUEST, authenticator=bytes(16), attributes=attributes)
+        req.authenticator = hashlib.md5(req.encode() + self.secret).digest()
+        return self.exchange(req)

@@ -28,7 +28,6 @@
 
 """RADIUS: Access-Request with PAP over UDP and RADIUS/TCP."""
 
-import hashlib
 import os
 import struct
 import select
@@ -42,8 +41,6 @@ from tactest.daemon import parse_only
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 SECRET = "radsecret"
 NAS = "127.0.0.6"
-ACCOUNTING_REQUEST = 4
-ACCT_STATUS_TYPE = 40
 CLOSE_TIMEOUT = 10.0    # waiting for the daemon to close a connection: generous, it does come
 
 POLICY = """
@@ -243,13 +240,9 @@ class MessageAuthenticatorRequired(DaemonTestCase):
 
     def test_issue281_accounting_request_needs_none(self):
         """RFC 2866 has no Message-Authenticator in accounting; not required there."""
-        attrs = bytes([radius.USER_NAME, 7]) + b"alice" + bytes([ACCT_STATUS_TYPE, 6]) + struct.pack("!I", 1)
-        head = struct.pack("!BBH", ACCOUNTING_REQUEST, 9, radius.HEADER_LEN + len(attrs))
-        # RFC 2866 3: the Request Authenticator is MD5(packet with 16 zero bytes + secret)
-        auth = hashlib.md5(head + bytes(16) + attrs + SECRET.encode()).digest()
         c = self.radius(SECRET, source="127.0.0.6")
-        c.send_raw(head + auth + attrs)
-        self.assertEqual(radius.Packet.decode(c.recv_raw()).code_name, "Accounting-Response")
+        r = c.accounting_request([(radius.USER_NAME, b"alice"), (radius.ACCT_STATUS_TYPE, struct.pack("!I", 1))])
+        self.assertEqual(r.code_name, "Accounting-Response", r)
 
 
 class DroppedDatagram(DaemonTestCase):

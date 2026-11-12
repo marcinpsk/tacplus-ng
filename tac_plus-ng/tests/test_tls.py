@@ -26,7 +26,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 
-"""TACACS+ over TLS (RFC 9887), TLS 1.3 PSK and RADIUS over TLS.
+"""TACACS+ over TLS (RFC 9887), TLS 1.3 PSK, RADIUS over TLS and over DTLS.
 
 The certificates come from a CA made for the test class (tactest.tls.CA,
 the openssl command); nothing is kept in the tree. Skipped without the
@@ -36,6 +36,7 @@ openssl command or in a build without OpenSSL.
 import os
 import socket
 import ssl
+import struct
 import time
 import unittest
 
@@ -557,6 +558,77 @@ class RadiusOverTls(TlsTestCase):
         except (TimeoutError, ConnectionError, ssl.SSLError):
             return
         self.assertNotEqual(r.code_name, "Access-Accept", r)
+
+
+class RadiusOverDtls(TlsTestCase):
+    """RADIUS over DTLS (RFC 7360) on a "protocol = UDP tls = yes" listener, through "openssl s_client -dtls1_2"."""
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP tls = yes"}
+    BODY = TLS_REALM + DEVICES.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") + RADSEC
+
+    @classmethod
+    def setUpClass(cls):
+        if not tls.dtls_client_available():
+            raise unittest.SkipTest("openssl s_client has no DTLS")
+        super().setUpClass()
+
+    def dtls(self, client="certnas"):
+        sock = tls.DtlsSocket((self.daemon.address, self.daemon.ports["dtls"]), self.ca.cert, self.certs[client],
+                              timeout=10.0)
+        return self.radius("radius/dtls", listener="dtls", sock=sock, timeout=10.0)
+
+    def test_access_accept(self):
+        r = self.dtls().access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
+
+    def test_access_reject(self):
+        self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
+
+    def test_several_requests_in_one_session(self):
+        c = self.dtls()
+        for password, code in (("alicepw", "Access-Accept"), ("wrong", "Access-Reject"), ("alicepw", "Access-Accept")):
+            with self.subTest(password=password):
+                self.assertEqual(c.access_request("alice", password).code_name, code)
+
+    def test_unknown_certificate_name_falls_back_to_the_address(self):
+        r = self.dtls("nobody").access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [], "a device other than localhost selected")
+
+    def test_accounting(self):
+        r = self.dtls().accounting_request([(radius.USER_NAME, b"alice"),
+                                            (radius.ACCT_STATUS_TYPE, struct.pack("!I", 1))])
+        self.assertEqual(r.code_name, "Accounting-Response", r)
+
+    def test_plain_radius_on_the_dtls_listener_gets_no_answer(self):
+        """The same request that the plain UDP listener accepts."""
+        plain = self.radius("radsecret", source="127.0.0.9")
+        self.assertEqual(plain.access_request("alice", "alicepw", message_authenticator=True).code_name,
+                         "Access-Accept")
+        c = self.radius("radsecret", listener="dtls", source="127.0.0.9", timeout=2.0)
+        with self.assertRaises(TimeoutError):
+            c.access_request("alice", "alicepw", message_authenticator=True)
+
+
+class RadiusDtlsAutoDetect(RadiusOverDtls):
+    """"tls = auto" on the UDP listener: DTLS and plain RADIUS on the same port."""
+
+    LISTEN = {"dtls": "protocol = UDP tls = auto"}
+
+    test_plain_radius_on_the_dtls_listener_gets_no_answer = None    # the port takes plain RADIUS too
+
+    def test_plain_radius_on_the_same_port(self):
+        c = self.radius("radsecret", listener="dtls", source="127.0.0.9")
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+
+
+class RadiusDtlsRealmAutoDetect(RadiusDtlsAutoDetect):
+    """"tls auto-detect = yes" in the realm: a plain UDP listener takes DTLS too."""
+
+    LISTEN = {"dtls": "protocol = UDP"}
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
 
 
 @unittest.skipUnless(LINUX, "CPU time from /proc")
