@@ -612,6 +612,25 @@ class RadiusOverDtls(TlsTestCase):
             c.access_request("alice", "alicepw", message_authenticator=True)
 
 
+class RadiusDtlsAutoDetect(RadiusOverDtls):
+    """"tls = auto" on the UDP listener: DTLS and plain RADIUS on the same port."""
+
+    LISTEN = {"dtls": "protocol = UDP tls = auto"}
+
+    test_plain_radius_on_the_dtls_listener_gets_no_answer = None    # the port takes plain RADIUS too
+
+    def test_plain_radius_on_the_same_port(self):
+        c = self.radius("radsecret", listener="dtls", source="127.0.0.9")
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+
+
+class RadiusDtlsRealmAutoDetect(RadiusDtlsAutoDetect):
+    """"tls auto-detect = yes" in the realm: a plain UDP listener takes DTLS too."""
+
+    LISTEN = {"dtls": "protocol = UDP"}
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
+
+
 @unittest.skipUnless(LINUX, "CPU time from /proc")
 class PeerCloses(TlsTestCase):
     """PR 201, 203, 204: a connection the peer closed in the middle of a packet kept the worker busy.
