@@ -211,11 +211,6 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
 
-    i = 0;
-    rc = ldap_set_option(*ldap, LDAP_OPT_X_TLS_NEWCTX, &i);
-    if (rc != LDAP_SUCCESS)
-	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
-
     rc = ldap_set_option(*ldap, LDAP_OPT_REFERRALS, LDAP_OPT_OFF);
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
@@ -254,7 +249,7 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_CERTFILE
     tmp = getenv("LDAP_OPT_X_TLS_CERTFILE");
     if (tmp)
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_CACERTFILE, tmp);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_CERTFILE, tmp);
 #endif
 
 #ifdef LDAP_OPT_X_TLS_CIPHER_SUITE
@@ -304,16 +299,16 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_PROTOCOL_MAX
     tmp = getenv("LDAP_OPT_X_TLS_PROTOCOL_MAX");
     if (tmp) {
-	int val = atoi(tmp);
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_KEYFILE, &val);
+	int val = (int) strtol(tmp, NULL, 0);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_PROTOCOL_MAX, &val);
     }
 #endif
 
 #ifdef LDAP_OPT_X_TLS_PROTOCOL_MIN
     tmp = getenv("LDAP_OPT_X_TLS_PROTOCOL_MIN");
     if (tmp) {
-	int val = atoi(tmp);
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_KEYFILE, &val);
+	int val = (int) strtol(tmp, NULL, 0);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_PROTOCOL_MIN, &val);
     }
 #endif
 
@@ -356,9 +351,14 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_PEERKEY_HASH
     tmp = getenv("LDAP_OPT_X_TLS_PEERKEY_HASH");
     if (tmp)
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_KEYFILE, tmp);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_PEERKEY_HASH, tmp);
 #endif
 
+    // the TLS context takes the options above only when it is made
+    i = 0;
+    rc = ldap_set_option(*ldap, LDAP_OPT_X_TLS_NEWCTX, &i);
+    if (rc != LDAP_SUCCESS)
+	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
 
     rc = LDAP_bind(*ldap, ldap_dn, ldap_pw);
     if (rc != LDAP_SUCCESS)
