@@ -6,11 +6,14 @@ attribute of the Access-Accept to TACMEMBER ("group_attribute=Class").
 
 import os
 import string
+import subprocess
 import unittest
 
 from tactest import SOURCE, DaemonTestCase, prefix
+from tactest.daemon import sanitizer_env
 
 RADMAVIS = os.path.join(prefix(), "sbin", "radmavis-mt")
+RADMAVIS_LEGACY = os.path.join(prefix(), "sbin", "radmavis")
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 SECRET = "radsecret"
 NAS = "127.0.0.6"
@@ -144,6 +147,17 @@ class RadiusServer(DaemonTestCase):
             self.assertEqual(c.pap("alice", "alicepw").status_name, "FAIL")
         with a.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+
+
+@unittest.skipUnless(os.path.exists(RADMAVIS_LEGACY), "the build has no radmavis (radcli missing)")
+class RadmavisProgram(unittest.TestCase):
+    def test_starts(self):
+        """Without arguments radmavis prints its usage: the dynamic loader finds every library of radmavis."""
+        p = subprocess.run([RADMAVIS_LEGACY], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, timeout=30, env=sanitizer_env(), check=False)
+        out = p.stdout.decode(errors="replace")
+        self.assertIn("Usage: radmavis", out)
+        self.assertEqual(p.returncode, 255, out)
 
 
 if __name__ == "__main__":
