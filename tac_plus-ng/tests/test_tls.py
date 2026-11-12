@@ -36,6 +36,7 @@ openssl command or in a build without OpenSSL.
 import os
 import socket
 import ssl
+import struct
 import time
 import unittest
 
@@ -560,11 +561,46 @@ class RadiusOverTls(TlsTestCase):
 
 
 class RadiusOverDtls(TlsTestCase):
-    """A "protocol = UDP tls = yes" listener (RADIUS over DTLS, RFC 7360) takes no plain RADIUS."""
+    """RADIUS over DTLS (RFC 7360) on a "protocol = UDP tls = yes" listener, through "openssl s_client -dtls1_2"."""
 
     UDP = True
     LISTEN = {"dtls": "protocol = UDP tls = yes"}
     BODY = TLS_REALM + DEVICES.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") + RADSEC
+
+    @classmethod
+    def setUpClass(cls):
+        if not tls.dtls_client_available():
+            raise unittest.SkipTest("openssl s_client has no DTLS")
+        super().setUpClass()
+
+    def dtls(self, client="certnas"):
+        sock = tls.DtlsSocket((self.daemon.address, self.daemon.ports["dtls"]), self.ca.cert, self.certs[client],
+                              timeout=10.0)
+        return self.radius("radius/dtls", listener="dtls", sock=sock, timeout=10.0)
+
+    def test_access_accept(self):
+        r = self.dtls().access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
+
+    def test_access_reject(self):
+        self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
+
+    def test_several_requests_in_one_session(self):
+        c = self.dtls()
+        for password, code in (("alicepw", "Access-Accept"), ("wrong", "Access-Reject"), ("alicepw", "Access-Accept")):
+            with self.subTest(password=password):
+                self.assertEqual(c.access_request("alice", password).code_name, code)
+
+    def test_unknown_certificate_name_falls_back_to_the_address(self):
+        r = self.dtls("nobody").access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [], "a device other than localhost selected")
+
+    def test_accounting(self):
+        r = self.dtls().accounting_request([(radius.USER_NAME, b"alice"),
+                                            (radius.ACCT_STATUS_TYPE, struct.pack("!I", 1))])
+        self.assertEqual(r.code_name, "Accounting-Response", r)
 
     def test_plain_radius_on_the_dtls_listener_gets_no_answer(self):
         """The same request that the plain UDP listener accepts."""

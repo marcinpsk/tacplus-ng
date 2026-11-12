@@ -27,7 +27,7 @@
 
 
 """TLS for the tests: a throw-away CA made with the openssl command, client
-contexts, and a TLS 1.3 PSK client.
+contexts, a TLS 1.3 PSK client and a DTLS client.
 
 Nothing is kept in the tree: CA() creates keys and certificates in a
 scratch directory, the way tac_plus-ng/sample/democa does it with make
@@ -36,9 +36,12 @@ generation is slow on a loaded host.
 
 The standard library ssl module has no TLS-PSK client before Python 3.13,
 so PskSocket runs "openssl s_client -psk" and talks through its pipes; it
-has the few socket methods tacacs.Connection uses.
+has the few socket methods tacacs.Connection uses. The ssl module has no
+DTLS at all, so DtlsSocket does the same with "openssl s_client -dtls"
+for radius.Client.
 
-openssl_available() lets a test skip when the command is missing.
+openssl_available() and dtls_client_available() let a test skip when the
+command or its DTLS client is missing.
 """
 
 import os
@@ -55,6 +58,15 @@ from .daemon import scratch_dir
 
 def openssl_available():
     return shutil.which("openssl") is not None
+
+
+def dtls_client_available():
+    """An OpenSSL built with "no-dtls" has no -dtls1_2 option in s_client."""
+    if not openssl_available():
+        return False
+    p = subprocess.run(["openssl", "s_client", "-help"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       stdin=subprocess.DEVNULL, timeout=60)
+    return b"-dtls1_2" in p.stdout
 
 
 def _openssl(*args, cwd=None):
@@ -157,23 +169,23 @@ class CA:
             shutil.rmtree(self.dir, ignore_errors=True)
 
 
-class PskSocket:
-    """TLS 1.3 with a pre-shared key through "openssl s_client", for tacacs.Connection(sock=...).
+class SClientSocket:
+    """A connection through "openssl s_client", for a client that takes a socket-like object.
 
     -quiet: no session information on stdout, only what the server sends;
     -nocommands: no command letters in what we send. If the handshake fails,
-    s_client exits and the reader sees EOF -- a connection the daemon
-    closed. MSG_PEEK is emulated with a buffer.
+    s_client exits and the reader sees EOF. MSG_PEEK is emulated with a
+    buffer.
     """
 
-    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256"):
+    def __init__(self, addr, options, timeout=5.0):
         host, port = addr[0], addr[1]
         target = "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
         self.timeout = timeout
         self.peeked = b""
         self.err = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(["openssl", "s_client", "-connect", target, "-tls1_3", "-ciphersuites", cipher,
-                                      "-psk_identity", identity, "-psk", key_hex, "-quiet", "-nocommands"],
+        self.proc = subprocess.Popen(["openssl", "s_client", "-connect", target] + list(options)
+                                     + ["-quiet", "-nocommands"],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
                                      start_new_session=True)
         self.out = self.proc.stdout.fileno()
@@ -189,7 +201,7 @@ class PskSocket:
             self.proc.stdin.write(data)
             self.proc.stdin.flush()
         except BrokenPipeError:
-            raise ConnectionResetError("openssl s_client exited:\n%s" % self.stderr())
+            raise ConnectionResetError("openssl s_client exited:\n%s" % self.stderr()) from None
 
     def recv(self, n, flags=0):
         if not self.peeked:
@@ -219,3 +231,31 @@ class PskSocket:
             except OSError:
                 pass
         self.err.close()
+
+
+class PskSocket(SClientSocket):
+    """TLS 1.3 with a pre-shared key, for tacacs.Connection(sock=...)."""
+
+    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256"):
+        super().__init__(addr, ["-tls1_3", "-ciphersuites", cipher, "-psk_identity", identity, "-psk", key_hex],
+                         timeout)
+
+
+class DtlsSocket(SClientSocket):
+    """DTLS 1.2 with a client certificate, for radius.Client(sock=...).
+
+    s_client sends what one read of its stdin returns as one DTLS record,
+    and writes each record it receives to stdout: one RADIUS packet per
+    record (RFC 7360 2.2), as long as the test sends one packet at a time.
+    -timeout lets s_client send a lost handshake message again.
+    """
+
+    def __init__(self, addr, ca, cert, timeout=5.0):
+        super().__init__(addr, ["-dtls1_2", "-timeout", "-CAfile", ca, "-verify_return_error",
+                                "-cert", cert[0], "-key", cert[1]], timeout)
+
+    def recv(self, n, flags=0):
+        data = super().recv(n, flags)
+        if not data:
+            raise ConnectionError("openssl s_client exited:\n%s" % self.stderr())
+        return data
