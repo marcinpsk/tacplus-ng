@@ -222,7 +222,7 @@ $module
 
 
 class AdTests:
-    """The tests for both back-ends; a subclass sets MODULE, EXEC and env() (its TLS settings)."""
+    """The tests for both back-ends; a subclass sets MODULE, EXEC, MESSAGE (its bind error text) and env() (TLS)."""
 
     @classmethod
     def setUpClass(cls):
@@ -312,35 +312,11 @@ class AdTests:
         for user, code, _ in BIND_ERRORS:
             with self.subTest(user=user, code=code), d.connect() as c:
                 self.assertEqual(c.pap(self.login(user), user + "-pw").status_name, "FAIL")
-            if code in ("773", "533", "532"):
+            if code in ("773", "532"):
                 continue
             with self.subTest(user=user, code=code, login="ascii"), d.connect() as c:
                 self.assertEqual(c.ascii_login(self.login(user), user + "-pw").statuses, ["GETPASS", "FAIL"])
 
-
-@unittest.skipUnless(URL, SKIP_REASON)
-@unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
-class AdMt(AdTests, DaemonTestCase):
-    CONFIG = None
-    MODULE = "external-mt"
-    EXEC = f'"{LDAPMAVIS}" "ldapmavis-mt"'
-
-    def env(self):
-        return {"LDAP_OPT_X_TLS_CACERTFILE": settings()["TACTEST_SAMBA_CA"],
-                "LDAP_OPT_X_TLS_REQUIRE_CERT": "LDAP_OPT_X_TLS_DEMAND"}
-
-
-@unittest.skipUnless(URL, SKIP_REASON)
-@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
-class AdPerl(AdTests, DaemonTestCase):
-    CONFIG = None
-    MODULE = "external"
-    EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
-
-    def env(self):
-        # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
-        return {"TLS_OPTIONS": f"verify => 'require', cafile => '{settings()['TACTEST_SAMBA_CA']}'",
-                "LDAP_CONNECT_TIMEOUT": "5"}
 
     def test_bind_error_messages(self):
         """The text for the "data" code of the AD bind error goes to the client."""
@@ -351,7 +327,7 @@ class AdPerl(AdTests, DaemonTestCase):
             password = "wrong" if user == "alice" else user + "-pw"
             with self.subTest(user=user, code=code), d.connect() as c:
                 r = c.pap(self.login(user), password)
-                self.assertEqual((r.status_name, r.server_msg), ("FAIL", text + "\n"), r)
+                self.assertEqual((r.status_name, r.server_msg), ("FAIL", self.MESSAGE % text + "\n"), r)
 
     def test_must_change(self):
         """A password that must change (773) or that expired (532) starts the password change dialog."""
@@ -368,6 +344,32 @@ class AdPerl(AdTests, DaemonTestCase):
                 self.assertEqual(c.pap(self.login("reset"), password).status_name, status)
 
 
+@unittest.skipUnless(URL, SKIP_REASON)
+@unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
+class AdMt(AdTests, DaemonTestCase):
+    CONFIG = None
+    MODULE = "external-mt"
+    EXEC = f'"{LDAPMAVIS}" "ldapmavis-mt"'
+    MESSAGE = "Permission denied: %s"
+
+    def env(self):
+        return {"LDAP_OPT_X_TLS_CACERTFILE": settings()["TACTEST_SAMBA_CA"],
+                "LDAP_OPT_X_TLS_REQUIRE_CERT": "LDAP_OPT_X_TLS_DEMAND"}
+
+
+@unittest.skipUnless(URL, SKIP_REASON)
+@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
+class AdPerl(AdTests, DaemonTestCase):
+    CONFIG = None
+    MODULE = "external"
+    EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
+    MESSAGE = "%s"
+
+    def env(self):
+        # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
+        return {"TLS_OPTIONS": f"verify => 'require', cafile => '{settings()['TACTEST_SAMBA_CA']}'",
+                "LDAP_CONNECT_TIMEOUT": "5"}
+
 
 @unittest.skipUnless(URL, SKIP_REASON)
 @unittest.skipUnless(python_ldap3(), f"no ldap3 module for {PYTHON}")
@@ -377,13 +379,10 @@ class AdPython(AdTests, DaemonTestCase):
     CONFIG = None
     MODULE = "external"
     EXEC = f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
+    MESSAGE = "Permission denied: %s"
 
     def env(self):
         return {}
-
-    @unittest.skip("mavis_tacplus_ldap.py gives ldap3 the old and the new password in the wrong order for AD")
-    def test_password_change(self):
-        pass
 
 
 if __name__ == "__main__":
