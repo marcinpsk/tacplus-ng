@@ -215,7 +215,6 @@ class Slapd:
                 self.proc.wait()
 
 
-# ldapmavis-mt skips the groupOfNames search while LDAP_NESTED_GROUP_DEPTH is unset
 MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
@@ -223,7 +222,6 @@ MODULE = string.Template("""
 		setenv LDAP_USER = "$reader"
 		setenv LDAP_PASSWD = "readerpw"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=%s))"
-		setenv LDAP_NESTED_GROUP_DEPTH = "10"
 $extra		exec = $exec
 	}
 """)
@@ -316,7 +314,7 @@ class LdapTests:
             self.assertEqual(c.pap("mallory", "alicepw").status_name, "FAIL")
 
     def test_groups(self):
-        """groupOfNames, nested: the group names become TACMEMBER, the group DNs MEMBEROF."""
+        """groupOfNames, nested without a limit (no LDAP_NESTED_GROUP_DEPTH): names become TACMEMBER, DNs MEMBEROF."""
         _, d = self.start()
         for user, password, motd in (("alice", "alicepw", "netadmins in staff\n"), ("dave", "davepw", "staff\n"),
                                      ("bob", "bobpw", "")):
@@ -407,6 +405,13 @@ member: cn=xylophone,ou=groups,$base
         with d.connect() as c:
             r = c.ascii_login("erin", "erinpw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
+
+    def test_group_depth(self):
+        """LDAP_NESTED_GROUP_DEPTH = 1: only the groups that have the user as a member, not staff."""
+        _, d = self.start(LDAP_NESTED_GROUP_DEPTH="1")
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
