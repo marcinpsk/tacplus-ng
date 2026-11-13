@@ -868,11 +868,15 @@ syslog filter = 46 # 2 + 4 + 8 + 32
    ${action} authentication info (e.g. pap login)
    ${privlvl} privilege level
    ${authen-action} login or chpass
-   ${authen-type} Authentication packet type, e.g. AUTHEN/PASS,
-   AUTHEN/FAIL
-   ${authen-service} asciiascii/pap/chap/mschap/mschapv2
-   ${authen-method}
-   krb5/line/enable/local/tacacs+/guest/radius/krb4/rcmd
+   ${authen-type} Authentication type of a TACACS+
+   authentication or authorization request:
+   ascii/pap/chap/arap/mschap/mschapv2
+   ${authen-service} Authentication service of a TACACS+
+   authentication or authorization request:
+   login/enable/ppp/arap/pt/rcmd/x25/nasi/fwproxy
+   ${authen-method} Authentication method of a TACACS+
+   authorization request: not
+   set/none/krb5/line/enable/local/tacacs+/guest/radius/krb4/rcmd
    ${rule} Name of the matching rule.
    ${label} Ruleset label, if any.
    ${config-file} Configuration file name
@@ -1437,7 +1441,7 @@ mavis format custom_0 = "${server.address} ${server.port}"
 tls psk id = myid
 #tls psk key = clear demoDemo # plain text
 #tls psk key = 6 'FFM^eVF\gQS^ZeW`TYeaHeD^eKPMgXAAB' # type 6, requires
-master key
+type6-key
 #tls psk key = 7 2703130E0E725C555C # type 7
 #tls psk key = base64 'ZGVtb0RlbW9EZW1vCg==' # base64
 tls psk key = 0123456789abcdef # hex
@@ -1763,12 +1767,14 @@ key = ""
    If compiled with OpenSSL support Cisco Type-6 AES128 password
    encryption is available. Encrypted password strings can be
    copied from a IOS system or generated manually (for example
-   with type6). Type-6 passwords used in host context require a
-   type6-key definition for the master key in host or realm
-   context, while type-6 passwords in user or profile context use
-   the master key from the realm context.
-master key = demo
-# master key = "${SOME_ENVIRONMENT_VARIABLE}"
+   with type6). The type6-key = key directive sets the master key.
+   Type-6 keys and passwords used in host context require a
+   type6-key definition in host or realm context (a host without
+   one uses the type6-key of its parent), while type-6 passwords
+   in user or profile context use the type6-key from the realm
+   context. There is no master key directive.
+type6-key = demo
+# type6-key = "${SOME_ENVIRONMENT_VARIABLE}"
 
 user ... {
     password login = 6 'SeIF^JbTBWUcRIhgP[FW\`L\AAB' # no need to escape
@@ -2148,9 +2154,13 @@ rule netadmins {
 
    Attribute-related directives are:
 
-     * default attribute = ( permit | deny )
+     * attribute default = ( permit | deny )
        This directive specifies whether the daemon is to accept or
        reject unknown attributes sent by the NAS (default: deny).
+       With deny, an unknown mandatory attribute fails the
+       authorization request, and an unknown optional attribute is
+       removed from the reply. With permit, both are returned to
+       the NAS unchanged.
      * ( set | add | optional ) attribute = value
        Defines mandatory and optional attribute-value pairs:
           + set unconditionally returns a mandatory AV pair to the
@@ -2215,11 +2225,12 @@ set radius[Cisco:Cisco-AVPair] = "ip:inacl#2=permit ip any any"
    arg[attr] == != =~ !~ String or REGEX arg[protocol],
    arg[service], ...
    authen-action == != =~ !~ String or REGEX login, chpass
-   authen-method == != =~ !~ String or REGEX login, enable, ppp
-   authen-service == != =~ !~ String or REGEX none, line, enable,
-   local, tacacs+
+   authen-method == != =~ !~ String or REGEX none, line, enable,
+   local, tacacs+, ... (authorization only)
+   authen-service == != =~ !~ String or REGEX login, enable, ppp,
+   ...
    authen-type == != =~ !~ String or REGEX ascii, pap, chap,
-   mschap, mschapv2, sshkey, sshcer
+   arap, mschap, mschapv2
    client == != =~ !~ Net object name or IP address or string. Net
    incl. parents
    client.name == != Net object name Client remote address
@@ -2255,7 +2266,7 @@ set radius[Cisco:Cisco-AVPair] = "ip:inacl#2=permit ip any any"
    password == != =~ !~ String or REGEX session user password
    port == != =~ !~ [deprecated, use device.port] String or REGEX
    session port (vty02, console, ...)
-   priv-lvlp == != =~ !~ String or REGEX session privilege level
+   priv-lvl == != =~ !~ String or REGEX session privilege level
    (0 ... 15) reported by the device
    protocol == != =~ !~ String or REGEX session protocol (ppp,
    ...)

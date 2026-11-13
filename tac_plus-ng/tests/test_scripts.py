@@ -100,6 +100,61 @@ class SessionConditions(FlagTestCase):
         self.assertNotIn("ascii", holds)
 
 
+class AuthenServiceAndMethod(FlagTestCase):
+    """"authen-service" is the service field (login, enable, ...), "authen-method" the authen_method field."""
+
+    CONFIG = USER + shell_profile([
+        ("svc-login", "authen-service == login"),
+        ("svc-enable", "authen-service == enable"),
+        ("meth-tacacs", "authen-method == tacacs+"),
+        ("meth-line", "authen-method == line"),
+        # the values that the documentation gave before: they never hold
+        ("old-method", "authen-method == login"),
+        ("old-service", "authen-service == tacacs+"),
+    ])
+
+    def test_default_request(self):
+        self.assertEqual(self.holds(), ["meth-tacacs", "svc-login"])
+
+    def test_enable_service_and_line_method(self):
+        self.assertEqual(self.holds(service=tacacs.AUTHEN_SVC_ENABLE, authen_method=tacacs.AUTHEN_METH_LINE),
+                         ["meth-line", "svc-enable"])
+
+
+class AttributeDefault(DaemonTestCase):
+    """"attribute default" decides about NAS AV pairs that the server does not know (doc: "default attribute" before)."""
+
+    CONFIG = USER + """
+	user bob {
+		password login = clear bobpw
+	}
+	profile shell {
+		script {
+			if (service == shell) {
+				if (user == bob) attribute default = permit
+				permit
+			}
+		}
+	}
+	ruleset {
+		rule { script { profile = shell permit } }
+	}
+"""
+
+    def author(self, user, arg):
+        return self.connect().author(user, ["service=shell", "cmd=", arg])
+
+    def test_deny_is_the_default(self):
+        self.assertEqual(self.author("alice", "tactest-mandatory=1").status_name, "FAIL")
+        r = self.author("alice", "tactest-optional*1")
+        self.assertEqual(r.status_name, "PASS_REPL", r)
+        self.assertNotIn("tactest-optional*1", r.args)
+
+    def test_permit(self):
+        self.assertEqual(self.author("bob", "tactest-mandatory=1").status_name, "PASS_ADD")
+        self.assertEqual(self.author("bob", "tactest-optional*1").status_name, "PASS_ADD")
+
+
 VENDOR_SPECIFIC = 26
 
 
