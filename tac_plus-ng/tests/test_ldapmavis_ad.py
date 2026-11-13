@@ -317,7 +317,9 @@ class AdPerl(AdTests, DaemonTestCase):
     EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
 
     def env(self):
-        return {"TLS_OPTIONS": f"verify => 'require', cafile => '{settings()['TACTEST_SAMBA_CA']}'"}
+        # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
+        return {"TLS_OPTIONS": f"verify => 'require', cafile => '{settings()['TACTEST_SAMBA_CA']}'",
+                "LDAP_CONNECT_TIMEOUT": "5"}
 
     def test_bind_error_messages(self):
         """The text for the "data" code of the AD bind error goes to the client."""
