@@ -34,7 +34,7 @@ rejects the configuration, and that has to fail the test, not the class.
 
 import unittest
 
-from tactest import DaemonTestCase
+from tactest import DaemonTestCase, needs_loopback_net
 
 DEVICE_MOTD = "Authorized access only.\n"
 NETADMIN_MOTD = "Change freeze until Monday 06:00 UTC.\n"
@@ -77,6 +77,7 @@ POLICY = """
 """
 
 
+@needs_loopback_net
 class RuleMotd(DaemonTestCase):
     CONFIG = None
 

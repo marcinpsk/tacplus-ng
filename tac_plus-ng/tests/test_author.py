@@ -30,7 +30,7 @@
 
 import unittest
 
-from tactest import DaemonTestCase
+from tactest import DaemonTestCase, needs_loopback_net
 
 POLICY = """
 	device edgecore {
@@ -91,6 +91,7 @@ class Authorization(DaemonTestCase):
         r = self.connect().author("alice", ["service=shell", "cmd=show", "cmd-arg=version", "<cr>"])
         self.assertEqual(r.status_name, "FAIL", r)
 
+    @needs_loopback_net
     def test_issue225_malformed_argument_ignored_with_bug_compatibility_256(self):
         """#225: Edgecore sends a bare "<cr>"; bit 256 drops it and (eb88f27) keeps the other pairs.
 

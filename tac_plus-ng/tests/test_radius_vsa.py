@@ -15,7 +15,7 @@ import os
 import struct
 import unittest
 
-from tactest import SOURCE, DaemonTestCase, radius
+from tactest import SOURCE, DaemonTestCase, needs_loopback_net, radius
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 SECRET = "radsecret"
@@ -86,6 +86,7 @@ def vsa(vendor_id, payload):
     return (VENDOR_SPECIFIC, struct.pack("!I", vendor_id) + payload)
 
 
+@needs_loopback_net
 class VendorFormat(DaemonTestCase):
     CONFIG = POLICY
     UDP = True
@@ -190,6 +191,7 @@ for key, value in (("DICTIONARY", DICTIONARY), ("NAS", NAS), ("SECRET", SECRET))
     CISCO_POLICY = CISCO_POLICY.replace("@" + key + "@", str(value))
 
 
+@needs_loopback_net
 class CiscoFormat(DaemonTestCase):
     """rad_check_dacl() walked Cisco VSAs as 1+1 after the validator had checked them in the dictionary format."""
 
