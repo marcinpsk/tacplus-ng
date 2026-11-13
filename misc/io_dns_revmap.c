@@ -12,6 +12,8 @@
 #include "misc/net.h"
 #include "misc/io.h"
 #include "misc/memops.h"
+#include "mavis/log.h"
+#include <unistd.h>
 
 #ifdef WITH_ARES
 #include <ares.h>
@@ -29,7 +31,7 @@
 #endif
 
 struct io_dns_item {
-    void *app_cb;
+    io_dns_cb app_cb;
     void *app_ctx;
 #ifdef WITH_ARES
     struct io_dns_ctx *idc;
@@ -146,8 +148,12 @@ static ares_socket_t asocket(int domain, int type, int protocol, void *opaque)
     struct io_dns_ctx *idc = (struct io_dns_ctx *) opaque;
     int fd = socket(domain, type, protocol);
 #ifdef VRF_BINDTODEVICE
-    if (idc->vrf)
-	setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, idc->vrf, idc->vrflen);
+    // a query that cannot use the VRF must not go out through the default VRF
+    if (fd > -1 && idc->vrf && setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, idc->vrf, idc->vrflen)) {
+	logerr("setsockopt(SO_BINDTODEVICE, \"%s\") failed for a DNS socket (%s:%d)", idc->vrf, __FILE__, __LINE__);
+	close(fd);
+	return ARES_SOCKET_BAD;
+    }
 #endif
 #ifdef VRF_RTABLE
     if (idc->intvrf >= 0)
@@ -281,10 +287,13 @@ void io_dns_destroy(struct io_dns_ctx *idc)
     ares_destroy(idc->channel);
     idc->channel = NULL;
 #endif
+#ifdef VRF_BINDTODEVICE
+    free(idc->vrf);
+#endif
     free(idc);
 }
 
-void io_dns_add_addr(struct io_dns_ctx *idc, struct in6_addr *a, void *app_cb, void *app_ctx)
+void io_dns_add_addr(struct io_dns_ctx *idc, struct in6_addr *a, io_dns_cb app_cb, void *app_ctx)
 {
     if (idc) {
 	sockaddr_union su = { 0 };
@@ -315,7 +324,7 @@ static void a_callback(void *arg, int status, int timeouts, unsigned char *abuf,
 static void a_callback(void *arg, ares_status_t status, size_t timeouts, const ares_dns_record_t * dnsrec);
 #endif
 
-void io_dns_add(struct io_dns_ctx *idc, sockaddr_union *su, void *app_cb, void *app_ctx)
+void io_dns_add(struct io_dns_ctx *idc, sockaddr_union *su, io_dns_cb app_cb, void *app_ctx)
 {
     char hex[] = "0123456789abcdef";
     char query[100];
@@ -385,7 +394,7 @@ static void a_callback(void *arg, int status, int timeouts __attribute__((unused
 		    ttl = (abuf[7] << 24) | (abuf[8] << 16) | (abuf[9] << 8) | abuf[10];
 	    }
 	}
-	((void (*)(void *, char *, int)) idi->app_cb) (idi->app_ctx, res, ttl);
+	idi->app_cb(idi->app_ctx, res, ttl);
 	if (host)
 	    ares_free_hostent(host);
     }
@@ -406,7 +415,7 @@ static void a_callback(void *arg, ares_status_t status, size_t timeouts __attrib
 	    res = ares_dns_rr_get_str(rr, ARES_RR_PTR_DNAME);
 	    ttl = ares_dns_rr_get_ttl(rr);
 	}
-	((void (*)(void *, char *, int)) idi->app_cb) (idi->app_ctx, (char *) res, ttl);
+	idi->app_cb(idi->app_ctx, (char *) res, ttl);
     }
     RB_search_and_delete(idi->idc->by_app_ctx, idi);
     RB_search_and_delete(idi->idc->by_addr, idi);
@@ -425,34 +434,11 @@ int io_dns_set_servers(struct io_dns_ctx *idc, char *servers)
 void io_dns_set_vrf(struct io_dns_ctx *idc __attribute__((unused)), char *vrf __attribute__((unused)))
 {
 #ifdef VRF_BINDTODEVICE
-    if (idc->vrf)
-	free(idc->vrf);
-    idc->vrf = vrf;
+    free(idc->vrf);
+    idc->vrf = Xstrdup(vrf);
     idc->vrflen = strlen(vrf) + 1;
 #endif
 #if defined(VRF_RTABLE) || defined(VRF_SETFIB)
     idc->intvrf = (unsigned) atoi(vrf);
 #endif
 }
-
-#if 0
-static void testcb(void *ctx __attribute__((unused)), char *hostname)
-{
-    fprintf(stderr, "%s\n", hostname);
-    exit(0);
-}
-
-int main(int argc, char **argv)
-{
-    struct io_context *io = io_init();
-    struct io_dns_ctx *idc;
-    sockaddr_union su;
-
-    su_pton(&su, argv[1]);
-
-    idc = io_dns_init(io);
-
-    io_dns_add(idc, &su, testcb, &su);
-    io_main(io);
-}
-#endif
