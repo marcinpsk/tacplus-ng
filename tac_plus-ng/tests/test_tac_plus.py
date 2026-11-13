@@ -5,10 +5,13 @@ with config.TAC_PLUS around the policy, in tac_plus syntax.
 """
 
 import os
+import shutil
+import subprocess
 import unittest
 
-from tactest import DaemonTestCase, config, prefix
+from tactest import DaemonTestCase, Stub, config, prefix
 from tactest.daemon import parse_only
+from tactest.tacacs import AUTHEN_TYPE_ASCII
 
 TAC_PLUS = os.access(os.path.join(prefix(), "sbin", "tac_plus"), os.X_OK)
 
@@ -42,7 +45,7 @@ class Smoke(TacPlusTestCase):
 
 def users(conditions):
     """One user per condition; its shell authorization passes only if the condition holds."""
-    return "".join("\tuser = %s { service = shell { script = { if (%s) permit deny } } }\n" % (name, cond)
+    return "".join(f"\tuser = {name} {{ service = shell {{ script = {{ if ({cond}) permit deny }} }} }}\n"
                    for name, cond in conditions)
 
 
@@ -130,6 +133,81 @@ class BareExclmark(TacPlusTestCase):
                 code, out = parse_only(path, program="tac_plus")
                 self.assertEqual(code, 78, out)
                 self.assertIn("Expected '=', but got '%s'" % name, out)
+
+
+MAVIS_BACKEND = """
+	user backend = mavis
+	login backend = mavis chpass
+	pap backend = mavis
+"""
+
+SHADOW = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_shadow.pl")
+
+
+class MustChangeWithoutDialog(TacPlusTestCase):
+    """The backend answers OK with PASSWORD_MUSTCHANGE to a login that has no dialog for a new password.
+
+    Only ASCII login and CHPASS can change a password. tac_plus permitted
+    the other logins. The tac_plus-ng counterpart is MustChangeWithoutDialog
+    in test_mavis.py.
+    """
+
+    CONFIG = None
+    MESSAGE = "Please change your password."
+
+    def daemon_and_stub(self):
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + MAVIS_BACKEND)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, message=self.MESSAGE)
+        return d, stub
+
+    def test_pap_fails(self):
+        d, stub = self.daemon_and_stub()
+        for _ in range(2):
+            with d.connect() as c:
+                r = c.pap("alice", "pw")
+            self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK"), ("AUTH", "ACK")])
+
+    def test_ascii_login_with_the_password_in_start_fails(self):
+        """The PAP-like ASCII login of IOS-XR (user and password in START) has no dialog either."""
+        d, stub = self.daemon_and_stub()
+        with d.connect() as c:
+            r = c.session().start(user="alice", data="pw", authen_type=AUTHEN_TYPE_ASCII)
+        self.assertEqual(r.status_name, "FAIL", r)
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH"])
+
+    def test_ascii_login_still_changes_the_password(self):
+        d, stub = self.daemon_and_stub()
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["pw", "new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH", "CHPW"])
+
+    @unittest.skipUnless(shutil.which("perl"), "the backend is a Perl script")
+    def test_expired_shadow_password(self):
+        """lastchange 0 in the shadow file: the password has expired."""
+        shadow = self.scratch_file("shadow", f"alice:{crypt_md5('pw')}:0:0:99999:7:::\n")
+        d = self.start_daemon(f"""
+	mavis module = external {{
+		setenv SHADOWFILE = "{shadow}"
+		exec = "{SHADOW}"
+	}}
+""" + MAVIS_BACKEND)
+        with d.connect() as c:
+            r = c.pap("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["pw", "new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "new").status_name, "PASS")
+
+
+def crypt_md5(password):
+    """An MD5-crypt hash from the crypt() of Perl (the crypt module of Python is gone in 3.13)."""
+    return subprocess.run(["perl", "-e", "print crypt($ARGV[0], q($1$tactest$))", password],
+                          check=True, capture_output=True, text=True).stdout
 
 
 if __name__ == "__main__":

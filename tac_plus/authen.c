@@ -1755,6 +1755,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 		    } else {
 			/* Standard ASCII login */
 			session->authen_data->authfn = do_ascii_login;
+			session->passwd_changeable = 1;
 			username_required = 0;
 		    }
 		    break;
@@ -1790,6 +1791,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 		case TAC_PLUS_AUTHEN_TYPE_ASCII:
 		    session->authen_data->authfn = do_chpass;
 		    session->chpass = 1;
+		    session->passwd_changeable = 1;
 		    username_required = 0;
 		    break;
 		}
