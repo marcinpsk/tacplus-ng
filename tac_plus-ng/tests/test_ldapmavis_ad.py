@@ -30,7 +30,16 @@ from unittest import mock
 
 from tactest import DaemonTestCase
 from tactest.tls import CA
-from test_ldapmavis import LDAP_PERL, LDAP_PYTHON, LDAPMAVIS, PERL, PYTHON, perl_ldap, python_ldap3, slapd_arg
+from test_ldapmavis import (
+    LDAP_PERL,
+    LDAP_PYTHON,
+    LDAPMAVIS,
+    PERL,
+    PYTHON,
+    perl_ldap,
+    python_ldap3,
+    slapd_arg,
+)
 
 URL = os.environ.get("TACTEST_SAMBA_DC")
 SETTINGS = ("TACTEST_SAMBA_BASE", "TACTEST_SAMBA_ADMIN", "TACTEST_SAMBA_PASSWORD", "TACTEST_SAMBA_CA")
