@@ -535,7 +535,7 @@ retry_once:
 				);
 				my $m = $mesg->error;
 				$m =~ s/.*DSID-.*, data ([0-9A-Fa-f]+),.*/$1/;
-				if($caller_cap_chpw && ($m eq "532" || $m eq "533" || $m eq "773")) {
+				if($caller_cap_chpw && ($m eq "532" || $m eq "773")) {
 					$code = 0;
 					$V[AV_A_PASSWORD_MUSTCHANGE] = 1;
 				} elsif (exists $ad_error_codes{$m}) {
