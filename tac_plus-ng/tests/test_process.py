@@ -162,7 +162,6 @@ class ConnectionTimeouts(DaemonTestCase):
             "idle, connection timeout 600": (self.complete("127.0.0.4"), False),
             "partial, inherited fragment timeout 300": (self.partial("127.0.0.4", HEADER_LEN + 4), False),
             "idle, connection timeout 5": (self.complete("127.0.0.2"), True),
-            "busy, connection timeout 5": (self.complete("127.0.0.2"), False),
             "header only, fragment timeout 2": (self.partial("127.0.0.3", HEADER_LEN), True),
             "partial body, fragment timeout 2": (self.partial("127.0.0.3", HEADER_LEN + 4), True),
             "idle, fragment timeout 2": (self.complete("127.0.0.3"), False),
@@ -172,9 +171,12 @@ class ConnectionTimeouts(DaemonTestCase):
             "udp, connection timeout 5": (self.udp("127.0.0.2"), False),
             "udp, stateless timeout 5": (self.udp("127.0.0.3"), True),
         }
+        # the busy connection comes last, so its first check cannot fall within the setup
+        busy = self.complete("127.0.0.2")
+        tcp["busy, connection timeout 5"] = (busy, False)
+        setup_done = time.monotonic()
 
         want = {name: closed for name, (_, closed) in list(tcp.items()) + list(udp.items())}
-        busy = tcp["busy, connection timeout 5"][0]
 
         def observe():
             got = {name: c.closed(timeout=0.05) for name, (c, _) in tcp.items()}
@@ -184,7 +186,7 @@ class ConnectionTimeouts(DaemonTestCase):
             return got, log
 
         # the expected closures show that the checks ran; the margin lets late checks of the other connections run
-        deadline, settled = start + self.PERIODIC + 60, None
+        deadline, settled = setup_done + self.PERIODIC + 60, None
         while time.monotonic() < deadline and (settled is None or time.monotonic() < settled + 5):
             self.assertEqual(busy.pap("alice", "alicepw").status_name, "PASS")
             got, log = observe()
