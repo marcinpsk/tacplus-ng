@@ -173,7 +173,6 @@ class RadiusConditions(DaemonTestCase):
 
 
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
-@unittest.skipUnless("pcre2" in features(), "rewrite profiles need PCRE2")
 class Rewrite(DaemonTestCase):
     """The rewrite profile of a device script changes the user name before the daemon looks up the user to log in.
 
@@ -643,7 +642,6 @@ class PermitIfAuthenticated(DaemonTestCase):
         self.assertEqual(self.unknown_user("127.0.0.1", self.AUTHEN_METH_LOCAL), "FAIL")
 
 
-@unittest.skipUnless("pcre2" in features(), "the script out uses a PCRE")
 class MavisAttributes(FlagTestCase):
     """memberof and identity-source on the MAVIS answer of a user.
 
