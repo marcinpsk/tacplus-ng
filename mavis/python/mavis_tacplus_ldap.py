@@ -71,9 +71,9 @@ LDAP_CONNECT_TIMEOUT
 	Timeout for initital connect to remote LDAP server. Default: 5
 
 LDAP_FILTER
-	LDAP search filter
+	LDAP search filter; {} is the user name
 	Defaults depend on LDAP_SERVER_TYPE (which is auto-detected):
-	- generic:	"(uid=%s)"
+	- generic:	"(&(objectclass=posixaccount)(uid={}))"
 	- microsoft:	"(&(objectclass=user)(sAMAccountName={}))"
 
 LDAP_FILTER_GROUP
@@ -290,7 +290,8 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 			if LDAP_SERVER_TYPE == None:
 				LDAP_SERVER_TYPE="generic"
-				LDAP_FILTER = '(&(objectclass=posixaccount)(uid={}))'
+				if LDAP_FILTER == None:
+					LDAP_FILTER = '(&(objectclass=posixaccount)(uid={}))'
 			try_once = False
 		except:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
