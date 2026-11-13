@@ -384,10 +384,6 @@ class AdPython(AdTests, DaemonTestCase):
     def env(self):
         return {}
 
-    @unittest.skip("the check of mavis_tacplus_ldap.py for a password change (532, 773) never matches")
-    def test_must_change(self):
-        pass
-
 
 if __name__ == "__main__":
     unittest.main()
