@@ -1,16 +1,20 @@
-"""radmavis-mt: daemon A authenticates through external-mt against daemon B, a tac_plus-ng that answers RADIUS.
+"""radmavis-mt and radmavis: daemon A authenticates through external-mt or external against daemon B.
 
-The backend sends an Access-Request with PAP to B and maps the Class
-attribute of the Access-Accept to TACMEMBER ("group_attribute=Class").
+B is a tac_plus-ng that answers RADIUS. The backend sends an Access-Request
+with PAP to B and maps the Class attribute of the Access-Accept to
+TACMEMBER ("group_attribute=Class").
 """
 
 import os
 import string
+import subprocess
 import unittest
 
 from tactest import SOURCE, DaemonTestCase, prefix
+from tactest.daemon import sanitizer_env
 
 RADMAVIS = os.path.join(prefix(), "sbin", "radmavis-mt")
+RADMAVIS_LEGACY = os.path.join(prefix(), "sbin", "radmavis")
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 SECRET = "radsecret"
 NAS = "127.0.0.6"
@@ -58,8 +62,8 @@ serv-type udp
 NETADMINS_MOTD = "Member of netadmins.\n"
 
 CLIENT = string.Template("""
-	mavis module = external-mt {
-		exec = "$radmavis" "radmavis-mt" "-c" "$conf" "group_attribute=Class"
+	mavis module = $module {
+		exec = "$radmavis" "$name" "-c" "$conf" "group_attribute=Class"
 	}
 	user backend = mavis
 	login backend = mavis
@@ -84,6 +88,7 @@ class RadiusServer(DaemonTestCase):
     """Each test starts B first, then A with a radcli configuration that points at the RADIUS port of B."""
 
     CONFIG = None
+    MODULE, BACKEND = "external-mt", RADMAVIS
 
     def start_pair(self, check_server=True, dictionary=RADCLI_DICTIONARY):
         server = self.start_daemon(SERVER, udp=True, name=self.id().split(".")[-1] + "-server", check=check_server)
@@ -92,7 +97,8 @@ class RadiusServer(DaemonTestCase):
         conf = self.scratch_file("radiusclient.conf",
                                  RADIUSCLIENT_CONF.format(port=port, secret=SECRET, nas=NAS, seqfile=seqfile,
                                                           dictionary=dictionary))
-        client = self.start_daemon(CLIENT.substitute(radmavis=RADMAVIS, conf=conf))
+        client = self.start_daemon(CLIENT.substitute(module=self.MODULE, radmavis=self.BACKEND,
+                                                     name=os.path.basename(self.BACKEND), conf=conf))
         return server, client
 
     def test_pap(self):
@@ -121,7 +127,7 @@ class RadiusServer(DaemonTestCase):
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
     def test_access_accept_without_attributes(self):
-        """B adds no attribute for carol, and radcli keeps no Message-Authenticator: radmavis-mt gets no pairs.
+        """B adds no attribute for carol, and radcli keeps no Message-Authenticator: the back-end gets no pairs.
 
         radcli drops the attributes that its dictionary does not have. A
         build of B without OpenSSL sends no Message-Authenticator at all.
@@ -144,6 +150,24 @@ class RadiusServer(DaemonTestCase):
             self.assertEqual(c.pap("alice", "alicepw").status_name, "FAIL")
         with a.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+
+
+@unittest.skipUnless(os.path.exists(RADMAVIS_LEGACY), "the build has no radmavis (radcli missing)")
+class RadmavisProgram(unittest.TestCase):
+    def test_starts(self):
+        """Without arguments radmavis prints its usage: the dynamic loader finds every library of radmavis."""
+        p = subprocess.run([RADMAVIS_LEGACY], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, timeout=30, env=sanitizer_env(), check=False)
+        out = p.stdout.decode(errors="replace")
+        self.assertIn("Usage: radmavis", out)
+        self.assertEqual(p.returncode, 255, out)
+
+
+@unittest.skipUnless(os.path.exists(RADMAVIS_LEGACY), "the build has no radmavis (radcli missing)")
+class RadiusServerLegacy(RadiusServer):
+    """The same tests for radmavis, the back-end for the external module."""
+
+    MODULE, BACKEND = "external", RADMAVIS_LEGACY
 
 
 if __name__ == "__main__":

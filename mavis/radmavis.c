@@ -231,7 +231,7 @@ int main(int argc, char **argv)
 	    case BADRESP_RC:
 	    case ERROR_RC:
 		printf("%d %s\n", AV_A_RESULT, AV_V_RESULT_ERROR);
-		printf("=%d\n", MAVIS_TIMEOUT);
+		printf("=%d\n", MAVIS_FINAL);
 		break;
 	    default:
 		printf("=%d\n", MAVIS_DOWN);
