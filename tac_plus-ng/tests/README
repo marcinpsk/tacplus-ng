@@ -29,6 +29,21 @@ On Ubuntu, the AppArmor profile of slapd does not let it read the
 build tree; "sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd"
 unloads it.
 
+test_ldapmavis_ad.py tests the Active Directory code of the LDAP
+back-ends against a Samba AD DC in a Docker container. It needs Docker,
+openssl and ldap-utils (ldapadd, ldapdelete); without TACTEST_SAMBA_DC
+it is skipped. The Python back-end needs the ldap3 module
+(python3-ldap3), else its tests are skipped. samba-dc/start builds the image (another base image:
+--build-arg BASE=<image>; it passes all its arguments to docker build),
+starts the container with LDAPS on a free port of 127.0.0.1, waits for
+the DC and prints the TACTEST_SAMBA_* settings. Every run of the tests
+adds its users to an OU of its own and removes it, so one DC serves
+many runs:
+
+    set -a; eval "$(tac_plus-ng/tests/samba-dc/start)"; set +a
+    tac_plus-ng/tests/run-tests -k test_ldapmavis_ad
+    docker rm -f tactest-samba-dc
+
 run-tests configures and builds tac_plus-ng and the tactester client
 (only with OpenSSL; without it the tactester tests are skipped), installs
 them into build/<OS>/tests-prefix (no root needed, nothing outside the
@@ -86,6 +101,7 @@ Layout
                        through a JSON file while the daemon runs
     configs/         complete configurations for "tac_plus-ng -P":
                      good-*.cfg must parse, bad-*.cfg must be rejected
+    samba-dc/        the Samba AD DC container of test_ldapmavis_ad.py
     test_*.py        the tests, one file per topic
 
 Writing a test
