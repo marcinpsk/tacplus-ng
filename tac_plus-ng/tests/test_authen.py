@@ -30,7 +30,7 @@
 
 import unittest
 
-from tactest import DaemonTestCase, tacacs
+from tactest import DaemonTestCase, needs_loopback_net, tacacs
 
 USERS = """
 	device single {
@@ -148,6 +148,7 @@ class Transport(DaemonTestCase):
         self.assertTrue(c.closed(), "the connection stays open")
 
 
+@needs_loopback_net
 class SingleConnection(DaemonTestCase):
     """Several sessions on one connection (RFC 8907 4.3), here from the single-connection device."""
 

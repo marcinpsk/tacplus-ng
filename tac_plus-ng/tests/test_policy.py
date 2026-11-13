@@ -37,7 +37,7 @@ shell authorization, so one request shows all of them.
 
 import unittest
 
-from tactest import LINUX, DaemonTestCase, features, tacacs
+from tactest import DaemonTestCase, features, needs_loopback_net, tacacs
 
 USER = """
 	user alice {
@@ -72,7 +72,7 @@ class PolicyTestCase(DaemonTestCase):
         return sorted(a[len("tactest-"):-len("=yes")] for a in r.args if a.startswith("tactest-"))
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class NestedNets(PolicyTestCase):
     """#16 and #166: a net matches its own addresses and those of its children, never those of its parent.
 
@@ -128,7 +128,7 @@ class NestedNets(PolicyTestCase):
         self.assertEqual(self.holds(rem_addr="127.0.4.3"), ["client-automation", "client-jump"])
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class DeviceAddress(PolicyTestCase):
     """#134: "nas == <net>" stopped matching: the device address kept for the rules was not the one looked up.
 
@@ -184,6 +184,7 @@ class DeviceTagWithoutTags(PolicyTestCase):
         self.assertEqual(self.holds(), [])
 
 
+@needs_loopback_net
 class DeviceAddressFromHostsFile(DaemonTestCase):
     """A device name in "dns preload file" gives the device those addresses."""
 
@@ -207,6 +208,7 @@ class DeviceAddressFromHostsFile(DaemonTestCase):
             self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
 
 
+@needs_loopback_net
 class DeviceAddressFromParentRealmHostsFile(DaemonTestCase):
     """A device in a realm gets the addresses that "dns preload file" of the parent realm gives its name."""
 
@@ -232,6 +234,7 @@ class DeviceAddressFromParentRealmHostsFile(DaemonTestCase):
             self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
 
 
+@needs_loopback_net
 class DeviceAddressFromOwnRealmHostsFile(DaemonTestCase):
     """A mapping in the realm of the device has priority over the mapping of the parent realm."""
 
@@ -263,7 +266,7 @@ class DeviceAddressFromOwnRealmHostsFile(DaemonTestCase):
             c.pap("alice", "alicepw")
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 @unittest.skipUnless("ares" in features(), "the reverse map needs a build with c-ares")
 class DeviceDnsNameFromHostsFile(PolicyTestCase):
     """The first name on a "dns preload file" line is the reverse name of the address (device.dnsname)."""

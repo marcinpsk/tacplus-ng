@@ -36,7 +36,7 @@ import threading
 import time
 import unittest
 
-from tactest import LINUX, Closed, DaemonTestCase, ProtocolError, detect
+from tactest import LINUX, Closed, DaemonTestCase, ProtocolError, detect, needs_loopback_net
 from tactest.daemon import alive, free_port, proc_stat
 
 POLICY = """
@@ -69,6 +69,7 @@ class MayClose(DaemonTestCase):
         self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
         self.assertTrue(c.closed(timeout=3), "the daemon kept the connection open")
 
+    @needs_loopback_net
     def test_issue251_single_connect_flag_keeps_the_connection(self):
         """A client that asks for single-connection, on a device that allows it, keeps the connection."""
         c = self.connect(source="127.0.0.3", single_connect=True)

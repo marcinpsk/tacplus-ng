@@ -35,7 +35,7 @@ it once per empty banner in the whole configuration.
 
 import unittest
 
-from tactest import DaemonTestCase
+from tactest import DaemonTestCase, needs_loopback_net
 
 POLICY = """
 	device a {
@@ -61,16 +61,19 @@ POLICY = """
 class EmptyBanners(DaemonTestCase):
     CONFIG = POLICY
 
+    @needs_loopback_net
     def test_issue256_username_prompt_once(self):
         r = self.connect(source="127.0.0.7").ascii_login("alice", "alicepw", user_in_start=False)
         self.assertEqual(r.prompts, ["Username: ", "Password: "], r)
         self.assertTrue(r.ok, r)
 
+    @needs_loopback_net
     def test_issue256_password_prompt_once(self):
         """With the user in START, the doubled prompt was the password prompt."""
         r = self.connect(source="127.0.0.7").ascii_login("alice", "alicepw")
         self.assertEqual(r.prompts, ["Password: "], r)
 
+    @needs_loopback_net
     def test_issue256_empty_motd(self):
         r = self.connect(source="127.0.0.8").ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)

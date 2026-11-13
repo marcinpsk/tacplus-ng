@@ -55,10 +55,13 @@ from .tacacs import Closed, Connection, Packet, ProtocolError
 
 __all__ = ["DaemonTestCase", "Daemon", "DaemonError", "Connection", "Packet", "Closed", "ProtocolError", "Stub",
            "binary", "cpu_seconds", "prefix", "sanitizers", "features", "ipv6_available", "config", "detect",
-           "mavis_stub", "radius", "sample", "tacacs", "tls", "LINUX", "SUPPRESSIONS", "SOURCE"]
+           "mavis_stub", "radius", "sample", "tacacs", "tls", "LINUX", "SUPPRESSIONS", "SOURCE", "needs_loopback_net"]
 
 # top of the source tree: the samples, the RADIUS dictionary
 SOURCE = daemon.TOP
+
+# only Linux makes all of 127.0.0.0/8 local; other systems have 127.0.0.1 alone
+needs_loopback_net = unittest.skipUnless(LINUX, "needs local addresses in 127.0.0.0/8 other than 127.0.0.1 (Linux only)")
 
 
 class DaemonTestCase(unittest.TestCase):

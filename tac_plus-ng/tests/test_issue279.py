@@ -47,7 +47,7 @@ import os
 import struct
 import unittest
 
-from tactest import SOURCE, DaemonTestCase, radius
+from tactest import SOURCE, DaemonTestCase, needs_loopback_net
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 
@@ -84,6 +84,7 @@ def cisco_vsa_value(sub_type, sub_value):
     return struct.pack("!I", VID_CISCO) + sub
 
 
+@needs_loopback_net
 class CiscoVsaHang(DaemonTestCase):
     """One daemon per test: a hung worker must not reach the next test."""
 
