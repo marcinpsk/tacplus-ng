@@ -5810,15 +5810,19 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 {
     if (!session || !m)
 	return S_unknown;
-    if (session->eval_prompt_only)
+    if (session->eval_prompt_only || session->eval_rewrite_only)
 	switch (m->code) {
 	case S_return:
 	case S_permit:
 	case S_deny:
 	case S_if:
 	case S_acl:
-	case S_PASSWORD:
 	    break;
+	case S_PASSWORD:
+	case S_rewrite:
+	    if ((m->code == S_PASSWORD) ? session->eval_prompt_only : session->eval_rewrite_only)
+		break;
+	    // fall through
 	default:
 	    return m->n ? tac_script_eval_r(session, m->n) : S_unknown;
 	}

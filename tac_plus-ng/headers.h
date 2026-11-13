@@ -679,6 +679,7 @@ struct tac_session {
 	BISTATE(eval_log_raw);
 	BISTATE(want_mfa);
 	BISTATE(eval_prompt_only);
+	BISTATE(eval_rewrite_only);
 	BISTATE(flag_rule_prompt);
     } __attribute__((__packed__));
     enum token mavisauth_res;
