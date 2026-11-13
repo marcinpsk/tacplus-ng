@@ -11,6 +11,7 @@ The password of grace does not expire (shadowExpire -1), that of heidi expired.
 """
 
 import base64
+import contextlib
 import ctypes
 import ctypes.util
 import glob
@@ -57,6 +58,7 @@ STAFF = "cn=staff,ou=groups," + BASE
 WIDE = 2000                 # groups of one user, above the 1024 of the old fixed array
 # memberOf as a plain attribute, the way Active Directory has it; no overlay needed
 MEMBEROF_SCHEMA = "attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' SUP distinguishedName )\n"
+ALICE, BOB, DAVE = (f"uid={uid},ou=people,{BASE}" for uid in ("alice", "bob", "dave"))
 # slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
 CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
 # runs the back-end argv[1]; on SIGUSR1 it writes the number of its ldap3.Connection objects to argv[2]
@@ -80,6 +82,18 @@ runpy.run_path(script, run_name="__main__")
 """
 TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn="([^"]*)" method=128)')
 
+ACCESS = """\
+access to attrs=userPassword by self write by anonymous auth by * none
+access to * by users read by * none"""
+# for a back-end without LDAP_USER: only an anonymous client can search, the users can only bind
+ANONYMOUS_ONLY = """\
+access to attrs=userPassword by anonymous auth by * none
+access to * by anonymous read by * none"""
+# only LDAP_USER can search, the users can only bind
+READER_ONLY = f"""\
+access to attrs=userPassword by anonymous auth by * none
+access to * by dn.exact="{READER}" read by * none"""
+
 SLAPD_CONF = string.Template("""\
 include $core
 include $cosine
@@ -95,8 +109,7 @@ argsfile $argsfile
 
 access to dn.base="" $root_dse
 access to dn.base="cn=Subschema" by * read
-access to attrs=userPassword by self write by anonymous auth by * none
-access to * by users read by * none
+$access
 
 database mdb
 suffix "$base"
@@ -338,9 +351,12 @@ def libldap_tls_package():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, entries="", tls="", starttls=False, root_dse="by * read"):
-        """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only,
-        or on ldap:// for StartTLS; root_dse: the "by" clauses of the root DSE."""
+    def __init__(self, directory, entries="", tls="", starttls=False, root_dse="by * read", access=ACCESS):
+        """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only, or on
+        ldap:// for StartTLS; root_dse: the "by" clauses of the root DSE.
+
+        access: the access lines, and other global lines, of slapd.conf.
+        """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
@@ -358,7 +374,7 @@ class Slapd:
                      db=os.path.join(directory, "db"), memberof=os.path.join(directory, "memberof.schema"))
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
-                                          root_dse=root_dse, base=BASE))
+                                          root_dse=root_dse, access=access, base=BASE))
         with open(paths["memberof"], "w") as f:
             f.write(MEMBEROF_SCHEMA)
         os.mkdir(os.path.join(directory, "db"))
@@ -596,8 +612,6 @@ MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
 		setenv LDAP_BASE = "$base"
-		setenv LDAP_USER = "$reader"
-		setenv LDAP_PASSWD = "readerpw"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=$uid))"
 $extra		exec = $exec
 	}
@@ -702,8 +716,9 @@ class LdapTests:
         """After a failed StartTLS the back-end does not use the connection again, also if the peer keeps it open."""
         peer = StartTlsPeer()
         self.addCleanup(peer.stop)
-        d = self.start_daemon(POLICY.substitute(module=self.module(peer.url, setenv(self.STARTTLS)),
-                                                staff=STAFF, base=BASE, last=WIDE - 1))
+        extra = setenv({"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **self.STARTTLS})
+        d = self.start_daemon(POLICY.substitute(module=self.module(peer.url, extra), staff=STAFF, base=BASE,
+                                                last=WIDE - 1))
         for _ in range(2):
             self.assertEqual(self.login(d), "FAIL")
             with d.connect() as c:
@@ -734,19 +749,24 @@ class LdapTests:
             self.assert_login(d, "FAIL")
             self.assertEqual(slapd.binds(), [])
 
-    def slapd(self, ldif="", tls="", starttls=False, root_dse="by * read"):
-        """A running slapd; ldif: more entries, tls, starttls, root_dse: see Slapd."""
+    def slapd(self, ldif="", tls="", starttls=False, root_dse="by * read", access=ACCESS):
+        """A running slapd; ldif: more entries, tls, starttls, root_dse, access: see Slapd."""
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif,
-                      tls, starttls, root_dse)
+                      tls, starttls, root_dse, access)
         self.addCleanup(slapd.stop)
         slapd.start()
         return slapd
 
-    def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", check=True, settings="", **env):
-        """Start slapd (ldif, tls, starttls, root_dse: see slapd()) and the daemon; settings, policy: tac_plus-ng lines
-        before and after the policy, env: for the back-end."""
-        slapd = self.slapd(ldif, tls, starttls, root_dse)
+    def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", access=ACCESS, check=True,
+              settings="", **env):
+        """Start slapd (ldif, tls, starttls, root_dse, access: see slapd()) and the daemon; settings, policy:
+        tac_plus-ng lines before and after the policy.
+
+        env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
+        """
+        slapd = self.slapd(ldif, tls, starttls, root_dse, access)
+        env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
         extra = setenv(env)
         body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF, base=BASE,
                                             last=WIDE - 1) + policy
@@ -990,7 +1010,7 @@ class LdapMt(LdapTests, DaemonTestCase):
     exe = LDAPMAVIS
 
     def module(self, url, extra):
-        return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, uid="%s", extra=extra,
+        return MODULE.substitute(module="external-mt", url=url, base=BASE, uid="%s", extra=extra,
                                  exec=f'"{self.exe}" "ldapmavis-mt"')
 
     def capture_stderr(self, name):
@@ -1210,8 +1230,9 @@ class LdapMt(LdapTests, DaemonTestCase):
         slapd, _ = self.start()
         for name, base, reader in (("search", "ou=missing," + BASE, READER), ("bind", BASE, "cn=nobody," + BASE)):
             with self.subTest(name):
-                module = MODULE.substitute(module="external-mt", url=slapd.url, base=base, reader=reader, uid="%s",
-                                           extra="", exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
+                module = MODULE.substitute(module="external-mt", url=slapd.url, base=base, uid="%s",
+                                           extra=setenv({"LDAP_USER": reader, "LDAP_PASSWD": "readerpw"}),
+                                           exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
                 d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF, base=BASE, last=WIDE - 1),
                                       name=self.id().split(".")[-1] + "-" + name)
                 self.assert_connections_closed(slapd, d)
@@ -1242,7 +1263,7 @@ class LdapPerl(LdapTests, DaemonTestCase):
     stderr_log = None
 
     def module(self, url, extra):
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, uid="%s", extra=extra,
+        return MODULE.substitute(module="external", url=url, base=BASE, uid="%s", extra=extra,
                                  exec=perl_exec(self, LDAP_PERL, self.stderr_log))
 
     def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", **env):
@@ -1295,7 +1316,7 @@ class LdapPerl(LdapTests, DaemonTestCase):
         ca = self.ca()
         self.stderr_log = self.scratch_file("reconnect.log", "")
         slapd = self.slapd(tls=self.ldaps(ca, "security simple_bind=1\nidletimeout 1\n"), starttls=True)
-        extra = setenv(self.TRUST(ca.cert))
+        extra = setenv({"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **self.TRUST(ca.cert)})
         d = self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra + "\t\tchilds min = 1\n"
                                                                    "\t\tchilds max = 1\n"),
                                                 staff=STAFF, base=BASE, last=WIDE - 1))
@@ -1701,7 +1722,7 @@ class LdapPython(LdapTests, DaemonTestCase):
 
     def module(self, url, extra):
         command = f'"{self.exe}" "python3"' if self.exe else f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, uid="{}", extra=extra,
+        return MODULE.substitute(module="external", url=url, base=BASE, uid="{}", extra=extra,
                                  exec=command)
 
     @unittest.skip("the groupOfNames walk of the Python back-end does not escape the group DN in its filter")
@@ -1903,6 +1924,54 @@ class LdapPython(LdapTests, DaemonTestCase):
         self.assertEqual(self.login(d), "PASS", self.stderr(log))
         self.assertIn((READER, True), slapd.binds()[before:])
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
+
+    def test_failed_login_without_ldap_user(self):
+        """Without LDAP_USER the back-end searches anonymously; a failed or a good login must not change that."""
+        slapd, d = self.start(access=ANONYMOUS_ONLY, LDAP_USER=None, LDAP_PASSWD=None)
+        logins = (("alice", "wrong", "FAIL"), ("bob", "bobpw", "PASS"), ("dave", "davepw", "PASS"))
+        for user, password, status in logins:
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status)
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        self.assertEqual([dn for dn, _ in slapd.binds()], [ALICE, BOB, DAVE])
+
+    def test_ldap_user_bind_each_request(self):
+        """Each request binds as LDAP_USER once, then as the user; a wrong password goes to the server once."""
+        slapd, d = self.start()
+        logins = (("alice", "wrong", "FAIL"), ("bob", "bobpw", "PASS"), ("dave", "davepw", "PASS"))
+        for user, password, status in logins:
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status)
+        self.assertEqual([dn for dn, _ in slapd.binds()], [READER, ALICE, READER, BOB, READER, DAVE])
+
+    def test_searches_as_ldap_user(self):
+        """Only LDAP_USER can read the directory: the searches and the group walk of each request run as LDAP_USER."""
+        _, d = self.start(access=READER_ONLY)
+        for user, motd in (("alice", "netadmins in staff\n"), ("dave", "staff\n")):
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
+    def test_wrong_password_before_group_walk(self):
+        """A wrong password is a FAIL before the group walk: a group search that fails does not change the answer."""
+        # ldap3 refuses this filter (no closing parenthesis) with an exception, and sends no search
+        _, d = self.start(LDAP_FILTER_GROUP="(member={}")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "wrong").status_name, "FAIL")
+        # no backend error: the fallback-only user cannot log in
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
+    def test_password_change_after_group_walk(self):
+        """The password change comes after the group walk: if a group search fails, the password does not change."""
+        # check=False: the back-end stops at the exception of the group search, and the client gets no answer
+        slapd, d = self.start(check=False, LDAP_FILTER_GROUP="(member={}")
+        with d.connect() as c, contextlib.suppress(TimeoutError):
+            c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        # slapd -d 256 logs each extended operation with its OID: this one is the password modify (RFC 3062)
+        with open(slapd.log, errors="replace") as f:
+            self.assertNotIn("oid=1.3.6.1.4.1.4203.1.11.1", f.read())
 
     def test_starttls_settings_invalid(self):
         """A LDAP_SKIP_STARTTLS that is not 0 or 1 stops the back-end."""
