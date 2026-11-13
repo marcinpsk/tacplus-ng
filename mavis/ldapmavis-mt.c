@@ -664,28 +664,26 @@ static struct ad_error_codes ad_error_codes[] = {
 
 static char *translate_ldap_error(char *err /* from ldap_err2string() */ , char *diag /* detailed errror */ , char **out /* freed by caller */ )
 {
-    if (capabilities & CAP_AD && diag) {
+    if (capabilities & CAP_AD && diag && ad_result_regex) {
+	struct ad_error_codes *a = NULL;
 	pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(ad_result_regex, NULL);
 	int pcre_res = mypcre2_match((pcre2_code *) ad_result_regex, (PCRE2_SPTR8) diag, (PCRE2_SIZE) strlen(diag), 0, 0, match_data, NULL);
-	if (!pcre_res) {
+	if (pcre_res > 0) {
 	    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
-	    uint32_t ovector_count = pcre2_get_ovector_count(match_data);
-	    if (ovector_count == 2) {
-		size_t match_start = ovector[2];
-		size_t match_len = ovector[3] - ovector[2];
-		char id[match_len + 1];
-		strncpy(id, diag + match_start, match_len);
-		id[match_len] = 0;
-		struct ad_error_codes *a = ad_error_codes;
-		while (a->id && strcmp(a->id, id))
-		    a++;
-		if (a->id) {
-		    size_t out_len = 30 + strlen(a->text);
-		    *out = calloc(1, out_len);
-		    snprintf(*out, out_len, "Permission denied: %s", a->text);
-		    return *out;
-		}
-	    }
+	    size_t match_len = ovector[3] - ovector[2];
+	    char id[match_len + 1];
+	    memcpy(id, diag + ovector[2], match_len);
+	    id[match_len] = 0;
+	    a = ad_error_codes;
+	    while (a->id && strcmp(a->id, id))
+		a++;
+	}
+	pcre2_match_data_free(match_data);
+	if (a && a->id) {
+	    size_t out_len = 30 + strlen(a->text);
+	    *out = calloc(1, out_len);
+	    snprintf(*out, out_len, "Permission denied: %s", a->text);
+	    return *out;
 	}
     }
     if (!err && !diag)
@@ -703,6 +701,17 @@ static char *translate_ldap_error(char *err /* from ldap_err2string() */ , char 
     *out = calloc(1, out_len);
     snprintf(*out, out_len, "Permission denied (%s).", message);
     return *out;
+}
+
+// the AD bind error allows a password change: 532 (password expired) or 773 (must reset password)
+static int ad_password_must_change(const char *diag)
+{
+    if (!diag || !ad_dsid_regex)
+	return 0;
+    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(ad_dsid_regex, NULL);
+    int pcre_res = mypcre2_match((pcre2_code *) ad_dsid_regex, (PCRE2_SPTR8) diag, (PCRE2_SIZE) strlen(diag), 0, 0, match_data, NULL);
+    pcre2_match_data_free(match_data);
+    return pcre_res > 0;
 }
 
 static pthread_mutex_t mutex_lock;
@@ -939,9 +948,7 @@ static void *run_thread(void *arg)
 		char *out = NULL;
 		ldap_get_option(ldap, LDAP_OPT_DIAGNOSTIC_MESSAGE, (void *) &diag);
 		char *err = ldap_err2string(rc);
-		if (rc == LDAP_INVALID_CREDENTIALS && (capabilities & CAP_AD) && caller_cap_chpw
-		    && !mypcre2_match((pcre2_code *) ad_dsid_regex, (PCRE2_SPTR8) diag, (PCRE2_SIZE) strlen(diag), 0, 0, NULL, NULL)
-		    ) {
+		if (rc == LDAP_INVALID_CREDENTIALS && (capabilities & CAP_AD) && caller_cap_chpw && ad_password_must_change(diag)) {
 		    if (!strcmp(tactype, AV_V_TACTYPE_AUTH)) {
 			av_set(ac, AV_A_USER_RESPONSE, "Password has expired.");
 			av_set(ac, AV_A_RESULT, AV_V_RESULT_OK);
@@ -1198,10 +1205,10 @@ int main(int argc, char **argv __attribute__((unused)))
 	fprintf(stderr, "PCRE2 error: %s\n", buffer);
     }
 
-    ad_dsid_regex = mypcre2_compile((PCRE2_SPTR8) "DSID-.*, data (532|773) ", PCRE2_ZERO_TERMINATED, 0, &errcode, &erroffset, NULL);
+    ad_dsid_regex = mypcre2_compile((PCRE2_SPTR8) "DSID-.*, data (532|773)[, ]", PCRE2_ZERO_TERMINATED, 0, &errcode, &erroffset, NULL);
     if (!ad_dsid_regex)
 	fprintf(stderr, "trouble at line %d\n", __LINE__ - 1);
-    if (!ad_result_regex) {
+    if (!ad_dsid_regex) {
 	PCRE2_UCHAR buffer[1024];
 	pcre2_get_error_message(errcode, buffer, sizeof(buffer));
 	fprintf(stderr, "PCRE2 error: %s\n", buffer);
