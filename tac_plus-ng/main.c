@@ -1684,9 +1684,7 @@ static u_int dtls_autodetect_versions(tac_realm *r)
 {
     if (!r->dtls)
 	return 0;
-    u_int versions = DTLS1_VERSION & 0xff;
-    versions <<= 8;
-    versions |= DTLS1_2_VERSION & 0xff;
+    u_int versions = DTLS1_2_VERSION & 0xff;
 #ifdef DTLS1_3_VERSION
     versions <<= 8;
     versions |= DTLS1_3_VERSION & 0xff;
@@ -1910,9 +1908,12 @@ static int dtls_ver_ok(u_int ver, u_char v)
 // 0x16 (handshake) or 0x17 (application data): a DTLS record of one of the versions, else 0
 static int dtls_record_type(u_int versions, u_char *buf, size_t len)
 {
-    if (len < TLS_PEEK_LEN || (buf[0] != 0x16 && buf[0] != 0x17) || buf[1] != 0xfe || !dtls_ver_ok(versions, buf[2]))
+    if (len < TLS_PEEK_LEN || (buf[0] != 0x16 && buf[0] != 0x17) || buf[1] != 0xfe)
 	return 0;
-    return buf[0];
+    // the record of a DTLS 1.2 ClientHello may carry version DTLS 1.0 (RFC 6347 4.1)
+    if (dtls_ver_ok(versions, buf[2]) || (buf[0] == 0x16 && buf[2] == (DTLS1_VERSION & 0xff)))
+	return buf[0];
+    return 0;
 }
 #endif
 
