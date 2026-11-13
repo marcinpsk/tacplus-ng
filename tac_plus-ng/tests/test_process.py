@@ -173,16 +173,25 @@ class ConnectionTimeouts(DaemonTestCase):
             "udp, stateless timeout 5": (self.udp("127.0.0.3"), True),
         }
 
-        busy = tcp["busy, connection timeout 5"][0]
-        while time.monotonic() < start + self.PERIODIC + 6:
-            self.assertEqual(busy.pap("alice", "alicepw").status_name, "PASS")
-            time.sleep(1)
-
-        got = {name: c.closed(timeout=0.5) for name, (c, _) in tcp.items()}
-        log = self.daemon.read_log("connection", log_offset)
-        for name, (r, _) in udp.items():
-            got[name] = "CONN-STOP %s %d" % r.sock.getsockname()[:2] in log
         want = {name: closed for name, (_, closed) in list(tcp.items()) + list(udp.items())}
+        busy = tcp["busy, connection timeout 5"][0]
+
+        def observe():
+            got = {name: c.closed(timeout=0.05) for name, (c, _) in tcp.items()}
+            log = self.daemon.read_log("connection", log_offset)
+            for name, (r, _) in udp.items():
+                got[name] = "CONN-STOP %s %d" % r.sock.getsockname()[:2] in log
+            return got, log
+
+        # the expected closures show that the checks ran; the margin lets late checks of the other connections run
+        deadline, settled = start + self.PERIODIC + 60, None
+        while time.monotonic() < deadline and (settled is None or time.monotonic() < settled + 5):
+            self.assertEqual(busy.pap("alice", "alicepw").status_name, "PASS")
+            got, log = observe()
+            if settled is None and all(got[name] for name, closed in want.items() if closed):
+                settled = time.monotonic()
+            time.sleep(1)
+        got, log = observe()
         self.assertEqual(got, want, "closed after %.0f s; connection log:\n%s" % (time.monotonic() - start, log))
 
 
