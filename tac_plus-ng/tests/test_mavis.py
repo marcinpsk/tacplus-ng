@@ -336,6 +336,21 @@ class MustChangeWithoutDialog(DaemonTestCase):
             self.assertEqual(c.pap("alice", "new").status_name, "PASS")
 
 
+class ProfileConflict(DaemonTestCase):
+    """The backend authenticates the user, but the profile it sends sets a password that is not "mavis".
+
+    The daemon logged the conflict and set S_deny, but then permitted the
+    login anyway.
+    """
+
+    CONFIG = Stub.module(childs=(1, 1)) + BACKEND + PERMIT
+
+    def test_profile_with_its_own_password_fails(self):
+        Stub(self.daemon).set(users={"alice": {"password": "pw", "profile": "{ password pap = clear other }"}})
+        self.assertEqual(self.connect().pap("alice", "pw").status_name, "FAIL")
+        self.wait_log("authentication", "pap login failed")
+
+
 def crypt_md5(password):
     """An MD5-crypt hash from the crypt() of Perl (the crypt module of Python is gone in 3.13)."""
     return subprocess.run(["perl", "-e", "print crypt($ARGV[0], q($1$tactest$))", password],

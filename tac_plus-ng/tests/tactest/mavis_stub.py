@@ -45,7 +45,8 @@ State, all keys optional:
 
   users         {name: {"password": str,
                         "member": [groups] or a string as it is,
-                        "sshkey": str, "mustchange": bool}}
+                        "sshkey": str, "mustchange": bool,
+                        "profile": str (AV_A_TACPROFILE)}}
   result        {key: "ACK" | "NAK" | "NOTFOUND" | "ERROR"}; the first of
                 "<user>:<TYPE>", "<user>", "<TYPE>", "*" decides, TYPE
                 being the MAVIS request type (AUTH, INFO, CHPW, ...)
@@ -204,6 +205,8 @@ def serve(libdir):
                 d.set_tacmember(member if isinstance(member, str) else ",".join('"%s"' % m for m in member))
             if known.get("sshkey"):
                 d.set_sshpubkey(known["sshkey"])
+            if known.get("profile"):
+                d.set_tacprofile(known["profile"])
             d.password_mustchange(bool(known.get("mustchange")))
         verdict, code = answers[result]
         d.write(verdict, code, state.get("message"))
