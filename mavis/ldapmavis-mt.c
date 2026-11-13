@@ -113,6 +113,10 @@ Plese have a look at the \"ldap_set_option\" manual page for explanations on:\n\
  LDAP_OPT_X_TLS_REQUIRE_SAN\n\
  LDAP_OPT_X_TLS_PEERKEY_HASH\n\
 \n\
+The server certificate is checked (LDAP_OPT_X_TLS_REQUIRE_CERT defaults to\n\
+LDAP_OPT_X_TLS_DEMAND). Set LDAP_OPT_X_TLS_CACERTFILE to the CA of the server,\n\
+or LDAP_OPT_X_TLS_REQUIRE_CERT=LDAP_OPT_X_TLS_NEVER to turn the check off.\n\
+\n\
 Copyright (C) 2023 by Marc Huber <Marc.Huber@web.de>\n\
 ");
     exit(-1);
@@ -206,7 +210,7 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
 
-    i = LDAP_OPT_X_TLS_NEVER;
+    i = LDAP_OPT_X_TLS_DEMAND;
     rc = ldap_set_option(*ldap, LDAP_OPT_X_TLS_REQUIRE_CERT, &i);
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
@@ -315,17 +319,17 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_REQUIRE_CERT
     tmp = getenv("LDAP_OPT_X_TLS_REQUIRE_CERT");
     if (tmp) {
-	int val = LDAP_OPT_X_TLS_NEVER;
+	int val = LDAP_OPT_X_TLS_DEMAND;
 	if (!strcmp(tmp, "LDAP_OPT_X_TLS_HARD"))
 	    val = LDAP_OPT_X_TLS_HARD;
-	else if (!strcmp(tmp, "LDAP_OPT_X_TLS_DEMAND"))
-	    val = LDAP_OPT_X_TLS_DEMAND;
+	else if (!strcmp(tmp, "LDAP_OPT_X_TLS_NEVER"))
+	    val = LDAP_OPT_X_TLS_NEVER;
 	else if (!strcmp(tmp, "LDAP_OPT_X_TLS_ALLOW"))
 	    val = LDAP_OPT_X_TLS_ALLOW;
 	else if (!strcmp(tmp, "LDAP_OPT_X_TLS_TRY"))
 	    val = LDAP_OPT_X_TLS_TRY;
-	else if (strcmp(tmp, "LDAP_OPT_X_TLS_NEVER"))
-	    fprintf(stderr, "LDAP_OPT_X_TLS_REQUIRE_CERT: '%s' is not recognized\n", tmp);
+	else if (strcmp(tmp, "LDAP_OPT_X_TLS_DEMAND"))
+	    fprintf(stderr, "LDAP_OPT_X_TLS_REQUIRE_CERT: '%s' is not recognized, LDAP_OPT_X_TLS_DEMAND applies\n", tmp);
 	ldap_set_option(*ldap, LDAP_OPT_X_TLS_REQUIRE_CERT, &val);
     }
 #endif

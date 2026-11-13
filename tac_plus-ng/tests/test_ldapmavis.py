@@ -265,7 +265,38 @@ $module
 
 
 class LdapTests:
-    """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
+    """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block.
+
+    TRUST and NO_CHECK are the environment variables of the back-end that
+    trust a CA file and that turn the check of the server certificate off.
+    """
+
+    def ca(self):
+        """A CA with a server certificate for 127.0.0.1 and a client certificate."""
+        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
+        self.addCleanup(ca.remove)
+        ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
+        return ca
+
+    @staticmethod
+    def ldaps(ca, more=""):
+        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
+                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
+
+    def login(self, d):
+        with d.connect(timeout=15.0) as c:
+            return c.pap("alice", "alicepw").status_name
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_server_certificate_is_checked(self):
+        """By default the back-end checks the certificate of the server: a CA it does not trust is a backend error."""
+        ca = self.ca()
+        for env, status in (({}, "FAIL"), (self.TRUST(ca.cert), "PASS"), (dict(self.NO_CHECK), "PASS")):
+            with self.subTest(env=sorted(env)):
+                _, d = self.start(tls=self.ldaps(ca), **env)
+                self.assertEqual(self.login(d), status)
+                with d.connect() as c:
+                    self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS" if status == "FAIL" else "FAIL")
 
     def start(self, tls="", **env):
         """Start slapd and the daemon; tls: TLS lines for slapd.conf, env: environment variables for the back-end."""
@@ -330,26 +361,15 @@ class LdapTests:
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
 class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
+    NO_CHECK = (("LDAP_OPT_X_TLS_REQUIRE_CERT", "LDAP_OPT_X_TLS_NEVER"),)
+
+    @staticmethod
+    def TRUST(cafile):
+        return {"LDAP_OPT_X_TLS_CACERTFILE": cafile}
 
     def module(self, url, extra):
         return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, extra=extra,
                                  exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
-
-    def ca(self):
-        """A CA with a server certificate for 127.0.0.1 and a client certificate."""
-        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
-        self.addCleanup(ca.remove)
-        ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
-        return ca
-
-    @staticmethod
-    def ldaps(ca, more=""):
-        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
-                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
-
-    def login(self, d):
-        with d.connect(timeout=15.0) as c:
-            return c.pap("alice", "alicepw").status_name
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_tls_client_certificate(self):
@@ -393,6 +413,11 @@ class LdapMt(LdapTests, DaemonTestCase):
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
+    NO_CHECK = (("TLS_OPTIONS", "verify => 'none'"),)
+
+    @staticmethod
+    def TRUST(cafile):
+        return {"TLS_OPTIONS": f"cafile => '{cafile}'"}
 
     def module(self, url, extra):
         return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra,

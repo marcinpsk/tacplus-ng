@@ -110,6 +110,8 @@ FLAG_AUTHORIZE_ONLY
 TLS_OPTIONS
 	Extra options for use with LDAPS or start_tls, in Perl hash syntax.
 	See https://metacpan.org/pod/Net::LDAP for details.
+	The server certificate is checked ("verify => 'require'") unless
+	TLS_OPTIONS sets "verify"; "cafile => '/path/to/ca.pem'" names the CA.
 	Default: unset
 	Example: "sslversion => 'tlsv1_2'"
 
@@ -155,7 +157,8 @@ my $use_starttls;
 my %tls_options;
 my $LDAP_DEBUG_TIME		= undef;
 
-%tls_options = eval $ENV{'TLS_OPTIONS'} if exists $ENV{'TLS_OPTIONS'};
+# check the certificate of the server unless TLS_OPTIONS says otherwise, e.g. "verify => 'none'"
+%tls_options = (verify => 'require', exists $ENV{'TLS_OPTIONS'} ? eval $ENV{'TLS_OPTIONS'} : ());
 
 @$LDAP_HOSTS		= split /\s+/, $ENV{'LDAP_HOSTS'} if exists $ENV{'LDAP_HOSTS'};
 $LDAP_SCOPE		= $ENV{'LDAP_SCOPE'} if exists $ENV{'LDAP_SCOPE'};
