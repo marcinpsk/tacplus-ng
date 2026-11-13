@@ -185,9 +185,9 @@ class ConnectionTimeouts(DaemonTestCase):
                 got[name] = "CONN-STOP %s %d" % r.sock.getsockname()[:2] in log
             return got, log
 
-        # the expected closures show that the checks ran; the margin lets late checks of the other connections run
+        # wait for the expected closures and for the first check of the busy connection; the margin lets late checks run
         deadline, settled = setup_done + self.PERIODIC + 60, None
-        while time.monotonic() < deadline and (settled is None or time.monotonic() < settled + 5):
+        while time.monotonic() < deadline and (settled is None or time.monotonic() < max(settled, setup_done + self.PERIODIC) + 5):
             self.assertEqual(busy.pap("alice", "alicepw").status_name, "PASS")
             got, log = observe()
             if settled is None and all(got[name] for name, closed in want.items() if closed):
