@@ -337,15 +337,15 @@ class LdapMt(LdapTests, DaemonTestCase):
 
     def ca(self):
         """A CA with a server certificate for 127.0.0.1 and a client certificate."""
-        ca = tls.CA("ldap-ca")
+        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
         self.addCleanup(ca.remove)
         ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
         return ca
 
     @staticmethod
     def ldaps(ca, more=""):
-        return (f"TLSCACertificateFile {ca.cert}\nTLSCertificateFile {ca.server[0]}\n"
-                f"TLSCertificateKeyFile {ca.server[1]}\n{more}")
+        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
+                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
 
     def login(self, d):
         with d.connect(timeout=15.0) as c:
