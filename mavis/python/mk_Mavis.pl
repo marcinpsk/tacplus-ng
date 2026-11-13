@@ -61,13 +61,13 @@ class Mavis:
 				or self.av_pairs[AV_A_TACTYPE] == AV_V_TACTYPE_CHPW)
 			and (not AV_A_PASSWORD in self.av_pairs
 				or len(self.av_pairs[AV_A_PASSWORD]) == 0)):
-			self.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Password not set.")
+			self.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password not set.")
 			return False
 
 		if ((self.av_pairs[AV_A_TACTYPE] == AV_V_TACTYPE_CHPW)
 			and (not AV_A_PASSWORD_NEW in self.av_pairs
 				or len(self.av_pairs[AV_A_PASSWORD_NEW]) == 0)):
-			self.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "New password not set.")
+			self.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "New password not set.")
 			return False
 
 		return True
