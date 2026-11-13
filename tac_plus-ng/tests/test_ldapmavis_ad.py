@@ -17,6 +17,7 @@ import string
 import subprocess
 import time
 import unittest
+from typing import ClassVar
 
 from tactest import DaemonTestCase, prefix
 from test_ldapmavis import LDAP_PERL, LDAPMAVIS, PERL, perl_ldap
@@ -80,7 +81,7 @@ def python_ldap3():
 
 def unicode_pwd(password):
     """The unicodePwd value for LDIF: the password in double quotes, UTF-16LE, base64."""
-    return base64.b64encode(('"%s"' % password).encode("utf-16-le")).decode()
+    return base64.b64encode(f'"{password}"'.encode("utf-16-le")).decode()
 
 
 def ldap_tool(tool, args, stdin, ok=(0,)):
@@ -107,7 +108,7 @@ class Domain:
     """
 
     # cn: (userAccountControl, more LDIF lines); 512: a normal account, 514: disabled
-    USERS = {
+    USERS: ClassVar[dict[str, tuple[int, str]]] = {
         "reader": (512, ""),
         "alice": (512, ""),
         "bob": (512, ""),
@@ -118,7 +119,7 @@ class Domain:
         "reset": (512, "pwdLastSet: 0\n"),
         "disabled": (514, ""),
         "expired": (512, "accountExpires: 1\n"),
-        "nohours": (512, "logonHours:: %s\n" % base64.b64encode(bytes(21)).decode()),
+        "nohours": (512, f"logonHours:: {base64.b64encode(bytes(21)).decode()}\n"),
         "elsewhere": (512, "userWorkstations: nowhere\n"),
         "pwexpired": (512, ""),
         "aged": (512, ""),
