@@ -117,6 +117,21 @@ TLS_OPTIONS
 	Default: unset
 	Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
 
+USE_STARTTLS
+	If set, StartTLS is mandatory on ldap:// URLs, also if the server
+	does not offer it.
+	Default: unset
+
+LDAP_SKIP_STARTTLS
+	0: StartTLS on ldap:// URLs if the root DSE of the server offers it
+	1: no StartTLS; the binds send the passwords in clear text
+	The back-end reads the root DSE without a bind. StartTLS comes
+	before the bind of LDAP_USER on each new connection, and a failed
+	StartTLS is a backend error. A connection without TLS gives a
+	warning on stderr. The back-end does not start if USE_STARTTLS
+	and LDAP_SKIP_STARTTLS=1 are both set.
+	Default: 0
+
 LDAP_NESTED_GROUP_DEPTH
 	Limit nested group lookups to the given value. Unlimited if unset.
 	Example: 2
@@ -170,6 +185,13 @@ try:
 	tls = ldap3.Tls(**{"validate": ssl.CERT_REQUIRED, **tls_options})
 except Exception as e:
 	sys.exit("invalid TLS_OPTIONS ({}): {}".format(", ".join(sorted(tls_options)), e))
+eval_env('USE_STARTTLS', None)
+try:
+	ldap_skip_starttls = int(eval_env('LDAP_SKIP_STARTTLS', '0'))
+except ValueError:
+	sys.exit("invalid LDAP_SKIP_STARTTLS: {!r} (0 or 1)".format(LDAP_SKIP_STARTTLS))
+if USE_STARTTLS is not None and ldap_skip_starttls:
+	sys.exit("USE_STARTTLS and LDAP_SKIP_STARTTLS=1 contradict each other, aborting.")
 eval_env('LDAP_HOSTS', 'ldaps://localhost')
 server_pool = ldap3.ServerPool(None, ldap3.FIRST, active=True)
 for server in LDAP_HOSTS.split():
@@ -179,6 +201,46 @@ for server in LDAP_HOSTS.split():
 # Default to OpenLDAP: #######################################################
 #ldap3.set_config_parameter("POOLING_LOOP_TIMEOUT", LDAP_CONNECT_TIMEOUT)
 conn = None
+
+STARTTLS_OID = '1.3.6.1.4.1.1466.20037'
+
+# StartTLS on ldap:// if the server offers it or USE_STARTTLS is set: ########
+def start_tls(c):
+	if not ldap_skip_starttls:
+		offers = False
+		if USE_STARTTLS is None:
+			if not c.search('', '(objectClass=*)', ldap3.BASE, attributes=['supportedExtension']):
+				raise ldap3.core.exceptions.LDAPStartTLSError(
+					"root DSE: {} (set USE_STARTTLS=1 or LDAP_SKIP_STARTTLS=1)".format(c.result['description']))
+			offers = any(STARTTLS_OID in r['attributes'].get('supportedExtension', [])
+				for r in c.response if r['type'] == 'searchResEntry')
+		if offers or USE_STARTTLS is not None:
+			try:
+				if not c.start_tls(read_server_info=False):
+					raise ldap3.core.exceptions.LDAPStartTLSError(c.last_error)
+			except Exception as e:
+				raise ldap3.core.exceptions.LDAPStartTLSError("StartTLS: {}".format(e))
+			return
+	print("the connection to the LDAP server has no TLS: the binds send the passwords in clear text",
+		file=sys.stderr)
+
+# A new connection, bound as LDAP_USER; TLS comes before the bind: ##########
+def ldap_connect():
+	c = ldap3.Connection(server_pool, user=LDAP_USER, password=LDAP_PASSWD,
+		receive_timeout=LDAP_CONNECT_TIMEOUT)
+	try:
+		c.open(read_server_info=False)
+		if not c.server.ssl:
+			start_tls(c)
+		c.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+		if not c.bind():
+			raise ldap3.core.exceptions.LDAPBindError("{}: {}".format(LDAP_USER, c.last_error))
+	except Exception as e:
+		print(e, file=sys.stderr)
+		# closes the socket without an unbind request on a connection that can be in a failed TLS handshake
+		c.strategy.close()
+		raise
+	return c
 
 # A helper function for resolving nested groupOfNames groups: ################
 def expand_groupOfNames(g):
@@ -260,12 +322,7 @@ while True:
 
 	if try_once:
 		try:
-			conn = ldap3.Connection(server_pool, user=LDAP_USER, password=LDAP_PASSWD,
-				receive_timeout=LDAP_CONNECT_TIMEOUT, auto_bind=True)
-			conn.bind()
-			raw_socket = conn.socket
-			if raw_socket is not None:
-				raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+			conn = ldap_connect()
 			# Check for MS AD LDAP
 			if '1.2.840.113556.1.4.800' in map(
 				lambda x: x[0], conn.server.info.supported_features):
@@ -297,26 +354,23 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
 			continue
 
-	if conn == None:
+	elif conn.closed:
+		# bind() would open a new socket without StartTLS
 		try:
-			conn = ldap3.Connection(server_pool,
-				user=LDAP_USER, password=LDAP_PASSWD,
-				receive_timeout=LDAP_CONNECT_TIMEOUT, auto_bind=True)
-			# Try to uise STARTTLS. Might not be required here.
-			if not conn.tls_started and '1.3.6.1.4.1.1466.20037' in map (
-				lambda x: x[0], conn.server.info.supported_extensions):
-				conn.start_tls()
-			if conn.bind():
-				LDAP_USER = conn.user
-			else:
-				D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
-				continue
+			conn = ldap_connect()
 		except:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
 			continue
 
-	if not conn.bind():
-		conn.rebind(user=LDAP_USER, password=LDAP_PASSWD)
+	try:
+		if not conn.bind():
+			conn.rebind(user=LDAP_USER, password=LDAP_PASSWD)
+	except ldap3.core.exceptions.LDAPException as e:
+		print(e, file=sys.stderr)
+		# the next request opens a new connection, with StartTLS
+		conn.strategy.close()
+		D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+		continue
 
 	if not conn.bind():
 		D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
