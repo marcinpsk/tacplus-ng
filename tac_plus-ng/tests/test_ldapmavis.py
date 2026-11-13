@@ -7,17 +7,22 @@ search. alice is a member of netadmins, and netadmins is a member of
 staff; dave is a direct member of staff; bob is in no group.
 """
 
+import base64
+import ctypes
+import ctypes.util
 import glob
+import hashlib
 import os
 import select
 import shutil
 import socket
 import string
 import subprocess
+import tempfile
 import time
 import unittest
 
-from tactest import DaemonTestCase, prefix
+from tactest import DaemonTestCase, prefix, tls
 from tactest.daemon import free_port
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
@@ -28,6 +33,7 @@ LDAPMAVIS = os.path.join(prefix(), "sbin", "ldapmavis-mt")
 LDAP_PERL = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus-ng_ldap.pl")
 PERL = shutil.which("perl") or "/usr/bin/perl"
 START_TIMEOUT = 10.0
+LDAP_OPT_X_TLS_PACKAGE = 0x6011  # from ldap.h
 
 BASE = "dc=example,dc=com"
 READER = "cn=reader," + BASE
@@ -38,6 +44,7 @@ include $core
 include $cosine
 include $inetorgperson
 $modules
+$tls
 pidfile $pidfile
 argsfile $argsfile
 
@@ -139,10 +146,27 @@ def perl_ldap():
         return False
 
 
+def libldap_tls_package():
+    """The TLS library that libldap uses, for example "OpenSSL" or "GnuTLS"."""
+    name = ctypes.util.find_library("ldap")
+    if name is None:
+        raise AssertionError("cannot find libldap")
+    lib = ctypes.CDLL(name)
+    lib.ldap_get_option.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)
+    value = ctypes.c_char_p()
+    if lib.ldap_get_option(None, LDAP_OPT_X_TLS_PACKAGE, ctypes.byref(value)) != 0 or value.value is None:
+        raise AssertionError("libldap does not tell its TLS package")
+    package = value.value.decode()
+    lib.ldap_memfree(value)
+    return package
+
+
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, tls=""):
+        """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only."""
+        self.scheme = "ldaps" if tls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
         self.dir = directory
@@ -157,7 +181,8 @@ class Slapd:
         paths.update(pidfile=os.path.join(directory, "slapd.pid"), argsfile=os.path.join(directory, "slapd.args"),
                      db=os.path.join(directory, "db"))
         with open(self.conf, "w") as f:
-            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), base=BASE))
+            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
+                                          base=BASE))
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
@@ -169,7 +194,7 @@ class Slapd:
 
     @property
     def url(self):
-        return f"ldap://127.0.0.1:{self.port}"
+        return f"{self.scheme}://127.0.0.1:{self.port}"
 
     def start(self):
         self.port = free_port("127.0.0.1")
@@ -208,7 +233,7 @@ MODULE = string.Template("""
 		setenv LDAP_PASSWD = "readerpw"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=%s))"
 		setenv LDAP_NESTED_GROUP_DEPTH = "10"
-		exec = $exec
+$extra		exec = $exec
 	}
 """)
 
@@ -240,13 +265,16 @@ $module
 
 
 class LdapTests:
-    """The tests for both back-ends; a subclass sets module(url) to its "mavis module" block."""
+    """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
-    def start(self):
-        slapd = Slapd(os.path.dirname(self.scratch_file("slapd.conf", "")))
+    def start(self, tls="", **env):
+        """Start slapd and the daemon; tls: TLS lines for slapd.conf, env: environment variables for the back-end."""
+        # a directory of its own for every slapd: a test may start more than one
+        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls)
         self.addCleanup(slapd.stop)
         slapd.start()
-        return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url), staff=STAFF))
+        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
+        return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF))
 
     def test_pap(self):
         _, d = self.start()
@@ -303,9 +331,62 @@ class LdapTests:
 class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
 
-    def module(self, url):
-        return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER,
+    def module(self, url, extra):
+        return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, extra=extra,
                                  exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
+
+    def ca(self):
+        """A CA with a server certificate for 127.0.0.1 and a client certificate."""
+        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
+        self.addCleanup(ca.remove)
+        ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
+        return ca
+
+    @staticmethod
+    def ldaps(ca, more=""):
+        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
+                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
+
+    def login(self, d):
+        with d.connect(timeout=15.0) as c:
+            return c.pap("alice", "alicepw").status_name
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_client_certificate(self):
+        """slapd demands a client certificate: LDAP_OPT_X_TLS_CERTFILE and LDAP_OPT_X_TLS_KEYFILE give it."""
+        ca = self.ca()
+        conf = self.ldaps(ca, "TLSVerifyClient demand\n")
+        client = {"LDAP_OPT_X_TLS_CERTFILE": ca.client[0], "LDAP_OPT_X_TLS_KEYFILE": ca.client[1]}
+        for env, status in (({}, "FAIL"), (client, "PASS")):
+            with self.subTest(env=sorted(env)):
+                _, d = self.start(tls=conf, LDAP_OPT_X_TLS_CACERTFILE=ca.cert, **env)
+                self.assertEqual(self.login(d), status)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_protocol_max(self):
+        """slapd takes TLS 1.3 only: LDAP_OPT_X_TLS_PROTOCOL_MAX = TLS 1.2 (0x303) cannot connect."""
+        ca = self.ca()
+        conf = self.ldaps(ca, "TLSProtocolMin 3.4\n")
+        for env, status in (({}, "PASS"), ({"LDAP_OPT_X_TLS_PROTOCOL_MAX": "0x303"}, "FAIL")):
+            with self.subTest(env=env):
+                if env and libldap_tls_package() == "GnuTLS":
+                    self.skipTest("libldap with GnuTLS ignores LDAP_OPT_X_TLS_PROTOCOL_MAX and TLSProtocolMin")
+                _, d = self.start(tls=conf, LDAP_OPT_X_TLS_CACERTFILE=ca.cert, **env)
+                self.assertEqual(self.login(d), status)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_peerkey_hash(self):
+        """LDAP_OPT_X_TLS_PEERKEY_HASH pins the key of the server: the right hash connects, another one does not."""
+        ca = self.ca()
+        der = subprocess.run(["openssl", "pkey", "-in", ca.server[1], "-pubout", "-outform", "DER"],
+                             stdout=subprocess.PIPE, check=True).stdout
+        right = "sha256:" + base64.b64encode(hashlib.sha256(der).digest()).decode()
+        wrong = "sha256:" + base64.b64encode(hashlib.sha256(b"another key").digest()).decode()
+        for pin, status in ((right, "PASS"), (wrong, "FAIL")):
+            with self.subTest(pin=pin):
+                _, d = self.start(tls=self.ldaps(ca), LDAP_OPT_X_TLS_CACERTFILE=ca.cert,
+                                  LDAP_OPT_X_TLS_PEERKEY_HASH=pin)
+                self.assertEqual(self.login(d), status)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
@@ -313,8 +394,8 @@ class LdapMt(LdapTests, DaemonTestCase):
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
 
-    def module(self, url):
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER,
+    def module(self, url, extra):
+        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra,
                                  exec=f'"{PERL}" "perl" "{LDAP_PERL}"')
 
 
