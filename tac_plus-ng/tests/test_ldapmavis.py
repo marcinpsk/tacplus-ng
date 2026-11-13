@@ -1973,6 +1973,18 @@ class LdapPython(LdapTests, DaemonTestCase):
         with open(slapd.log, errors="replace") as f:
             self.assertNotIn("oid=1.3.6.1.4.1.4203.1.11.1", f.read())
 
+    def test_empty_password(self):
+        """An empty password is a FAIL without a bind, not a backend error.
+
+        This slapd accepts a bind with a DN and no password ("allow bind_anon_dn").
+        """
+        slapd, d = self.start(access=ACCESS + "\nallow bind_anon_dn")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
+
     def test_starttls_settings_invalid(self):
         """A LDAP_SKIP_STARTTLS that is not 0 or 1 stops the back-end."""
         cases = tuple(({"LDAP_SKIP_STARTTLS": value}, f"invalid LDAP_SKIP_STARTTLS: {value!r}")
