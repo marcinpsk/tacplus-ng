@@ -47,7 +47,8 @@ State, all keys optional:
                         "member": [groups] or a string as it is,
                         "memberof": [LDAP group DNs] or a string as it is,
                         "sshkey": str, "mustchange": bool,
-                        "new_password": str}}
+                        "new_password": str,
+                        "expiry": the password expiry, seconds since the epoch}}
   result        {key: "ACK" | "NAK" | "NOTFOUND" | "ERROR"}; the first of
                 "<user>:<TYPE>", "<user>", "<TYPE>", "*" decides, TYPE
                 being the MAVIS request type (AUTH, INFO, CHPW, ...)
@@ -219,6 +220,8 @@ def serve(libdir):
             if known.get("sshkey"):
                 d.set_sshpubkey(known["sshkey"])
             d.password_mustchange(bool(known.get("mustchange")))
+            if "expiry" in known:
+                d.set_expiry(known["expiry"])
         verdict, code = answers[result]
         d.write(verdict, code, state.get("message"))
         if state.get("double_write"):
