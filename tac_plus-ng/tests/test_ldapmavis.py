@@ -38,9 +38,22 @@ START_TIMEOUT = 10.0
 BASE = "dc=example,dc=com"
 READER = "cn=reader," + BASE
 STAFF = "cn=staff,ou=groups," + BASE
+ALICE, BOB, DAVE = (f"uid={uid},ou=people,{BASE}" for uid in ("alice", "bob", "dave"))
 # slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
 CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
 TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn="([^"]*)" method=128)')
+
+ACCESS = """\
+access to attrs=userPassword by self write by anonymous auth by * none
+access to * by users read by * none"""
+# for a back-end without LDAP_USER
+ANONYMOUS_READ = """\
+access to attrs=userPassword by self write by anonymous auth by * none
+access to * by * read"""
+# only LDAP_USER can search, the users can only bind
+READER_ONLY = f"""\
+access to attrs=userPassword by anonymous auth by * none
+access to * by dn.exact="{READER}" read by * none"""
 
 SLAPD_CONF = string.Template("""\
 include $core
@@ -53,8 +66,7 @@ argsfile $argsfile
 
 access to dn.base="" by * read
 access to dn.base="cn=Subschema" by * read
-access to attrs=userPassword by self write by anonymous auth by * none
-access to * by users read by * none
+$access
 
 database mdb
 suffix "$base"
@@ -173,8 +185,11 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False):
-        """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS."""
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+        """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
+
+        access: the access lines, and other global lines, of slapd.conf.
+        """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
@@ -191,7 +206,7 @@ class Slapd:
                      db=os.path.join(directory, "db"))
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
-                                          base=BASE))
+                                          access=access, base=BASE))
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
@@ -255,8 +270,6 @@ MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
 		setenv LDAP_BASE = "$base"
-		setenv LDAP_USER = "$reader"
-		setenv LDAP_PASSWD = "readerpw"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=$uid))"
 		setenv LDAP_NESTED_GROUP_DEPTH = "10"
 $extra		exec = $exec
@@ -293,14 +306,18 @@ $module
 class LdapTests:
     """The tests for all back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
-    def start(self, tls="", starttls=False, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls: see Slapd, settings: tac_plus-ng lines, env: of the back-end."""
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
+        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+
+        env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
+        """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls)
+                      starttls, access)
         self.addCleanup(slapd.stop)
         slapd.start()
-        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
+        env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
+        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items() if value is not None)
         body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF)
         return slapd, self.start_daemon(body, check=check)
 
@@ -360,7 +377,7 @@ class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
 
     def module(self, url, extra):
-        return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, uid="%s", extra=extra,
+        return MODULE.substitute(module="external-mt", url=url, base=BASE, uid="%s", extra=extra,
                                  exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
 
 
@@ -370,7 +387,7 @@ class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
 
     def module(self, url, extra):
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, uid="%s", extra=extra,
+        return MODULE.substitute(module="external", url=url, base=BASE, uid="%s", extra=extra,
                                  exec=f'"{PERL}" "perl" "{LDAP_PERL}"')
 
 
@@ -383,7 +400,7 @@ class LdapPython(LdapTests, DaemonTestCase):
 
     def module(self, url, extra):
         command = f'"{self.exe}" "python3"' if self.exe else f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, uid="{}", extra=extra,
+        return MODULE.substitute(module="external", url=url, base=BASE, uid="{}", extra=extra,
                                  exec=command)
 
     def ca(self):
@@ -520,6 +537,45 @@ class LdapPython(LdapTests, DaemonTestCase):
         self.assertEqual(self.login(d), "PASS", self.stderr(log))
         self.assertIn((READER, True), slapd.binds()[before:])
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
+
+    def test_failed_login_without_ldap_user(self):
+        """Without LDAP_USER the back-end searches anonymously; a failed login must not break the next request."""
+        _, d = self.start(access=ANONYMOUS_READ, LDAP_USER=None, LDAP_PASSWD=None)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "wrong").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("bob", "bobpw").status_name, "PASS")
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
+    def test_ldap_user_bind_each_request(self):
+        """Each request binds as LDAP_USER once, then as the user; a wrong password goes to the server once."""
+        slapd, d = self.start()
+        logins = (("alice", "wrong", "FAIL"), ("bob", "bobpw", "PASS"), ("dave", "davepw", "PASS"))
+        for user, password, status in logins:
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status)
+        self.assertEqual([dn for dn, _ in slapd.binds()], [READER, ALICE, READER, BOB, READER, DAVE])
+
+    def test_searches_as_ldap_user(self):
+        """Only LDAP_USER can read the directory: the searches and the group walk of each request run as LDAP_USER."""
+        _, d = self.start(access=READER_ONLY)
+        for user, motd in (("alice", "netadmins in staff\n"), ("dave", "staff\n")):
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
+    def test_empty_password(self):
+        """An empty password is a FAIL without a bind, not a backend error.
+
+        This slapd accepts a bind with a DN and no password ("allow bind_anon_dn").
+        """
+        slapd, d = self.start(access=ACCESS + "\nallow bind_anon_dn")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
 
     def test_starttls_settings_invalid(self):
         """USE_STARTTLS with LDAP_SKIP_STARTTLS=1, or a LDAP_SKIP_STARTTLS that is not a number, stops the back-end."""

@@ -224,16 +224,22 @@ def start_tls(c):
 	print("the connection to the LDAP server has no TLS: the binds send the passwords in clear text",
 		file=sys.stderr)
 
+# Bind as LDAP_USER, or anonymously if it is unset: #########################
+def ldap_bind(c):
+	# rebind() keeps the user and password of the last bind, also of a failed one
+	c.user, c.password = LDAP_USER, LDAP_PASSWD
+	c.authentication = ldap3.SIMPLE if LDAP_USER else ldap3.ANONYMOUS
+	return c.bind()
+
 # A new connection, bound as LDAP_USER; TLS comes before the bind: ##########
 def ldap_connect():
-	c = ldap3.Connection(server_pool, user=LDAP_USER, password=LDAP_PASSWD,
-		receive_timeout=LDAP_CONNECT_TIMEOUT)
+	c = ldap3.Connection(server_pool, receive_timeout=LDAP_CONNECT_TIMEOUT)
 	try:
 		c.open(read_server_info=False)
 		if not c.server.ssl:
 			start_tls(c)
 		c.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-		if not c.bind():
+		if not ldap_bind(c):
 			raise ldap3.core.exceptions.LDAPBindError("{}: {}".format(LDAP_USER, c.last_error))
 	except Exception as e:
 		print(e, file=sys.stderr)
@@ -362,19 +368,19 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
 			continue
 
-	try:
-		if not conn.bind():
-			conn.rebind(user=LDAP_USER, password=LDAP_PASSWD)
-	except ldap3.core.exceptions.LDAPException as e:
-		print(e, file=sys.stderr)
-		# the next request opens a new connection, with StartTLS
-		conn.strategy.close()
-		D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
-		continue
-
-	if not conn.bind():
-		D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
-		continue
+	else:
+		# the last request can have left the connection bound as its user
+		try:
+			bound = ldap_bind(conn)
+		except ldap3.core.exceptions.LDAPException as e:
+			print(e, file=sys.stderr)
+			# the next request opens a new connection, with StartTLS
+			conn.strategy.close()
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+			continue
+		if not bound:
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
+			continue
 
 	conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE,
 		search_filter=LDAP_FILTER.format(D.user),
@@ -416,33 +422,6 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 						continue
 				else:
 					D.set_expiry(expiry)
-		if not conn.rebind(user=entry.entry_dn, password=D.password):
-			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
-				and conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
-				and re.search(r"DSID-.*, data (532|773)[, ]", conn.result["message"])):
-				D.password_mustchange(True)
-				user_msg = translate_ldap_error(conn)
-			else:
-				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
-				continue
-
-	if D.is_tacplus_chpw:
-		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
-			continue
-		if ((LDAP_SERVER_TYPE == "microsoft"
-				and not conn.extend.microsoft.modify_password(
-				entry.entry_dn, D.password_new, D.password))
-			or  (LDAP_SERVER_TYPE == "generic"
-				and not conn.extend.standard.modify_password (
-				entry.entry_dn, D.password, D.password_new))):
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
-			continue
-		user_msg = "Password change was successful."
-		D.password_mustchange(False)
-
-	if D.is_tacplus_authc:
-		D.remember_password(False)
 
 	D.set_dn(entry.entry_dn)
 
@@ -497,6 +476,36 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 	if len(entry.sshPublicKey) > 0:
 		D.set_sshpubkey("\"" + "\",\"".join(entry.sshPublicKey) + "\"")
+
+	# the user bind comes after the searches, so they run as LDAP_USER
+	if D.is_tacplus_authc:
+		if not conn.rebind(user=entry.entry_dn, password=D.password):
+			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
+				and conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
+				and re.search(r"DSID-.*, data (532|773)[, ]", conn.result["message"])):
+				D.password_mustchange(True)
+				user_msg = translate_ldap_error(conn)
+			else:
+				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
+				continue
+
+	if D.is_tacplus_chpw:
+		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
+			continue
+		if ((LDAP_SERVER_TYPE == "microsoft"
+				and not conn.extend.microsoft.modify_password(
+				entry.entry_dn, D.password_new, D.password))
+			or  (LDAP_SERVER_TYPE == "generic"
+				and not conn.extend.standard.modify_password (
+				entry.entry_dn, D.password, D.password_new))):
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
+			continue
+		user_msg = "Password change was successful."
+		D.password_mustchange(False)
+
+	if D.is_tacplus_authc:
+		D.remember_password(False)
 
 	D.write(MAVIS_FINAL, AV_V_RESULT_OK, user_msg)
 
