@@ -29,10 +29,11 @@ On Ubuntu, the AppArmor profile of slapd does not let it read the
 build tree; "sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd"
 unloads it.
 
-test_ldapmavis_ad.py tests the Active Directory code of both LDAP
+test_ldapmavis_ad.py tests the Active Directory code of the LDAP
 back-ends against a Samba AD DC in a Docker container. It needs Docker,
 openssl and ldap-utils (ldapadd, ldapdelete); without TACTEST_SAMBA_DC
-it is skipped. samba-dc/start builds the image (another base image:
+it is skipped. The Python back-end needs the ldap3 module
+(python3-ldap3), else its tests are skipped. samba-dc/start builds the image (another base image:
 --build-arg BASE=<image>; it passes all its arguments to docker build),
 starts the container with LDAPS on a free port of 127.0.0.1, waits for
 the DC and prints the TACTEST_SAMBA_* settings. Every run of the tests

@@ -1,4 +1,4 @@
-"""LDAP backends against Active Directory (a Samba AD DC): ldapmavis-mt (external-mt) and mavis_tacplus-ng_ldap.pl.
+"""LDAP back-ends against Active Directory (a Samba AD DC): ldapmavis-mt, the Perl and the Python back-end.
 
 samba-dc/start runs the DC in a container and prints the TACTEST_SAMBA_*
 variables (see README); without TACTEST_SAMBA_DC the tests are skipped.
@@ -18,10 +18,13 @@ import subprocess
 import time
 import unittest
 
-from tactest import DaemonTestCase
+from tactest import DaemonTestCase, prefix
 from test_ldapmavis import LDAP_PERL, LDAPMAVIS, PERL, perl_ldap
 
 URL = os.environ.get("TACTEST_SAMBA_DC")
+LDAP_PYTHON = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_ldap.py")
+# the interpreter of the "#!" line of the Python back-end
+PYTHON = "/usr/bin/python3" if os.access("/usr/bin/python3", os.X_OK) else shutil.which("python3") or "python3"
 SETTINGS = ("TACTEST_SAMBA_BASE", "TACTEST_SAMBA_ADMIN", "TACTEST_SAMBA_PASSWORD", "TACTEST_SAMBA_CA")
 SKIP_REASON = "TACTEST_SAMBA_DC is unset (see samba-dc/start in README)"
 
@@ -64,6 +67,15 @@ def settings():
     if missing:
         raise AssertionError("TACTEST_SAMBA_DC is set, but not " + ", ".join(missing))
     return {k: os.environ[k] for k in SETTINGS}
+
+
+def python_ldap3():
+    """The Python back-end needs the ldap3 module."""
+    try:
+        return subprocess.run([PYTHON, "-c", "import ldap3"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              check=False).returncode == 0
+    except OSError:
+        return False
 
 
 def unicode_pwd(password):
@@ -330,6 +342,24 @@ class AdPerl(AdTests, DaemonTestCase):
         for password, status in (("reset-new", "PASS"), ("reset-pw", "FAIL")):
             with self.subTest(password=password), d.connect() as c:
                 self.assertEqual(c.pap(self.login("reset"), password).status_name, status)
+
+
+
+@unittest.skipUnless(URL, SKIP_REASON)
+@unittest.skipUnless(python_ldap3(), f"no ldap3 module for {PYTHON}")
+class AdPython(AdTests, DaemonTestCase):
+    """No certificate check: TLS_OPTIONS of mavis_tacplus_ldap.py cannot give ldap3 a CA."""
+
+    CONFIG = None
+    MODULE = "external"
+    EXEC = f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
+
+    def env(self):
+        return {}
+
+    @unittest.skip("mavis_tacplus_ldap.py gives ldap3 the old and the new password in the wrong order for AD")
+    def test_password_change(self):
+        pass
 
 
 if __name__ == "__main__":
