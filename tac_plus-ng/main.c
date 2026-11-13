@@ -1777,9 +1777,7 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 	    ctx->tls_versions <<= 8;
 	    ctx->tls_versions |= TLS1_3_VERSION & 0xff;
 	} else if (ctx->realm->dtls && sd_ext->sd.type == SCM_UDPDATA) {
-	    ctx->tls_versions = DTLS1_VERSION & 0xff;
-	    ctx->tls_versions <<= 8;
-	    ctx->tls_versions |= DTLS1_2_VERSION & 0xff;
+	    ctx->tls_versions = DTLS1_2_VERSION & 0xff;
 #ifdef DTLS1_3_VERSION
 	    ctx->tls_versions <<= 8;
 	    ctx->tls_versions |= DTLS1_3_VERSION & 0xff;
@@ -2052,8 +2050,10 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 	    return;
 	}
 	if (ctx->tls_autodetect == TRISTATE_YES && tmp[0] == 0x16) {
+	    // the record of a DTLS 1.2 ClientHello may carry version DTLS 1.0 (RFC 6347 4.1)
 	    if (ctx->udp)
-		ctx->use_dtls = (tmp[1] == 0xfe && dtls_ver_ok(ctx->tls_versions, tmp[2])) ? BISTATE_YES : BISTATE_NO;
+		ctx->use_dtls = (tmp[1] == 0xfe && (tmp[2] == (DTLS1_VERSION & 0xff) || dtls_ver_ok(ctx->tls_versions, tmp[2])))
+		    ? BISTATE_YES : BISTATE_NO;
 	    else
 		ctx->use_tls = (tmp[1] == 0x03 && tmp[2] == 0x01 && tmp[5] == 1) ? BISTATE_YES : BISTATE_NO;
 	}

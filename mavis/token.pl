@@ -611,7 +611,6 @@ spoofing			S_spoofing
 #
 TLSv1.2				S_TLS1_2
 TLSv1.3				S_TLS1_3
-DTLSv1.0			S_DTLS1_0
 DTLSv1.2			S_DTLS1_2
 DTLSv1.3			S_DTLS1_3
 #

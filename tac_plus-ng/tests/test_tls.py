@@ -37,10 +37,12 @@ import os
 import socket
 import ssl
 import struct
+import tempfile
 import time
 import unittest
 
 from tactest import LINUX, SOURCE, DaemonTestCase, cpu_seconds, features, radius, tacacs, tls
+from tactest.daemon import parse_only
 
 TLS_REALM = """
 	tls cert-file = "%(server_crt)s"
@@ -629,6 +631,78 @@ class RadiusDtlsRealmAutoDetect(RadiusDtlsAutoDetect):
 
     LISTEN = {"dtls": "protocol = UDP"}
     BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
+
+
+class DtlsMinimumVersion(TlsTestCase):
+    """DTLS 1.2 is the minimum (doc/spawnd.html: "tls = yes" is DTLSv1.2 and DTLSv1.3 for UDP).
+
+    "tls ciphers" with @SECLEVEL=0 takes away the OpenSSL security level,
+    which refuses DTLS 1.0 on its own; only the minimum version is left.
+    """
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP tls = yes", "auto": "protocol = UDP tls = auto", "plain": "protocol = UDP"}
+    WEAK = "DEFAULT:@SECLEVEL=0"
+    BODY = (TLS_REALM + '\ttls ciphers = "%s"\n' % WEAK
+            + DEVICES.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") + RADSEC)
+
+    @classmethod
+    def setUpClass(cls):
+        if not tls.dtls_client_available("-dtls1"):
+            raise unittest.SkipTest("openssl s_client has no -dtls1 (DTLS 1.0)")
+        super().setUpClass()
+
+    def request(self, listener, version):
+        sock = tls.DtlsSocket((self.daemon.address, self.daemon.ports[listener]), self.ca.cert, self.certs["certnas"],
+                              timeout=5.0, version=version, cipher=self.WEAK)
+        return self.radius("radius/dtls", listener=listener, sock=sock, timeout=5.0).access_request("alice", "alicepw")
+
+    def test_dtls12_is_accepted(self):
+        for listener in ("dtls", "auto"):
+            with self.subTest(listener=listener):
+                self.assertEqual(self.request(listener, "-dtls1_2").code_name, "Access-Accept")
+
+    def test_dtls10_is_refused(self):
+        for listener in ("dtls", "auto"):
+            with self.subTest(listener=listener):
+                with self.assertRaises((TimeoutError, ConnectionError)):
+                    self.request(listener, "-dtls1")
+
+
+class DtlsMinimumVersionRealmAutoDetect(DtlsMinimumVersion):
+    """"tls auto-detect = yes" in the realm: the worker sets the DTLS versions of a plain UDP listener."""
+
+    BODY = DtlsMinimumVersion.BODY + "\ttls auto-detect = yes\n"
+
+    def test_dtls12_is_accepted(self):
+        self.assertEqual(self.request("plain", "-dtls1_2").code_name, "Access-Accept")
+
+    def test_dtls10_is_refused(self):
+        with self.assertRaises((TimeoutError, ConnectionError)):
+            self.request("plain", "-dtls1")
+
+
+class DtlsVersionKeywords(unittest.TestCase):
+    """spawnd "tls = DTLSv1.0" is a parse error; DTLSv1.2 is the oldest DTLS version."""
+
+    def parse(self, versions):
+        if "openssl" not in features():
+            self.skipTest("tac_plus-ng built without OpenSSL")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "dtls.cfg")
+            with open(path, "w") as f:
+                f.write("id = spawnd { listen = { port = 4949 protocol = UDP tls = %s } }\nid = tac_plus-ng { }\n"
+                        % versions)
+            return parse_only(path)
+
+    def test_dtls10_is_a_parse_error(self):
+        code, out = self.parse("DTLSv1.0")
+        self.assertGreater(code, 0, out)
+        self.assertIn("'DTLSv1.0'", out)
+
+    def test_dtls12_parses(self):
+        code, out = self.parse("DTLSv1.2")
+        self.assertEqual(code, 0, out)
 
 
 @unittest.skipUnless(LINUX, "CPU time from /proc")
