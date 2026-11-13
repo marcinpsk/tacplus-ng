@@ -413,7 +413,6 @@ class DemoPamSample(DaemonTestCase):
 
 
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
-@unittest.skipUnless("pcre2" in features(), "the groups filter is a PCRE")
 class MultivendorSample(DaemonTestCase):
     """sample/tac_plus-ng-multivendor.cfg: two realms, tagged devices, groups from UNIX group IDs.
 
