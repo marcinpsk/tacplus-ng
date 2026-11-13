@@ -39,7 +39,7 @@ printf "0 TACPLUS\n4 $USER\n8 $PASS\n49 CHPW\n50 $NEWPASS\n=\n" | \
 
 Environment variables:
 
-LDAP_HOST
+LDAP_HOSTS
 	Space-separated list of LDAP URLs or IP addresses or hostnames
 	Examples: "ldap01 ldap02", "ldaps://ads01:636 ldaps://ads02:636"
 
@@ -105,10 +105,17 @@ LDAP_TACMEMBER_MAP_OU
 	Default: unset
 
 TLS_OPTIONS
-	Extra options for LDAPS or STARTTLS, in Python hash syntax.
+	Keyword arguments of ldap3.Tls for LDAPS and STARTTLS; the names of
+	the Python ssl module can be used.
 	See https://ldap3.readthedocs.io/en/latest/ssltls.html for details.
-	Default: None
-	Example: "version=ssl.PROTOCOL_TLSv1_3"
+	The server certificate is checked against the CAs of the system
+	(validate=ssl.CERT_REQUIRED) unless TLS_OPTIONS sets "validate";
+	"ca_certs_file='/path/to/ca.pem'" names the CA, and
+	"validate=ssl.CERT_NONE" turns the check off.
+	An invalid TLS_OPTIONS stops the back-end with a message on stderr;
+	the message does not show the values.
+	Default: unset
+	Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
 
 LDAP_NESTED_GROUP_DEPTH
 	Limit nested group lookups to the given value. Unlimited if unset.
@@ -122,7 +129,7 @@ LDAP_SKIP_GROUPOFNAMES
 	Default: unset
 """
 
-import os, sys, re, ldap3, time, calendar, socket
+import os, sys, re, ldap3, time, calendar, socket, ssl
 from mavis import (Mavis,
 	MAVIS_DOWN, MAVIS_FINAL,
 	AV_V_RESULT_OK, AV_V_RESULT_ERROR, AV_V_RESULT_FAIL,
@@ -154,9 +161,15 @@ eval_env('LDAP_NESTED_GROUP_DEPTH', None)
 eval_env('LDAP_SKIP_MEMBEROF', None)
 eval_env('LDAP_SKIP_POSIXGROUP', None)
 eval_env('LDAP_SKIP_GROUPOFNAMES', None)
-tls = None
-if eval_env('TLS_OPTIONS', None) is not None:
-	tls = eval("{ " + TLS_OPTIONS + "}")
+# only dict() and the ssl module are visible to TLS_OPTIONS; the messages do not show its values (a key password)
+try:
+	tls_options = eval("dict(" + eval_env('TLS_OPTIONS', '') + ")", {"__builtins__": {}, "dict": dict, "ssl": ssl})
+except Exception as e:
+	sys.exit("invalid TLS_OPTIONS: {}".format(type(e).__name__))
+try:
+	tls = ldap3.Tls(**{"validate": ssl.CERT_REQUIRED, **tls_options})
+except Exception as e:
+	sys.exit("invalid TLS_OPTIONS ({}): {}".format(", ".join(sorted(tls_options)), e))
 eval_env('LDAP_HOSTS', 'ldaps://localhost')
 server_pool = ldap3.ServerPool(None, ldap3.FIRST, active=True)
 for server in LDAP_HOSTS.split():

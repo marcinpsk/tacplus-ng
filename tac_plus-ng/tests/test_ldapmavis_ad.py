@@ -200,6 +200,11 @@ $module
 	user backend = mavis
 	login backend = mavis chpass
 	pap backend = mavis
+	authentication fallback = permit
+	user rescue {
+		fallback-only
+		password pap = clear rescuepw
+	}
 	group netadmins { }
 	group staff { }
 	group unix { }
@@ -231,12 +236,13 @@ class AdTests:
         cls.addClassCleanup(cls.domain.remove)
         cls.domain.create()
 
-    def start(self, **env):
+    def start(self, command=None, check=True, **env):
+        """The daemon with the back-end of the class (or command); env: more setenv lines, None unsets one."""
         d = self.domain
-        lines = "\n".join(f'\t\tsetenv {k} = "{v}"' for k, v in {**self.env(), **env}.items())
+        lines = "\n".join(f'\t\tsetenv {k} = "{v}"' for k, v in {**self.env(), **env}.items() if v is not None)
         module = MODULE.substitute(module=self.MODULE, url=URL, base=d.ou, reader=d.dn("reader"),
-                                   readerpw=d.password("reader"), env=lines, exec=self.EXEC)
-        return self.start_daemon(POLICY.substitute(module=module, staff=d.dn("staff")))
+                                   readerpw=d.password("reader"), env=lines, exec=command or self.EXEC)
+        return self.start_daemon(POLICY.substitute(module=module, staff=d.dn("staff")), check=check)
 
     def login(self, cn):
         return self.domain.login(cn)
@@ -374,15 +380,51 @@ class AdPerl(AdTests, DaemonTestCase):
 @unittest.skipUnless(URL, SKIP_REASON)
 @unittest.skipUnless(python_ldap3(), f"no ldap3 module for {PYTHON}")
 class AdPython(AdTests, DaemonTestCase):
-    """No certificate check: TLS_OPTIONS of mavis_tacplus_ldap.py cannot give ldap3 a CA."""
-
     CONFIG = None
     MODULE = "external"
     EXEC = f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
     MESSAGE = "Permission denied: %s"
+    # ldap3 cannot match an IP address in the certificate; the certificate of the DC also names localhost
+    NAMES = "valid_names=['localhost']"
 
     def env(self):
-        return {}
+        return {"TLS_OPTIONS": f"ca_certs_file='{settings()['TACTEST_SAMBA_CA']}', {self.NAMES}"}
+
+    def test_tls_server_certificate_is_checked(self):
+        """By default the back-end checks the certificate of the server: a CA it does not trust is a backend error."""
+        for options, status in ((None, "FAIL"), (self.NAMES, "FAIL"), (self.env()["TLS_OPTIONS"], "PASS"),
+                                ("validate=ssl.CERT_NONE", "PASS")):
+            d = self.start(TLS_OPTIONS=options)
+            with self.subTest(options=options), d.connect() as c:
+                self.assertEqual(c.pap(self.login("alice"), "alice-pw").status_name, status)
+            with self.subTest(options=options, user="rescue"), d.connect() as c:
+                self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS" if status == "FAIL" else "FAIL")
+
+    def test_tls_options_invalid(self):
+        """An invalid TLS_OPTIONS stops the back-end with a message on stderr; the message does not show the values."""
+        unknown = "Tls.__init__() got an unexpected keyword argument 'nonsense'"
+        cases = (("nonsense=1", f"invalid TLS_OPTIONS (nonsense): {unknown}"),
+                 ("local_private_key_password='s3cret', nonsense=1",
+                  f"invalid TLS_OPTIONS (local_private_key_password, nonsense): {unknown}"),
+                 ("local_private_key_password=s3cret", "invalid TLS_OPTIONS: NameError"))
+        for i, (options, message) in enumerate(cases):
+            with self.subTest(options=options):
+                log = self.scratch_file(f"python-{i}.log", "")
+                # MAVIS logs the stderr of the back-end to syslog only
+                script = f'#!/bin/sh\nexec "{PYTHON}" "{LDAP_PYTHON}" 2>>"{log}"\n'
+                wrapper = self.scratch_file(f"python-{i}.sh", script)
+                os.chmod(wrapper, 0o755)
+                # the worker starts the back-end when it starts; check=False: the back-end exits on purpose
+                self.start(command=f'"{wrapper}" "python3"', check=False, TLS_OPTIONS=options)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    with open(log) as f:
+                        text = f.read()
+                    if message in text:
+                        break
+                    time.sleep(0.1)
+                self.assertNotIn("s3cret", text[:2000])
+                self.assertIn(message, text)
 
 
 if __name__ == "__main__":
