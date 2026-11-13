@@ -123,7 +123,8 @@ member: uid=dave,ou=people,$base
 
 def slapd_arg(value):
     """A slapd.conf argument: double quotes keep blanks, a backslash escapes a quote or a backslash."""
-    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def person(uid, extra=""):
@@ -408,6 +409,15 @@ member: cn=xylophone,ou=groups,$base
             r = c.ascii_login("erin", "erinpw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
 
+    def test_wide_group_tree(self):
+        """More groups than the old group walk array of ldapmavis-mt had, an answer above 64 KB: the last group counts."""
+        ldif = "".join(f"\ndn: cn=wide-{i},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: wide-{i}\n"
+                       f"member: uid=wide,ou=people,{BASE}\n" for i in range(WIDE))
+        _, d = self.start(ldif=person("wide") + ldif, LDAP_SIZELIMIT=str(2 * WIDE))
+        with d.connect(timeout=30.0) as c:
+            r = c.ascii_login("wide", "widepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "wide\n"), r)
+
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
         _, d = self.start()
@@ -466,15 +476,6 @@ class LdapMt(LdapTests, DaemonTestCase):
             finally:
                 watchdog.cancel()
                 p.kill()
-
-    def test_wide_group_tree(self):
-        """A user in more groups than the old fixed array of the group walk had; the last group still counts."""
-        ldif = "".join(f"\ndn: cn=wide-{i},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: wide-{i}\n"
-                       f"member: uid=wide,ou=people,{BASE}\n" for i in range(WIDE))
-        _, d = self.start(ldif=person("wide") + ldif, LDAP_SIZELIMIT=str(2 * WIDE))
-        with d.connect(timeout=30.0) as c:
-            r = c.ascii_login("wide", "widepw")
-        self.assertEqual((r.status_name, r.server_msg), ("PASS", "wide\n"), r)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
