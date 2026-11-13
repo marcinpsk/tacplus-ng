@@ -483,28 +483,22 @@ static int dnhash_match(struct dnhash **h, char *dn)
 
     pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(ldap_memberof_regex, NULL);
     int pcre_res = mypcre2_match((pcre2_code *) ldap_memberof_regex, (PCRE2_SPTR8) dn, (PCRE2_SIZE) strlen(dn), 0, 0, match_data, NULL);
+    int rc = -1;
     if (pcre_res < 0 && pcre_res != PCRE2_ERROR_NOMATCH) {
 	fprintf(stderr, "PCRE2 matching error: %d [%d]\n", pcre_res, __LINE__);
-	return -1;
+    } else {
+	int matched = (pcre_res > -1);
+	size_t match_start = 0;
+	size_t match_len = 0;
+	// the ovector is set only by a match
+	if (matched && pcre2_get_ovector_count(match_data) > 1) {
+	    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+	    match_start = ovector[2];
+	    match_len = ovector[3] - ovector[2];
+	}
+	rc = dnhash_add(h, dn, match_start, match_len, matched);
     }
-    int matched = (pcre_res > -1);
-
-    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
-    uint32_t ovector_count = pcre2_get_ovector_count(match_data);
-
-    if (ovector_count < 1)
-	return -1;
-
-    size_t match_start = 0;
-    size_t match_len = 0;
-    if (ovector_count > 1) {
-	match_start = ovector[2];
-	match_len = ovector[3] - ovector[2];
-    }
-
-    int rc = dnhash_add(h, dn, match_start, match_len, matched);
-    if (match_data)
-	pcre2_match_data_free(match_data);
+    pcre2_match_data_free(match_data);
     return rc;
 }
 
