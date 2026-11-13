@@ -511,7 +511,6 @@ REWRITE = """
 
 
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
-@unittest.skipUnless("pcre2" in features(), "rewrite needs PCRE2")
 class RewrittenOnly(DaemonTestCase):
     """"rewritten-only": the user exists only as the target of a rewrite (doc: "Rewriting User Names")."""
 

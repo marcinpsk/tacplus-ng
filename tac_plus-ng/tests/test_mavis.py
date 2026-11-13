@@ -207,7 +207,6 @@ GROUP_POLICY = BACKEND + "".join("\tgroup %s { }\n" % g for g in GROUPS) + """
 """ % GROUPS[-1]
 
 
-@unittest.skipUnless("pcre2" in features(), "the script uses a PCRE")
 class ManyGroups(DaemonTestCase):
     CONFIG = Stub.module(childs=(1, 1), script=APPEND_GROUP) + GROUP_POLICY
 
