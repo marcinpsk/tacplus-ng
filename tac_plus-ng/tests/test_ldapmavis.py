@@ -34,12 +34,12 @@ READER = "cn=reader," + BASE
 STAFF = "cn=staff,ou=groups," + BASE
 
 SLAPD_CONF = string.Template("""\
-include $schema/core.schema
-include $schema/cosine.schema
-include $schema/inetorgperson.schema
+include $core
+include $cosine
+include $inetorgperson
 $modules
-pidfile $dir/slapd.pid
-argsfile $dir/slapd.args
+pidfile $pidfile
+argsfile $argsfile
 
 access to dn.base="" by * read
 access to dn.base="cn=Subschema" by * read
@@ -48,7 +48,7 @@ access to * by users read by * none
 
 database mdb
 suffix "$base"
-directory $dir/db
+directory $db
 """)
 
 LDIF = string.Template("""\
@@ -113,6 +113,11 @@ member: uid=dave,ou=people,$base
 """).substitute(base=BASE, reader=READER, staff=STAFF)
 
 
+def slapd_arg(value):
+    """A slapd.conf argument: double quotes keep blanks, a backslash escapes a quote or a backslash."""
+    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def first_existing(paths):
     return next((p for p in paths if os.path.isdir(p)), None)
 
@@ -121,7 +126,7 @@ def modules():
     """moduleload lines for the mdb back-end, empty if slapd has it built in."""
     for d in MODULE_DIRS:
         if glob.glob(os.path.join(d, "back_mdb.*")):
-            return f"modulepath {d}\nmoduleload back_mdb"
+            return f"modulepath {slapd_arg(d)}\nmoduleload back_mdb"
     return ""
 
 
@@ -135,9 +140,11 @@ def perl_ldap():
 
 
 class Slapd:
-    """slapd on 127.0.0.1, configuration and database in directory."""
+    """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
     def __init__(self, directory):
+        directory = os.path.join(directory, "slapd data")
+        os.mkdir(directory)
         self.dir = directory
         self.proc = None
         self.port = None
@@ -146,8 +153,11 @@ class Slapd:
         schema = first_existing(SCHEMA_DIRS)
         if schema is None:
             raise AssertionError(f"no OpenLDAP schema directory in {SCHEMA_DIRS}")
+        paths = {n: os.path.join(schema, n + ".schema") for n in ("core", "cosine", "inetorgperson")}
+        paths.update(pidfile=os.path.join(directory, "slapd.pid"), argsfile=os.path.join(directory, "slapd.args"),
+                     db=os.path.join(directory, "db"))
         with open(self.conf, "w") as f:
-            f.write(SLAPD_CONF.substitute(schema=schema, modules=modules(), dir=directory, base=BASE))
+            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), base=BASE))
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
