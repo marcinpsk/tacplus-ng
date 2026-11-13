@@ -18,7 +18,7 @@ import time
 import unittest
 
 from tactest import DaemonTestCase, prefix
-from tactest.daemon import free_port
+from tactest.daemon import free_port, sanitizers
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
 SCHEMA_DIRS = ("/etc/ldap/schema", "/etc/openldap/schema")
@@ -208,7 +208,7 @@ MODULE = string.Template("""
 		setenv LDAP_PASSWD = "readerpw"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=%s))"
 		setenv LDAP_NESTED_GROUP_DEPTH = "10"
-		exec = $exec
+$extra		exec = $exec
 	}
 """)
 
@@ -240,13 +240,16 @@ $module
 
 
 class LdapTests:
-    """The tests for both back-ends; a subclass sets module(url) to its "mavis module" block."""
+    """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
-    def start(self):
+    def start(self, settings="", check=True, **env):
+        """Start slapd and the daemon; settings: more tac_plus-ng lines, env: environment of the back-end."""
         slapd = Slapd(os.path.dirname(self.scratch_file("slapd.conf", "")))
         self.addCleanup(slapd.stop)
         slapd.start()
-        return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url), staff=STAFF))
+        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
+        body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF)
+        return slapd, self.start_daemon(body, check=check)
 
     def test_pap(self):
         _, d = self.start()
@@ -302,10 +305,48 @@ class LdapTests:
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
 class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
+    exe = LDAPMAVIS
 
-    def module(self, url):
-        return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER,
-                                 exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
+    def module(self, url, extra):
+        return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, extra=extra,
+                                 exec=f'"{self.exe}" "ldapmavis-mt"')
+
+    def test_memberof_regex_match_error(self):
+        """A PCRE2 error of LDAP_MEMBEROF_REGEX skips the group; dnhash_match() must free its match data.
+
+        (*LIMIT_MATCH=1) makes pcre2_match() fail with PCRE2_ERROR_MATCHLIMIT (-47). With ASan the back-end
+        runs with LeakSanitizer: "retire limit = 1" ends the worker after the login, the worker closes the
+        pipes, and the back-end exits on EOF (the script ignores the SIGTERM of the worker for it).
+        """
+        log = self.scratch_file("stderr.log", "")
+        lsan = os.path.join(os.path.dirname(log), "lsan")
+        done = os.path.join(os.path.dirname(log), "exited")
+        # fast_unwind_on_malloc=0: the stack of a malloc() in libpcre2 then shows its caller
+        self.exe = self.scratch_file("ldapmavis-mt.sh", f"""#!/bin/sh
+trap '' TERM
+ASAN_OPTIONS="$ASAN_OPTIONS:detect_leaks=1:fast_unwind_on_malloc=0:log_path={lsan}" "{LDAPMAVIS}" 2>>"{log}"
+echo $? >"{done}"
+""")
+        os.chmod(self.exe, 0o755)
+        # check=False: the worker retires on purpose
+        _, d = self.start(settings="retire limit = 1\n", check=False,
+                          LDAP_MEMBEROF_REGEX="(*LIMIT_MATCH=1)^cn=([^,]+),.*")
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+        deadline = time.monotonic() + 20
+        while not os.path.exists(done) and time.monotonic() < deadline:
+            select.select([], [], [], 0.1)
+        self.assertTrue(os.path.exists(done), "the back-end did not exit after the worker retired")
+        with open(log, errors="replace") as f:
+            self.assertIn("PCRE2 matching error: -47", f.read())
+        if "address" in sanitizers():
+            text = ""
+            for name in glob.glob(lsan + ".*"):
+                with open(name, errors="replace") as f:
+                    text += f.read()
+            leaks = [b for b in text.split("\n\n") if "pcre2_match_data_create" in b and "dnhash_match" in b]
+            self.assertEqual(leaks, [])
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
@@ -313,8 +354,8 @@ class LdapMt(LdapTests, DaemonTestCase):
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
 
-    def module(self, url):
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER,
+    def module(self, url, extra):
+        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra,
                                  exec=f'"{PERL}" "perl" "{LDAP_PERL}"')
 
 
