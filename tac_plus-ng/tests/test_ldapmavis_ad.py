@@ -248,7 +248,7 @@ $module
 
 
 class AdTests:
-    """The tests for both back-ends; a subclass sets MODULE, EXEC and env() (its TLS settings)."""
+    """The tests for both back-ends; a subclass sets MODULE, EXEC, MESSAGE (its bind error text) and env() (TLS)."""
 
     # the back-end checks the certificate of the DC with the CA of env()
     CHECKS_CA = True
@@ -378,10 +378,37 @@ class AdTests:
         for user, code, _ in BIND_ERRORS:
             with self.subTest(user=user, code=code), d.connect() as c:
                 self.assertEqual(c.pap(self.login(user), user + "-pw").status_name, "FAIL")
-            if code in ("773", "533", "532"):
+            if code in ("773", "532"):
                 continue
             with self.subTest(user=user, code=code, login="ascii"), d.connect() as c:
                 self.assertEqual(c.ascii_login(self.login(user), user + "-pw").statuses, ["GETPASS", "FAIL"])
+
+
+    def test_bind_error_messages(self):
+        """The text for the "data" code of the AD bind error goes to the client."""
+        d = self.start()
+        self.lock(d, "lockmsg")
+        self.domain.wait_password_expired()
+        for user, code, text in BIND_ERRORS + (("alice", "52e", "Invalid credentials."),):
+            user = "lockmsg" if user == "locked" else user     # test_bind_errors locks "locked"
+            password = "wrong" if user == "alice" else user + "-pw"
+            with self.subTest(user=user, code=code), d.connect() as c:
+                r = c.pap(self.login(user), password)
+                self.assertEqual((r.status_name, r.server_msg), ("FAIL", self.MESSAGE % text + "\n"), r)
+
+    def test_must_change(self):
+        """A password that must change (773) or that expired (532) starts the password change dialog."""
+        d = self.start()
+        self.domain.wait_password_expired()
+        for user in ("reset", "aged"):
+            new = user + "-new"
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(self.login(user), user + "-pw", data=[new, new])
+                self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        # the policy of aged lets its new password expire at once
+        for password, status in (("reset-new", "PASS"), ("reset-pw", "FAIL")):
+            with self.subTest(password=password), d.connect() as c:
+                self.assertEqual(c.pap(self.login("reset"), password).status_name, status)
 
 
 @unittest.skipUnless(URL, SKIP_REASON)
@@ -390,6 +417,7 @@ class AdMt(AdTests, DaemonTestCase):
     CONFIG = None
     MODULE = "external-mt"
     EXEC = f'"{LDAPMAVIS}" "ldapmavis-mt"'
+    MESSAGE = "Permission denied: %s"
     # ldapmavis-mt makes its TLS context before it reads the LDAP_OPT_X_TLS_* settings
     CHECKS_CA = False
 
@@ -409,38 +437,12 @@ class AdPerl(AdTests, DaemonTestCase):
     CONFIG = None
     MODULE = "external"
     EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
+    MESSAGE = "%s"
 
     def env(self):
         # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
         return {"TLS_OPTIONS": f"verify => 'require', cafile => {perl_string(settings()['TACTEST_SAMBA_CA'])}",
                 "LDAP_CONNECT_TIMEOUT": "5"}
-
-    def test_bind_error_messages(self):
-        """The text for the "data" code of the AD bind error goes to the client."""
-        d = self.start()
-        self.lock(d, "lockmsg")
-        self.domain.wait_password_expired()
-        for user, code, text in BIND_ERRORS + (("alice", "52e", "Invalid credentials."),):
-            user = "lockmsg" if user == "locked" else user     # test_bind_errors locks "locked"
-            password = "wrong" if user == "alice" else user + "-pw"
-            with self.subTest(user=user, code=code), d.connect() as c:
-                r = c.pap(self.login(user), password)
-                self.assertEqual((r.status_name, r.server_msg), ("FAIL", text + "\n"), r)
-
-    def test_must_change(self):
-        """A password that must change (773) or that expired (532) starts the password change dialog."""
-        d = self.start()
-        self.domain.wait_password_expired()
-        for user in ("reset", "aged"):
-            new = user + "-new"
-            with self.subTest(user=user), d.connect() as c:
-                r = c.ascii_login(self.login(user), user + "-pw", data=[new, new])
-                self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
-        # the policy of aged lets its new password expire at once
-        for password, status in (("reset-new", "PASS"), ("reset-pw", "FAIL")):
-            with self.subTest(password=password), d.connect() as c:
-                self.assertEqual(c.pap(self.login("reset"), password).status_name, status)
-
 
 
 @unittest.skipUnless(URL, SKIP_REASON)
@@ -451,6 +453,7 @@ class AdPython(AdTests, DaemonTestCase):
     CONFIG = None
     MODULE = "external"
     EXEC = f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
+    MESSAGE = "Permission denied: %s"
     CHECKS_CA = False
 
     def env(self):
@@ -458,6 +461,10 @@ class AdPython(AdTests, DaemonTestCase):
 
     @unittest.skip("mavis_tacplus_ldap.py gives ldap3 the old and the new password in the wrong order for AD")
     def test_password_change(self):
+        pass
+
+    @unittest.skip("the check of mavis_tacplus_ldap.py for a password change (532, 773) never matches")
+    def test_must_change(self):
         pass
 
 
