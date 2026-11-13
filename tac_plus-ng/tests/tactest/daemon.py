@@ -148,9 +148,9 @@ def sanitizer_env(tmp=None, suppressions=SUPPRESSIONS):
 _sanitizers = {}
 
 
-def sanitizers():
-    """{"address", "undefined"} as far as the daemon binary was built with them."""
-    path = binary()
+def sanitizers(program="tac_plus-ng"):
+    """{"address", "undefined"} as far as the binary of program was built with them."""
+    path = binary(program)
     if path not in _sanitizers:
         with open(path, "rb") as f:
             data = f.read()

@@ -29,7 +29,7 @@ import unittest
 import unittest.mock
 
 from tactest import LINUX, DaemonTestCase, Stub, prefix, tls
-from tactest.daemon import free_port, sanitizer_env
+from tactest.daemon import free_port, sanitizer_env, sanitizers
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
 SCHEMA_DIRS = ("/etc/ldap/schema", "/etc/openldap/schema")
@@ -621,12 +621,13 @@ class LdapTests:
         slapd.start()
         return slapd
 
-    def start(self, ldif="", policy="", tls="", starttls=False, **env):
-        """Start slapd (ldif, tls, starttls: see slapd()) and the daemon; policy: more daemon lines, env: for the back-end."""
+    def start(self, ldif="", policy="", tls="", starttls=False, settings="", check=True, **env):
+        """Start slapd (ldif, tls, starttls: see slapd()) and the daemon; settings/policy: lines before/after the policy, env: for the back-end."""
         slapd = self.slapd(ldif, tls, starttls)
         extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
-        return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
-                                                                            base=BASE, last=WIDE - 1) + policy)
+        body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
+                                            base=BASE, last=WIDE - 1) + policy
+        return slapd, self.start_daemon(body, check=check)
 
     def test_pap(self):
         _, d = self.start()
@@ -901,6 +902,43 @@ class LdapMt(LdapTests, DaemonTestCase):
         for _ in range(10):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(backend_fds(d), before)
+
+    def test_memberof_regex_match_error(self):
+        """A PCRE2 error of LDAP_MEMBEROF_REGEX skips the group; dnhash_match() must free its match data.
+
+        (*LIMIT_MATCH=1) makes pcre2_match() fail with PCRE2_ERROR_MATCHLIMIT (-47). With ASan the back-end
+        runs with LeakSanitizer: "retire limit = 1" ends the worker after the login, the worker closes the
+        pipes, and the back-end exits on EOF (the script ignores the SIGTERM of the worker for it).
+        """
+        log = self.scratch_file("stderr.log", "")
+        lsan = os.path.join(os.path.dirname(log), "lsan")
+        done = os.path.join(os.path.dirname(log), "exited")
+        # fast_unwind_on_malloc=0: the stack of a malloc() in libpcre2 then shows its caller
+        self.exe = self.scratch_file("ldapmavis-mt.sh", f"""#!/bin/sh
+trap '' TERM
+ASAN_OPTIONS="$ASAN_OPTIONS:detect_leaks=1:fast_unwind_on_malloc=0:log_path={lsan}" "{LDAPMAVIS}" 2>>"{log}"
+echo $? >"{done}"
+""")
+        os.chmod(self.exe, 0o755)
+        # check=False: the worker retires on purpose
+        _, d = self.start(settings="retire limit = 1\n", check=False,
+                          LDAP_MEMBEROF_REGEX="(*LIMIT_MATCH=1)^cn=([^,]+),.*")
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+        deadline = time.monotonic() + 20
+        while not os.path.exists(done) and time.monotonic() < deadline:
+            select.select([], [], [], 0.1)
+        self.assertTrue(os.path.exists(done), "the back-end did not exit after the worker retired")
+        with open(log, errors="replace") as f:
+            self.assertIn("PCRE2 matching error: -47", f.read())
+        if "address" in sanitizers("ldapmavis-mt"):
+            text = ""
+            for name in glob.glob(lsan + ".*"):
+                with open(name, errors="replace") as f:
+                    text += f.read()
+            leaks = [b for b in text.split("\n\n") if "pcre2_match_data_create" in b and "dnhash_match" in b]
+            self.assertEqual(leaks, [])
 
     def test_request_without_a_user_name(self):
         """No or an empty user name: FAIL, and the backend answers the next request.

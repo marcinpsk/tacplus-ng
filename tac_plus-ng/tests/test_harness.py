@@ -398,6 +398,23 @@ class ListenerPorts(DaemonTestCase):
         self.assertEqual(len(set(udp)), len(udp), udp)
 
 
+class Sanitizers(unittest.TestCase):
+    """sanitizers(program) reads the binary of that program: a back-end can have other sanitizers than the daemon."""
+
+    def test_each_program_has_its_own_sanitizers(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        os.mkdir(os.path.join(tmp, "sbin"))
+        for name, data in (("tac_plus-ng", b"plain"), ("ldapmavis-mt", b"__asan_init")):
+            path = os.path.join(tmp, "sbin", name)
+            with open(path, "wb") as f:
+                f.write(data)
+            os.chmod(path, 0o755)
+        with mock.patch.dict(os.environ, TACTEST_PREFIX=tmp):
+            self.assertEqual(sanitizers(), set())
+            self.assertEqual(sanitizers("ldapmavis-mt"), {"address"})
+
+
 class TestFiles(unittest.TestCase):
     """A worker reads its configuration when it starts, which can be after the test removed a file in it."""
 
