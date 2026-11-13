@@ -529,7 +529,8 @@ static char *subst_magic(tac_session *session, char *format, ...)
     if (!len)
 	return NULL;
 
-    format_concat = alloca(len);
+    // + 1: an empty format still gets the newline before the next string
+    format_concat = alloca(len + 1);
     *format_concat = 0;
 
     va_start(ap, format);
