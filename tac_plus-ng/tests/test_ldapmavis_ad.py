@@ -11,6 +11,7 @@ sAMAccountName.
 
 import base64
 import os
+import re
 import secrets
 import shutil
 import string
@@ -84,18 +85,22 @@ def unicode_pwd(password):
     return base64.b64encode(f'"{password}"'.encode("utf-16-le")).decode()
 
 
-def ldap_tool(tool, args, stdin, ok=(0,)):
-    """Run an ldap-utils command as the domain administrator, with the certificate check of the DC."""
+def ldap_tool(tool, args, stdin, ok=(0,), dn=None, password=None):
+    """Run an ldap-utils command, as the domain administrator unless dn is set, with the certificate check of the DC.
+
+    Returns the output.
+    """
     s = settings()
     path = shutil.which(tool)
     if path is None:
         raise AssertionError(f"TACTEST_SAMBA_DC is set, but {tool} (ldap-utils) is missing")
     env = dict(os.environ, LDAPTLS_CACERT=s["TACTEST_SAMBA_CA"], LDAPTLS_REQCERT="demand")
-    p = subprocess.run([path, "-x", "-H", URL, "-D", s["TACTEST_SAMBA_ADMIN"], "-w", s["TACTEST_SAMBA_PASSWORD"],
-                        *args], input=stdin, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                       check=False, timeout=60)
+    bind = [dn, password] if dn else [s["TACTEST_SAMBA_ADMIN"], s["TACTEST_SAMBA_PASSWORD"]]
+    p = subprocess.run([path, "-x", "-H", URL, "-D", bind[0], "-w", bind[1], *args], input=stdin, env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=60)
     if p.returncode not in ok:
         raise AssertionError(f"{tool} failed ({p.returncode}):\n{p.stdout}")
+    return p.stdout
 
 
 class Domain:
@@ -103,8 +108,8 @@ class Domain:
 
     alice is a member of netadmins, netadmins of staff, dave of staff;
     posix has the gidNumber of the posixGroup unix. The account states
-    of the BIND_ERRORS users, and of reset (773) and aged (532), give
-    the bind errors of AD.
+    of the BIND_ERRORS users, of inactive (533), and of reset (773) and
+    aged (532), give the bind errors of AD.
     """
 
     # cn: (userAccountControl, more LDIF lines); 512: a normal account, 514: disabled
@@ -118,6 +123,7 @@ class Domain:
         "mustchange": (512, "pwdLastSet: 0\n"),
         "reset": (512, "pwdLastSet: 0\n"),
         "disabled": (514, ""),
+        "inactive": (514, ""),
         "expired": (512, "accountExpires: 1\n"),
         "nohours": (512, f"logonHours:: {base64.b64encode(bytes(21)).decode()}\n"),
         "elsewhere": (512, "userWorkstations: nowhere\n"),
@@ -167,6 +173,12 @@ class Domain:
         # 32: no such object, after a create() that stopped early
         ldap_tool("ldapdelete", ["-c"], "".join(dn + "\n" for dn in self.psos.values()), ok=(0, 32))
         ldap_tool("ldapdelete", ["-r", self.ou], None, ok=(0, 32))
+
+    def bind_code(self, cn, password):
+        """The "data" code of AD for a bind as cn, "" if the bind succeeds."""
+        out = ldap_tool("ldapwhoami", [], None, ok=(0, 49), dn=self.dn(cn), password=password)
+        m = re.search(r", data ([0-9a-f]+),", out)
+        return m.group(1) if m else ""
 
     def wait_password_expired(self):
         time.sleep(max(0.0, self.created + PASSWORD_MAX_AGE + 1 - time.monotonic()))
@@ -282,6 +294,15 @@ class AdTests:
         for password, status in ((new, "PASS"), ("carol-pw", "FAIL")):
             with self.subTest(password=password), d.connect() as c:
                 self.assertEqual(c.pap(self.login("carol"), password).status_name, status)
+
+    def test_disabled_no_password_change(self):
+        """A disabled account (533) gets no password change dialog, and its password stays."""
+        d = self.start()
+        with d.connect() as c:
+            r = c.ascii_login(self.login("inactive"), "inactive-pw", data=["inactive-new", "inactive-new"])
+        self.assertEqual(r.statuses, ["GETPASS", "FAIL"], r)
+        self.assertEqual([self.domain.bind_code("inactive", p) for p in ("inactive-pw", "inactive-new")],
+                         ["533", "52e"])
 
     def test_bind_errors(self):
         """The correct password of an account that AD does not let log in: FAIL, also without a password change."""

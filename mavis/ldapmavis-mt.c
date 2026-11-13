@@ -1198,7 +1198,7 @@ int main(int argc, char **argv __attribute__((unused)))
 	fprintf(stderr, "PCRE2 error: %s\n", buffer);
     }
 
-    ad_dsid_regex = mypcre2_compile((PCRE2_SPTR8) "DSID-.*, data (532|533|773) ", PCRE2_ZERO_TERMINATED, 0, &errcode, &erroffset, NULL);
+    ad_dsid_regex = mypcre2_compile((PCRE2_SPTR8) "DSID-.*, data (532|773) ", PCRE2_ZERO_TERMINATED, 0, &errcode, &erroffset, NULL);
     if (!ad_dsid_regex)
 	fprintf(stderr, "trouble at line %d\n", __LINE__ - 1);
     if (!ad_result_regex) {

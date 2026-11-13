@@ -351,7 +351,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		if not conn.rebind(user=entry.entry_dn, password=D.password):
 			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw
 				and conn.result == ldap3.core.results.RESULT_INVALID_CREDENTIALS
-				and re.search(r"DSID-.*, data (532|533|773) ", conn.message)):
+				and re.search(r"DSID-.*, data (532|773) ", conn.message)):
 				D.password_mustchange(True)
 				user_msg = translate_ldap_error(conn)
 			else:
