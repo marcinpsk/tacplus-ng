@@ -36,7 +36,7 @@ tests rely on the crash detectors that run after every test
 import struct
 import unittest
 
-from tactest import DaemonTestCase, features, tacacs
+from tactest import DaemonTestCase, features, needs_loopback_net, tacacs
 
 POLICY = """
 	user alice {
@@ -191,6 +191,7 @@ class Realm(DaemonTestCase):
 	}
 """
 
+    @needs_loopback_net
     def test_issue149_login_in_a_realm(self):
         self.assertTrue(self.connect(source="127.0.0.5").pap("carol", "carolpw").ok)
         self.assertEqual(self.connect(source="127.0.0.5").pap("carol", "wrong").status_name, "FAIL")

@@ -46,7 +46,7 @@ The fixed daemon answers these requests: the device's (or the profile's)
 enable password decides, as it does for a known user.
 """
 
-from tactest import DaemonTestCase, Stub
+from tactest import DaemonTestCase, Stub, needs_loopback_net
 
 DEVICE_ENABLE = """
 	device enable-nas {
@@ -60,6 +60,7 @@ DEVICE_ENABLE = """
 """
 
 
+@needs_loopback_net
 class EnableUnknownUser(DaemonTestCase):
     """Local users only; the device has an enable password."""
 
@@ -86,6 +87,7 @@ class EnableUnknownUser(DaemonTestCase):
         self.assertEqual(r.status_name, "PASS")
 
 
+@needs_loopback_net
 class EnableMavisNotFound(DaemonTestCase):
     """Users from MAVIS; the backend answers INFO for the user with NOTFOUND."""
 
@@ -108,6 +110,7 @@ class EnableMavisNotFound(DaemonTestCase):
         self.assertEqual(r.status_name, "FAIL")
 
 
+@needs_loopback_net
 class EnableUnknownUserProfile(DaemonTestCase):
     """The ruleset gives every request a profile that has the enable password."""
 

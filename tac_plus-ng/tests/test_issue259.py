@@ -34,7 +34,7 @@ rejects the configuration, and that has to fail the test, not the class.
 
 import unittest
 
-from tactest import DaemonTestCase
+from tactest import DaemonTestCase, needs_loopback_net
 
 BANNER = "User Access Verification\n\n"
 
@@ -69,6 +69,7 @@ POLICY = """
 """
 
 
+@needs_loopback_net
 class RulePasswordPrompt(DaemonTestCase):
     CONFIG = None
 

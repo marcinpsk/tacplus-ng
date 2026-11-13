@@ -39,7 +39,7 @@ import ssl
 import time
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, cpu_seconds, features, radius, tacacs, tls
+from tactest import LINUX, SOURCE, DaemonTestCase, cpu_seconds, features, needs_loopback_net, radius, tacacs, tls
 
 TLS_REALM = """
 	tls cert-file = "%(server_crt)s"
@@ -172,6 +172,7 @@ class TacacsOverTls(TlsTestCase):
         self.assertEqual(self.device_and_transport(self.connect_tls()),
                          {"tactest-device": "certnas", "tactest-transport": "tls"})
 
+    @needs_loopback_net
     def test_device_by_address_without_client_certificate(self):
         """Only where the device of the address doesn't ask for one (tls.peer.cert.validation = none)."""
         self.assertEqual(self.device_and_transport(self.connect_tls(client=None, source="127.0.0.9")),
@@ -180,6 +181,7 @@ class TacacsOverTls(TlsTestCase):
     def test_no_client_certificate_is_refused_by_default(self):
         self.assertRefused(lambda: self.connect_tls(client=None))
 
+    @needs_loopback_net
     def test_unknown_certificate_name_falls_back_to_the_address(self):
         self.assertEqual(self.device_and_transport(self.connect_tls(client="nobody", source="127.0.0.9")),
                          {"tactest-device": "ipnas", "tactest-transport": "tls"})
@@ -218,6 +220,7 @@ class TacacsOverTls(TlsTestCase):
                          {"tactest-device": "localhost", "tactest-transport": "tcp"})
 
 
+@needs_loopback_net
 class PeerCertSan(TlsTestCase):
     """The subjectAltNames of a client certificate select the device; a DNS name in there crashed the worker.
 
@@ -612,6 +615,7 @@ class PeerCloses(TlsTestCase):
         self.idle_after(c.close)
 
 
+@needs_loopback_net
 class PeerCertSanValidation(TlsTestCase):
     """tls.peer.cert.san.validation = yes: an IP address SAN selects a device only if it is the peer's address.
 

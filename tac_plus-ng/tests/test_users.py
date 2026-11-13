@@ -14,7 +14,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-from tactest import LINUX, DaemonTestCase, Stub, features, prefix, tacacs
+from tactest import DaemonTestCase, Stub, features, needs_loopback_net, prefix, tacacs
 
 BANNER = "User Access Verification\n\n"
 METH_LOCAL = 5      # authen_method "local" of RFC 8907 5.1
@@ -127,13 +127,13 @@ class PasswordTypes(DaemonTestCase):
         self.assertEqual(self.connect().enable("cisco", user="enablehash").status_name, "PASS")
         self.assertEqual(self.connect().enable("loginpw", user="enablehash").status_name, "FAIL")
 
-    @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+    @needs_loopback_net
     def test_enable_asa_on_the_device(self):
         """The ASA enable hash has no user name in it, so this is the enable request without a user."""
         self.assertEqual(self.connect(source="127.0.0.21").enable("cisco").status_name, "PASS")
         self.assertEqual(self.connect(source="127.0.0.21").enable("wrong").status_name, "FAIL")
 
-    @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+    @needs_loopback_net
     def test_type6_device_key_and_enable(self):
         """"type6-key" of the device decrypts its type 6 key and enable password."""
         c = self.connect(source="127.0.0.22", key="devkey6")
@@ -191,7 +191,7 @@ class Expiry(DaemonTestCase):
         self.assertTrue(self.connect().pap("soon", "pw").ok)
         self.assertEqual(self.connect().pap("expired", "pw").status_name, "FAIL")
 
-    @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+    @needs_loopback_net
     def test_warning_period_of_the_realm(self):
         self.assertEqual(self.login("later", source="127.0.0.41"), ("PASS", EXPIRES))
 
@@ -247,7 +247,7 @@ MESSAGES = """
 MSG_BANNER = "Authorized users only\n\n"
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class Messages(DaemonTestCase):
     """"message <ID> = ..." of a device or a realm replaces that text in the replies (doc: "User Messages")."""
 
@@ -334,7 +334,7 @@ ENABLE = """
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class Enable(DaemonTestCase):
     """"enable" of a user and a device, "anonymous-enable", "augmented-enable" (doc: "enable", "Authentication")."""
 
@@ -440,7 +440,7 @@ ATTRIBUTES = """
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class UserAttributes(DaemonTestCase):
     """"hushlogin", "user.tag", "permit if-authenticated", "password max-attempts", "max-rounds"."""
 
@@ -510,7 +510,7 @@ REWRITE = """
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class RewrittenOnly(DaemonTestCase):
     """"rewritten-only": the user exists only as the target of a rewrite (doc: "Rewriting User Names")."""
 
@@ -546,7 +546,7 @@ CHPASS = Stub.module(childs=(1, 1)) + """
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class ChpassDialog(DaemonTestCase):
     """"login backend = mavis chpass": an empty password starts the password change dialog (doc: "chpass")."""
 
@@ -637,7 +637,7 @@ while True:
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class ChallengeAndExpiry(DaemonTestCase):
     """"login backend = mavis chalresp [noecho]" and "password expiry warning", with BACKEND; a daemon per test."""
 
