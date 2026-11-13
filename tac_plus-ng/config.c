@@ -6037,7 +6037,9 @@ static struct mavis_action *tac_script_parse_r(struct sym *sym, mem_t *mem, int 
 	m = mavis_action_new(sym, mem);
 	parse(sym, S_default);
 	parse(sym, S_equal);
-	m->b.v = (char *) (keycode(sym->buf));
+	if (sym->code != S_permit && sym->code != S_deny)
+	    parse_error_expect(sym, S_permit, S_deny, S_unknown);
+	m->b.v = (char *) (long) sym->code;
 	sym_get(sym);
 	break;
     case S_if:
