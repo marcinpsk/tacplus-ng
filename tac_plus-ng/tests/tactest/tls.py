@@ -45,6 +45,7 @@ command or its DTLS client is missing.
 """
 
 import os
+import re
 import select
 import shutil
 import signal
@@ -60,13 +61,13 @@ def openssl_available():
     return shutil.which("openssl") is not None
 
 
-def dtls_client_available():
-    """An OpenSSL built with "no-dtls" has no -dtls1_2 option in s_client."""
+def dtls_client_available(option="-dtls1_2"):
+    """An OpenSSL built with "no-dtls" (or "no-dtls1" for option "-dtls1") has no such option in s_client."""
     if not openssl_available():
         return False
     p = subprocess.run(["openssl", "s_client", "-help"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        stdin=subprocess.DEVNULL, timeout=60)
-    return b"-dtls1_2" in p.stdout
+    return re.search(rb"^\s*%s\s" % re.escape(option.encode()), p.stdout, re.M) is not None
 
 
 def _openssl(*args, cwd=None):
@@ -242,7 +243,7 @@ class PskSocket(SClientSocket):
 
 
 class DtlsSocket(SClientSocket):
-    """DTLS 1.2 with a client certificate, for radius.Client(sock=...).
+    """DTLS 1.2 (or version, an s_client option) with a client certificate, for radius.Client(sock=...).
 
     s_client sends what one read of its stdin returns as one DTLS record,
     and writes each record it receives to stdout: one RADIUS packet per
@@ -250,9 +251,9 @@ class DtlsSocket(SClientSocket):
     -timeout lets s_client send a lost handshake message again.
     """
 
-    def __init__(self, addr, ca, cert, timeout=5.0):
-        super().__init__(addr, ["-dtls1_2", "-timeout", "-CAfile", ca, "-verify_return_error",
-                                "-cert", cert[0], "-key", cert[1]], timeout)
+    def __init__(self, addr, ca, cert, timeout=5.0, version="-dtls1_2", cipher=None):
+        super().__init__(addr, [version, "-timeout", "-CAfile", ca, "-verify_return_error",
+                                "-cert", cert[0], "-key", cert[1]] + (["-cipher", cipher] if cipher else []), timeout)
 
     def recv(self, n, flags=0):
         data = super().recv(n, flags)

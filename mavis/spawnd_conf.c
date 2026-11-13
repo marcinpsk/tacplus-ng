@@ -193,10 +193,9 @@ static void parse_listen(struct sym *sym)
 	    case S_true:
 		ctx->tls_versions = (TLS1_2_VERSION & 0xff)
 		    | ((TLS1_3_VERSION & 0xff) << 8);
-		ctx->dtls_versions = (DTLS1_VERSION & 0xff)
-		    | ((DTLS1_2_VERSION & 0xff) << 16)
+		ctx->dtls_versions = (DTLS1_2_VERSION & 0xff)
 #ifdef DTLS1_3_VERSION
-		    | ((DTLS1_3_VERSION & 0xff) << 24)
+		    | ((DTLS1_3_VERSION & 0xff) << 8)
 #endif
 		    ;
 		sym_get(sym);
@@ -214,10 +213,9 @@ static void parse_listen(struct sym *sym)
 		if (!ctx->tls_versions) {
 		    ctx->tls_versions = (TLS1_2_VERSION & 0xff)
 			| ((TLS1_3_VERSION & 0xff) << 8);
-		    ctx->dtls_versions = (DTLS1_VERSION & 0xff)
-			| ((DTLS1_2_VERSION & 0xff) << 16)
+		    ctx->dtls_versions = (DTLS1_2_VERSION & 0xff)
 #ifdef DTLS1_3_VERSION
-			| ((DTLS1_3_VERSION & 0xff) << 24)
+			| ((DTLS1_3_VERSION & 0xff) << 8)
 #endif
 			;
 		}
@@ -241,16 +239,11 @@ static void parse_listen(struct sym *sym)
 		    sym_get(sym);
 		} while (parse_comma(sym));
 		break;
-	    case S_DTLS1_0:
 	    case S_DTLS1_2:
 	    case S_DTLS1_3:
 		ctx->dtls_versions = 0;
 		do {
 		    switch (sym->code) {
-		    case S_DTLS1_0:
-			ctx->dtls_versions <<= 8;
-			ctx->dtls_versions |= DTLS1_VERSION & 0xff;	// ~0
-			break;
 		    case S_DTLS1_2:
 			ctx->dtls_versions <<= 8;
 			ctx->dtls_versions |= DTLS1_2_VERSION & 0xff;	// ~2
@@ -262,7 +255,7 @@ static void parse_listen(struct sym *sym)
 			break;
 #endif
 		    default:
-			parse_error_expect(sym, S_DTLS1_0, S_DTLS1_2,
+			parse_error_expect(sym, S_DTLS1_2,
 #ifdef DTLS1_3_VERSION
 					   S_DTLS1_3,
 #endif
@@ -272,8 +265,8 @@ static void parse_listen(struct sym *sym)
 		} while (parse_comma(sym));
 		break;
 	    default:
-		parse_error_expect(sym, S_TLS1_2, S_TLS1_3, S_DTLS1_0, S_DTLS1_2,
-#ifdef DTLS1_2_VERSION
+		parse_error_expect(sym, S_TLS1_2, S_TLS1_3, S_DTLS1_2,
+#ifdef DTLS1_3_VERSION
 				   S_DTLS1_3,
 #endif
 				   S_yes, S_permit, S_true, S_no, S_deny, S_false, S_dscp, S_unknown);
