@@ -70,7 +70,7 @@ env:
   # slapd, libnet-ldap-perl, libio-socket-ssl-perl: the LDAP server and the Perl LDAP back-end of test_ldapmavis.py;
   #   the AppArmor profile of slapd confines it to /etc/ldap and /var/lib/ldap, the tests run it in the build tree
   # ldap-utils: test_ldapmavis_ad.py adds its users to the Samba AD DC with ldapadd
-  # python3-ldap3: the Python LDAP back-end (mavis_tacplus_ldap.py) of test_ldapmavis_ad.py
+  # python3-ldap3: the Python LDAP back-end (mavis_tacplus_ldap.py) of test_ldapmavis.py and test_ldapmavis_ad.py
   UBUNTU_PACKAGES: build-essential clang llvm perl libpcre2-dev libssl-dev libcrypt-dev python3 openssl libpam0g-dev libldap-dev libradcli-dev libc-ares-dev slapd libnet-ldap-perl libio-socket-ssl-perl ldap-utils python3-ldap3
 
 jobs:
@@ -80,13 +80,13 @@ jobs:
     container: alpine:3.20
     timeout-minutes: 15
     steps:
-      - run: apk add --no-cache gcc musl-dev make perl openssl-dev pcre2-dev linux-headers python3 openssl linux-pam-dev openldap-dev radcli-dev c-ares-dev openldap openldap-back-mdb perl-ldap perl-io-socket-ssl
+      - run: apk add --no-cache gcc musl-dev make perl openssl-dev pcre2-dev linux-headers python3 openssl linux-pam-dev openldap-dev radcli-dev c-ares-dev openldap openldap-back-mdb perl-ldap perl-io-socket-ssl py3-ldap3
       - uses: actions/checkout@v5
       # no Docker in this container: test_ldapmavis_ad.py skips (no TACTEST_SAMBA_DC)
       - run: tac_plus-ng/tests/run-tests
       # the tests of these backends and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt
-      - run: test -x /usr/sbin/slapd && perl -MNet::LDAP -MIO::Socket::SSL -e 1
+      - run: test -x /usr/sbin/slapd && perl -MNet::LDAP -MIO::Socket::SSL -e 1 && /usr/bin/python3 -c 'import ldap3'
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
       - if: failure()
         uses: actions/upload-artifact@v4
