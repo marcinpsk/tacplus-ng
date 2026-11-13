@@ -11,7 +11,7 @@ forced result.
 import os
 import unittest
 
-from tactest import SOURCE, DaemonTestCase, Stub
+from tactest import SOURCE, DaemonTestCase, Stub, needs_loopback_net
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 SECRET = "radsecret"
@@ -110,6 +110,7 @@ class Mfa(DaemonTestCase):
         self.assertEqual(self.connect().pap("bob", "bobpw").status_name, "PASS")
         self.assertEqual(self.mfa_users(before), [])
 
+    @needs_loopback_net
     def test_realm_acl_asks_users_on_the_device(self):
         """"mavis mfa acl" applies to users without an "mfa" line of their own."""
         self.mfa("NAK")
@@ -120,6 +121,7 @@ class Mfa(DaemonTestCase):
         self.assertEqual(self.connect(source=MFA_DEVICE).ascii_login("bob", "bobpw").status_name, "PASS")
         self.assertEqual(self.mfa_users(before), ["bob", "bob"])
 
+    @needs_loopback_net
     def test_user_mfa_no_wins_over_the_realm_acl(self):
         self.mfa("NAK")
         before = self.stub.count(type="MFA")
@@ -144,6 +146,7 @@ class Mfa(DaemonTestCase):
         self.assertEqual((r.status_name, r.args), ("PASS_ADD", ["priv-lvl=15"]), r)
         self.assertEqual(self.mfa_users(before), [])
 
+    @needs_loopback_net
     def test_radius_with_the_second_factor(self):
         for result, code in (("ACK", "Access-Accept"), ("NAK", "Access-Reject")):
             with self.subTest(result=result):

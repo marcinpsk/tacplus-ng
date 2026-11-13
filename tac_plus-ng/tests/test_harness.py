@@ -48,7 +48,7 @@ import time
 import unittest
 from unittest import mock
 
-from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, sanitizers
+from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, needs_loopback_net, sanitizers
 from tactest import daemon
 from tactest.daemon import proc_stat
 
@@ -274,6 +274,7 @@ class Harness(DaemonTestCase):
         # a finding outside the request path (io_poll) needs a periodic tick
         return poll(base.sanitizer, UBSAN_WAIT)
 
+    @needs_loopback_net
     def test_harness_ubsan_suppressions_are_needed(self):
         """Every line of ubsan.supp still fires without it, and none fires with the whole file.
 

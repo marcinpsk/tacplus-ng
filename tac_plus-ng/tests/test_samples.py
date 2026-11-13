@@ -20,8 +20,8 @@ import struct
 import time
 import unittest
 
-from tactest import (LINUX, SOURCE, Closed, DaemonTestCase, ProtocolError, Stub, features, prefix, radius, sample,
-                     tacacs, tls)
+from tactest import (SOURCE, Closed, DaemonTestCase, ProtocolError, Stub, features, needs_loopback_net, prefix, radius,
+                     sample, tacacs, tls)
 
 STUB_EXEC = Stub.module().split("\n")[1:-2]     # the exec and setenv lines, without the "mavis module" block
 LISTENER = "listen { address = $address port = $port }\n$spawnd"
@@ -107,7 +107,7 @@ class MainSample(DaemonTestCase):
         self.assertEqual(self.connect().pap("demo", "demo").status_name, "PASS")
         self.assertEqual(self.connect().pap("demo", "wrong").status_name, "FAIL")
 
-    @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+    @needs_loopback_net
     def test_parent_device_banner_and_rules(self):
         """127.0.0.2 is the device "world": its banner, and no rule permits that device."""
         r = self.connect(source="127.0.0.2").ascii_login("demo", "demo")
@@ -412,7 +412,7 @@ class DemoPamSample(DaemonTestCase):
         self.assertEqual(self.stub.requests("AUTH", "nobody")[0]["result"], "NOTFOUND")
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class MultivendorSample(DaemonTestCase):
     """sample/tac_plus-ng-multivendor.cfg: two realms, tagged devices, groups from UNIX group IDs.
 

@@ -38,7 +38,7 @@ after a few, hence the users take turns several times.
 
 import unittest
 
-from tactest import DaemonTestCase, Stub
+from tactest import DaemonTestCase, Stub, needs_loopback_net
 
 ROUNDS = 6
 ALLOWED = ("PASS", "PASS_ADD", ["priv-lvl=15"])
@@ -74,6 +74,7 @@ POLICY = Stub.module(childs=(1, 1)) + """
 """
 
 
+@needs_loopback_net
 class ProfileCache(DaemonTestCase):
     CONFIG = POLICY
 

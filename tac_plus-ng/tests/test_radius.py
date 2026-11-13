@@ -37,7 +37,7 @@ import tempfile
 import time
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, features, radius, tacacs
+from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, features, needs_loopback_net, radius, tacacs
 from tactest.daemon import binary, parse_only, sanitizer_env
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
@@ -71,6 +71,7 @@ POLICY = """
 """ % (DICTIONARY, SECRET)
 
 
+@needs_loopback_net
 class Pap(DaemonTestCase):
     CONFIG = POLICY
     UDP = True
@@ -190,6 +191,7 @@ class ReplyAttributes(DaemonTestCase):
 
 
 @unittest.skipUnless("openssl" in features(), "the Message-Authenticator needs a build with OpenSSL")
+@needs_loopback_net
 class MessageAuthenticator(DaemonTestCase):
     """Message-Authenticator (RFC 3579 3.2): checked in requests, always set in replies."""
 
@@ -237,6 +239,7 @@ class MessageAuthenticator(DaemonTestCase):
 
 
 @unittest.skipUnless("openssl" in features(), "the Message-Authenticator needs a build with OpenSSL")
+@needs_loopback_net
 class MessageAuthenticatorRequired(DaemonTestCase):
     """#281 (3): an Access-Request without Message-Authenticator is dropped, unless bug compatibility 32.
 
@@ -426,6 +429,7 @@ class DroppedDatagram(DaemonTestCase):
         self.assertEqual(r.code_name, "Access-Accept", r)
 
 
+@needs_loopback_net
 class ConditionTypes(DaemonTestCase):
     """A condition on a "time" or "enum" attribute compares numbers, as for "integer"."""
 
@@ -674,6 +678,7 @@ class RegexOnNumericAttribute(unittest.TestCase):
                       self.error_of('radius[NAS-Port] !~ "1"'))
 
 
+@needs_loopback_net
 class RegexOnOtherAttributes(DaemonTestCase):
     """A regex on a string or address attribute matches its text."""
 
@@ -718,6 +723,7 @@ class RegexOnOtherAttributes(DaemonTestCase):
         self.assertEqual(self.messages((self.NAS_IP_ADDRESS, bytes([10, 0, 0, 2]))), [b"pcre", b"posix"])
 
 
+@needs_loopback_net
 class EqualOnOtherAttributes(DaemonTestCase):
     """"==" and "!=" on a string or address attribute compare its text."""
 
@@ -767,6 +773,7 @@ class EqualOnOtherAttributes(DaemonTestCase):
         self.assertEqual(self.messages()[2:], [b"address is not 10.0.0.1"])
 
 
+@needs_loopback_net
 class EqualOnIpv6Address(DaemonTestCase):
     """A missing IPv6 attribute compared as "::"."""
 
@@ -814,6 +821,7 @@ class EqualOnIpv6Address(DaemonTestCase):
         self.assertEqual(self.messages(), [b"address is not 2001:db8::1"])
 
 
+@needs_loopback_net
 class StringWithNul(DaemonTestCase):
     """A string attribute "abc\\0suffix" compared equal to "abc": strcmp() and regexec() stop at the NUL."""
 
@@ -883,6 +891,7 @@ class ConditionOnOctetsOrVsa(unittest.TestCase):
                       condition_error(self, "radius[Vendor-Specific] == abc"))
 
 
+@needs_loopback_net
 class RealmOnUdpListener(DaemonTestCase):
     """#232: "realm =" on a UDP listener was ignored, every RADIUS request went to the default realm.
 
@@ -1159,6 +1168,7 @@ id = tac_plus-ng {
             self.assertIn("RADIUS value 'bogus' not found (attribute: Service-Type)", out)
 
 
+@needs_loopback_net
 class UnknownHost(DaemonTestCase):
     """#247: a request from an address without a device crashed the worker (builds without OpenSSL)."""
 
@@ -1227,10 +1237,12 @@ class DaclName:
         self.download("#ACSACL#demoacl", "demoacl")
 
 
+@needs_loopback_net
 class DaclNameStatic(DaclName, DaemonTestCase):
     CONFIG = POLICY + DACLS
 
 
+@needs_loopback_net
 class DaclNameBackendNotFound(DaclName, DaemonTestCase):
     """The MAVIS backend doesn't know the dACL (NOTFOUND): the static one is used."""
 
@@ -1244,6 +1256,7 @@ class DaclNameBackendNotFound(DaclName, DaemonTestCase):
                          [("DACL", name, "NOTFOUND")])
 
 
+@needs_loopback_net
 class DaclNameNoMavisModule(DaclName, DaemonTestCase):
     """No MAVIS module, but "user backend = mavis": the static dACL is used."""
 

@@ -19,7 +19,7 @@ import threading
 import unittest
 from unittest import mock
 
-from tactest import SOURCE, DaemonTestCase, radius, tactester
+from tactest import SOURCE, DaemonTestCase, needs_loopback_net, radius, tactester
 from tactest.daemon import sanitizer_env
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
@@ -110,6 +110,7 @@ class TactesterOfTheBuild(unittest.TestCase):
 
 
 @unittest.skipUnless(tactester.binary(), "no tactester; run-tests builds it only with OpenSSL")
+@needs_loopback_net
 class RadiusUdp(DaemonTestCase):
     CONFIG = POLICY
     UDP = True
@@ -128,6 +129,7 @@ class RadiusUdp(DaemonTestCase):
 
 
 @unittest.skipUnless(tactester.binary(), "no tactester; run-tests builds it only with OpenSSL")
+@needs_loopback_net
 class MalformedReply(unittest.TestCase):
     """A server that answers with an attribute longer than the rest of the Access-Accept."""
 
