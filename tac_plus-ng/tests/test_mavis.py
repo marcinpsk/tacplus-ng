@@ -271,6 +271,77 @@ class PasswordChange(DaemonTestCase):
         self.assertEqual([e["type"] for e in stub.requests()], ["AUTH", "AUTH", "CHPW"])
 
 
+SHADOW = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_shadow.pl")
+
+
+class MustChangeWithoutDialog(DaemonTestCase):
+    """The backend answers OK with PASSWORD_MUSTCHANGE to a login that has no dialog for a new password.
+
+    Only ASCII login and CHPASS can change a password. For PAP and CHAP
+    the daemon set the MAVIS result to FAIL, but permitted the login
+    anyway and cached the password. mavis_tacplus_shadow.pl sends
+    PASSWORD_MUSTCHANGE for an expired password whatever the caller can do.
+    """
+
+    CONFIG = None
+    MESSAGE = "Please change your password."
+
+    def daemon_and_stub(self, policy=BACKEND, template=config.BASE):
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + policy + PERMIT, template=template)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, message=self.MESSAGE)
+        return d, stub
+
+    def test_pap_fails_and_caches_nothing(self):
+        template = config.BASE.replace("mavis cache timeout = 0", "mavis cache timeout = 60")
+        d, stub = self.daemon_and_stub(template=template)
+        for _ in range(2):
+            with d.connect() as c:
+                r = c.pap("alice", "pw")
+            self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        # the second login was not answered from the cache
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK"), ("AUTH", "ACK")])
+
+    def test_chap_fails(self):
+        d, stub = self.daemon_and_stub(policy=BACKEND + "\tchap backend = mavis\n")
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, result={"CHAP": "ACK"})
+        with d.connect() as c:
+            self.assertEqual(c.chap("alice", "pw").status_name, "FAIL")
+        self.assertEqual([e["type"] for e in stub.requests()], ["INFO", "CHAP"])
+
+    def test_ascii_login_still_changes_the_password(self):
+        d, stub = self.daemon_and_stub(policy=BACKEND.replace("login backend = mavis", "login backend = mavis chpass"))
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH", "CHPW"])
+
+    @unittest.skipUnless(shutil.which("perl"), "the backend is a Perl script")
+    def test_expired_shadow_password(self):
+        """lastchange 0 in the shadow file: the password has expired."""
+        shadow = self.scratch_file("shadow", "alice:%s:0:0:99999:7:::\n" % crypt_md5("pw"))
+        d = self.start_daemon("""
+	mavis module = external {
+		setenv SHADOWFILE = "%s"
+		exec = "%s"
+	}
+""" % (shadow, SHADOW) + BACKEND.replace("login backend = mavis", "login backend = mavis chpass") + PERMIT)
+        with d.connect() as c:
+            r = c.pap("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "new").status_name, "PASS")
+
+
+def crypt_md5(password):
+    """An MD5-crypt hash from the crypt() of Perl (the crypt module of Python is gone in 3.13)."""
+    return subprocess.run(["perl", "-e", "print crypt($ARGV[0], q($1$tactest$))", password],
+                          check=True, capture_output=True, text=True).stdout
+
+
 def cpu_seconds(pid):
     """utime + stime of a process (Linux)."""
     with open("/proc/%d/stat" % pid) as f:
