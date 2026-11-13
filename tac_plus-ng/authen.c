@@ -953,7 +953,15 @@ static char *set_motd_banner(tac_session *session)
 	return NULL;
     }
 
-    session->motd = eval_log_format(session, session->ctx, NULL, fmt, io_now.tv_sec, NULL);
+    size_t motd_len = 0;
+    session->motd = eval_log_format(session, session->ctx, NULL, fmt, io_now.tv_sec, &motd_len);
+    if (session->user->msg) {
+	size_t msg_len = strlen(session->user->msg);
+	char *m = mem_alloc(session->mem, motd_len + msg_len + 1);
+	memcpy(m, session->motd, motd_len);
+	memcpy(m + motd_len, session->user->msg, msg_len + 1);
+	session->motd = m;
+    }
     return session->motd;
 }
 

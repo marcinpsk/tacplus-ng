@@ -429,6 +429,8 @@ ATTRIBUTES = """
 	profile quiet { hushlogin = yes script { permit } }
 	user alice { password login = clear pw password pap = login }
 	user hushed { password login = clear pw hushlogin = yes }
+	user greeted { password login = clear pw message = "Hello greeted.\\n" }
+	user hushedgreeted { password login = clear pw hushlogin = yes message = "Hidden.\\n" }
 	user quietprofile { password login = clear pw profile = quiet }
 	user opsuser { password pap = clear pw tag = ops }
 	user devuser { password pap = clear pw tag = dev }
@@ -455,6 +457,17 @@ class UserAttributes(DaemonTestCase):
             with self.subTest(user=user):
                 r = self.connect(source="127.0.0.61").ascii_login(user, "pw")
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+
+    def test_user_message_after_the_motd(self):
+        """Doc: the "message" of a user is "displayed to the user upon log-in", after the motd banner."""
+        r = self.connect(source="127.0.0.61").ascii_login("greeted", "pw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "Authorized use only.\nHello greeted.\n"), r)
+        r = self.connect().ascii_login("greeted", "pw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "Hello greeted.\n"), r)
+
+    def test_hushlogin_hides_the_user_message(self):
+        r = self.connect(source="127.0.0.61").ascii_login("hushedgreeted", "pw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
 
     def test_user_tag(self):
         cases = [("opsuser", "127.0.0.63"), ("devuser", "127.0.0.63"), ("alice", "127.0.0.63"),
