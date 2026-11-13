@@ -364,7 +364,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 			continue
 		if ((LDAP_SERVER_TYPE == "microsoft"
 				and not conn.extend.microsoft.modify_password(
-				entry.entry_dn, D.password, D.password_new))
+				entry.entry_dn, D.password_new, D.password))
 			or  (LDAP_SERVER_TYPE == "generic"
 				and not conn.extend.standard.modify_password (
 				entry.entry_dn, D.password, D.password_new))):

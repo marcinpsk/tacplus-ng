@@ -384,10 +384,6 @@ class AdPython(AdTests, DaemonTestCase):
     def env(self):
         return {}
 
-    @unittest.skip("mavis_tacplus_ldap.py gives ldap3 the old and the new password in the wrong order for AD")
-    def test_password_change(self):
-        pass
-
     @unittest.skip("the check of mavis_tacplus_ldap.py for a password change (532, 773) never matches")
     def test_must_change(self):
         pass
