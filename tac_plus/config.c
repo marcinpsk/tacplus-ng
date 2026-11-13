@@ -3476,7 +3476,7 @@ static void parse_tac_acl_expr(struct sym *sym, struct tac_acl_expr **e, int neg
     (*e)->negate = negate;
 
     while (1) {
-	int check_dns = 0;
+	int check_dns = 0, is_regex = 0;
 
 	switch (sym->code) {
 	case S_eof:
@@ -3585,6 +3585,8 @@ static void parse_tac_acl_expr(struct sym *sym, struct tac_acl_expr **e, int neg
 		(*r)->negate = 1;
 	    case S_equal:
 		tac_sym_get(sym);
+		if (sym->code == S_tilde)
+		    tac_sym_get(sym);
 		break;
 	    case S_regex:
 		tac_sym_get(sym);
@@ -3614,23 +3616,31 @@ static void parse_tac_acl_expr(struct sym *sym, struct tac_acl_expr **e, int neg
 		(*r)->negate = 1;
 	    case S_equal:
 		tac_sym_get(sym);
-		(*r)->type = T_realm;
-		(*r)->blob.m = get_realm(sym->buf);
-		tac_sym_get(sym);
+		if (sym->code == S_tilde) {
+		    is_regex = 1;
+		    tac_sym_get(sym);
+		}
 		break;
 	    case S_regex:
+		is_regex = 1;
 		tac_sym_get(sym);
 		parse(sym, S_equal);
 		if (sym->code == S_not) {
 		    (*r)->negate = 1;
 		    tac_sym_get(sym);
 		}
-		(*r)->type = parse_aclregex(sym, *r);
 		break;
 	    default:
 		parse_error_expect(sym, S_exclmark, S_equal, S_regex, S_unknown);
 	    }
 	    (*r)->string = strdup(sym->buf);
+	    if (is_regex)
+		(*r)->type = parse_aclregex(sym, *r);
+	    else {
+		(*r)->type = T_realm;
+		(*r)->blob.m = get_realm(sym->buf);
+		tac_sym_get(sym);
+	    }
 	    sym->flag_parse_pcre = 0;
 	    break;
 	case S_acl:
@@ -3697,7 +3707,7 @@ static void parse_tac_acl_expr(struct sym *sym, struct tac_acl_expr **e, int neg
 	    tac_sym_get(sym);
 	    break;
 	default:
-	    parse_error_expect(sym, S_nac, S_nas, S_port, S_time, S_acl, S_unknown);
+	    parse_error_expect(sym, S_nac, S_nas, S_nacname, S_nasname, S_port, S_realm, S_time, S_acl, S_unknown);
 	}
     }
 }
@@ -5159,6 +5169,39 @@ static struct mavis_cond *tac_script_cond_parse(tac_user * u, struct sym *sym)
     return tac_script_cond_parse_r(u, sym);
 }
 
+static char *tac_script_cond_value(tac_session * session, char *cmd, enum token token)
+{
+    switch (token) {
+    case S_context:
+	return tac_script_get_exec_context(session, session->username, session->nas_port);
+    case S_cmd:
+    case S_command:
+	return cmd;
+    case S_nac:
+	return session->nac_address_ascii;
+    case S_nas:
+	return session->ctx->nas_address_ascii;
+    case S_nacname:
+	return (session->nac_dns_name && *session->nac_dns_name) ? session->nac_dns_name : NULL;
+    case S_nasname:
+	return (session->ctx->nas_dns_name && *session->ctx->nas_dns_name) ? session->ctx->nas_dns_name : NULL;
+    case S_nacrealm:
+	return session->ctx->nac_realm->name;
+    case S_nasrealm:
+	return session->ctx->realm->name;
+    case S_aaarealm:
+	return session->ctx->aaa_realm->name;
+    case S_port:
+	return session->nas_port;
+    case S_user:
+	return session->username;
+    case S_password:
+	return session->password_new ? session->password_new : session->password;
+    default:
+	return NULL;
+    }
+}
+
 static int tac_script_cond_eval(tac_session * session, char *cmd, struct mavis_cond *m)
 {
     int i;
@@ -5179,16 +5222,7 @@ static int tac_script_cond_eval(tac_session * session, char *cmd, struct mavis_c
 		return -1;
 	return 0;
     case S_equal:
-	switch (m->s.token) {
-	case S_context:
-	    v = tac_script_get_exec_context(session, session->username, session->nas_port);
-	    break;
-	case S_cmd:
-	case S_command:
-	    v = cmd;
-	    break;
-	default:;
-	}
+	v = tac_script_cond_value(session, cmd, m->s.token);
 	if (!v)
 	    return 0;
 	return !strcmp(v, m->s.rhs);
@@ -5227,48 +5261,7 @@ static int tac_script_cond_eval(tac_session * session, char *cmd, struct mavis_c
 	return S_permit == eval_tac_acl(session, cmd, (struct tac_acl *) m->s.rhs);
     case S_regex:
     case S_slash:
-	switch (m->s.token) {
-	case S_context:
-	    v = tac_script_get_exec_context(session, session->username, session->nas_port);
-	    break;
-	case S_cmd:
-	case S_command:
-	    v = cmd;
-	    break;
-	case S_nac:
-	    v = session->nac_address_ascii;
-	    break;
-	case S_nas:
-	    v = session->ctx->nas_address_ascii;
-	    break;
-	case S_nacname:
-	    if (session->nac_dns_name && *session->nac_dns_name)
-		v = session->nac_dns_name;
-	    break;
-	case S_nasname:
-	    if (session->ctx->nas_dns_name && *session->ctx->nas_dns_name)
-		v = session->ctx->nas_dns_name;
-	    break;
-	case S_nacrealm:
-	    v = session->ctx->nac_realm->name;
-	    break;
-	case S_nasrealm:
-	    v = session->ctx->realm->name;
-	    break;
-	case S_aaarealm:
-	    v = session->ctx->aaa_realm->name;
-	    break;
-	case S_port:
-	    v = session->nas_port;
-	    break;
-	case S_user:
-	    v = session->username;
-	    break;
-	case S_password:
-	    v = session->password_new ? session->password_new : session->password;
-	    break;
-	default:;
-	}
+	v = tac_script_cond_value(session, cmd, m->s.token);
 	if (!v)
 	    return 0;
 	if (m->type == S_slash) {
