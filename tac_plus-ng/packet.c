@@ -596,8 +596,9 @@ void tac_read(struct context *ctx, int cur)
 	    return;
 	}
     }
+// aaa_protocol is S_unknown, the listener "aaa.protocol", or the protocol of an earlier packet
 #define CHECK_PROTOCOL(A) \
-	if (ctx->realm->allowed_protocol_ ## A != TRISTATE_YES) { \
+	if (ctx->realm->allowed_protocol_ ## A != TRISTATE_YES || (ctx->aaa_protocol != S_unknown && ctx->aaa_protocol != S_ ## A)) { \
 		ctx->reset_tcp = BISTATE_YES; \
 		cleanup(ctx,cur); \
 		return; \
