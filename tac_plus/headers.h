@@ -594,6 +594,7 @@ struct tac_session {
      BISTATE(enable_getuser);
      BISTATE(password_bad_again);
      BISTATE(passwd_mustchange);
+     BISTATE(passwd_changeable);
      BISTATE(user_is_session_specific);
      BISTATE(username_rewritten);
      BISTATE(chpass);
