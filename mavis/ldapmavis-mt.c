@@ -96,6 +96,7 @@ Leaving the ones below as-is is likely safe:\n\
 	    " LDAP_FILTER                   (&(objectclass=user)(sAMAccountName=%%s)) for AD,\n\
                                (uid=%%s) else\n\
  LDAP_FILTER_GROUP             (&(objectclass=groupOfNames)(member=%%s))\n\
+                               (each filter has %%s exactly once; %%%% gives %%)\n\
 \n\
 Plese have a look at the \"ldap_set_option\" manual page for explanations on:\n\
  LDAP_OPT_X_TLS_CACERTDIR\n\
@@ -1059,6 +1060,24 @@ static void *run_thread(void *arg)
     return NULL;
 }
 
+// run_thread() and dnhash_add_entry_groupOfNames() give the filter to snprintf() with one string argument
+static void check_filter(const char *name, const char *filter)
+{
+    int conversions = 0;
+    for (const char *p = filter; conversions >= 0 && *p; p++)
+	if (*p == '%') {
+	    p++;
+	    if (*p == 's')
+		conversions++;
+	    else if (*p != '%')
+		conversions = -1;
+	}
+    if (conversions != 1) {
+	fprintf(stderr, "%s \"%s\": the filter must have %%s exactly once and no other %% conversion (%%%% for a %%)\n", name, filter);
+	exit(EXIT_FAILURE);
+    }
+}
+
 static void set_scope(char *scope_str, int *scope)
 {
     if (strcasecmp(scope_str, "base"))
@@ -1173,7 +1192,11 @@ int main(int argc, char **argv __attribute__((unused)))
     }
 
     ldap_filter = getenv("LDAP_FILTER");
+    if (ldap_filter)
+	check_filter("LDAP_FILTER", ldap_filter);
     ldap_filter_group = getenv("LDAP_FILTER_GROUP");
+    if (ldap_filter_group)
+	check_filter("LDAP_FILTER_GROUP", ldap_filter_group);
     ldap_dn = getenv("LDAP_USER");
     ldap_pw = getenv("LDAP_PASSWD");
 
