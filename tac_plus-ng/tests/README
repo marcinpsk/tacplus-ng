@@ -20,6 +20,15 @@ The openssl command makes the certificates of the TLS tests (in their
 scratch directories; none are kept in the tree) and is the TLS-PSK client;
 without it those tests are skipped.
 
+test_ldapmavis.py starts an OpenLDAP slapd of its own on a free port.
+It needs the server (Debian, Ubuntu: slapd; Alpine: openldap and
+openldap-back-mdb) and, for the Perl back-end, Net::LDAP and
+IO::Socket::SSL (libnet-ldap-perl libio-socket-ssl-perl; Alpine:
+perl-ldap perl-io-socket-ssl); without them those tests are skipped.
+On Ubuntu, the AppArmor profile of slapd does not let it read the
+build tree; "sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd"
+unloads it.
+
 run-tests configures and builds tac_plus-ng and the tactester client
 (only with OpenSSL; without it the tactester tests are skipped), installs
 them into build/<OS>/tests-prefix (no root needed, nothing outside the
