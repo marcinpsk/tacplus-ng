@@ -95,6 +95,10 @@ tls-key-file {key}
 
 NETADMINS_MOTD = "Member of netadmins.\n"
 
+# The radcli messages of a failed TLS start (lib/tls.c), through syslog with LOG_PERROR
+TLS_START_ERROR = r"error in certificate verification|error in handshake|cannot connect to"
+REQUEST = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
+
 # "mavis module = external-mt { exec = ... }" with radmavis-mt, or "external" with radmavis
 MODULE = string.Template("""
 	mavis module = $module {
@@ -373,8 +377,7 @@ class RadiusTests(FailedLogin):
     def test_bad_option_on_the_command_line(self):
         """The backend exits when radcli cannot apply an option of the command line."""
         conf = self.radcli_conf(self.start_server().udp_port)
-        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
-        p = exchange(self.BACKEND, conf, request, ["serv-type=bogus"])
+        p = exchange(self.BACKEND, conf, REQUEST, ["serv-type=bogus"])
         self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
         self.assertIn(b"Applying the command line options failed.", p.stderr)
 
@@ -382,28 +385,47 @@ class RadiusTests(FailedLogin):
         """Over TLS the backend starts a second session for the options: "tls-ca-file" of another CA fails it."""
         b = self.start_server("tls")
         conf = self.radcli_conf(b.ports.get("tls"), "tls")
-        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
-        p = exchange(self.BACKEND, conf, request, ["radius_timeout=2"])
+        p = exchange(self.BACKEND, conf, REQUEST, ["radius_timeout=2"])
         self.assertEqual(reply_pairs(p).get("6"), "ACK", p)
-        p = exchange(self.BACKEND, conf, request, ["tls-ca-file=" + self.tls_ca("other").cert])
+        p = exchange(self.BACKEND, conf, REQUEST, ["tls-ca-file=" + self.tls_ca("other").cert])
         self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
         self.assertIn(b"Applying the command line options failed.", p.stderr)
+
+    def radcli_start_error(self, conf, reason):
+        """The backend exits at start. stderr has the radcli reason, then the line of the backend; returns stderr."""
+        p = exchange(self.BACKEND, conf, REQUEST)
+        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
+        err = p.stderr.decode(errors="replace")
+        failed = err.find(f"Reading or applying {conf} failed, see the radcli message before this line.\n")
+        self.assertGreater(failed, -1, err)
+        self.assertRegex(err[:failed], r"radmavis\[\d+\]: radcli: .*(" + reason + ")")
+        return err
 
     def test_tls_server_not_trusted(self):
         """radcli does the TLS handshake when it reads its configuration: without trust in B, the backend exits.
 
         Through A, such a login waits until A closes the connection, so the
-        backend runs here without A.
+        backend runs here without A. stderr has the reason of radcli.
         """
         b = self.start_server("tls")
-        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
         port = b.ports.get("tls")
-        p = exchange(self.BACKEND, self.radcli_conf(port, "tls"), request)
+        p = exchange(self.BACKEND, self.radcli_conf(port, "tls"), REQUEST)
         self.assertEqual(reply_pairs(p).get("6"), "ACK", p)
-        conf = self.radcli_conf(port, "tls", trust=self.tls_ca("other"))
-        p = exchange(self.BACKEND, conf, request)
-        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
-        self.assertIn(b"Parsing %s failed." % conf.encode(), p.stderr)
+        self.radcli_start_error(self.radcli_conf(port, "tls", trust=self.tls_ca("other")),
+                                "error in certificate verification|error in handshake")
+
+    def test_tls_server_down(self):
+        """B stops before the backend starts: stderr has the connect error of radcli."""
+        b = self.start_server("tls", check=False)
+        conf = self.radcli_conf(b.ports.get("tls"), "tls")
+        self.assertEqual(b.stop(remove=False), [])
+        self.radcli_start_error(conf, "cannot connect to")
+
+    def test_config_file_error(self):
+        """An unknown keyword: stderr has the config error of radcli and no TLS error."""
+        conf = self.scratch_file("radiusclient.conf", "no-such-keyword yes\n")
+        err = self.radcli_start_error(conf, "unrecognized keyword: no-such-keyword")
+        self.assertNotRegex(err, TLS_START_ERROR)
 
     def test_server_stopped(self):
         """No answer from the RADIUS server is a backend error: the fallback-only user can log in."""

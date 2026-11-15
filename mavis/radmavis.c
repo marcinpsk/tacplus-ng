@@ -85,7 +85,8 @@ int main(int argc, char **argv)
     if (argc < 2)
 	usage();
 
-    rc_openlog("radmavis");
+    // rc_openlog() plus LOG_PERROR: the daemon log gets the radcli messages too
+    openlog("radmavis", LOG_PID | LOG_PERROR, LOG_DAEMON);
 
     while (*a && strcmp(*a, "-c"))
 	a++;
@@ -111,7 +112,7 @@ int main(int argc, char **argv)
     if (cfg) {
 	rh = rc_read_config(cfg);
 	if (!rh) {
-	    fprintf(stderr, "Parsing %s failed.\n", cfg);
+	    fprintf(stderr, "Reading or applying %s failed, see the radcli message before this line.\n", cfg);
 	    exit(-1);
 	}
     }
