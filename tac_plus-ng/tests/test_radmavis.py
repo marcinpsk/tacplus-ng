@@ -157,10 +157,10 @@ def need_tls():
         raise unittest.SkipTest("tac_plus-ng built without OpenSSL: B has no RADIUS over TLS")
 
 
-def exchange(backend, conf, body):
+def exchange(backend, conf, body, options=()):
     """One request to the backend in the legacy protocol, without tac_plus-ng."""
-    return subprocess.run([backend, "-c", conf, "group_attribute=Class"], input=body + b"=\n", capture_output=True,
-                          timeout=30, env=sanitizer_env(), check=False)
+    return subprocess.run([backend, "-c", conf, "group_attribute=Class", *options], input=body + b"=\n",
+                          capture_output=True, timeout=30, env=sanitizer_env(), check=False)
 
 
 def reply_pairs(p):
@@ -228,10 +228,13 @@ class RadmavisTestCase(DaemonTestCase):
         return self.start_daemon(body, udp=True, listen=listen, name=self.id().split(".")[-1] + "-server",
                                  check=check)
 
-    def radcli_conf(self, port, transport="udp", dictionary=RADCLI_DICTIONARY, trust=None):
-        """trust: the CA whose certificates A accepts from B (radcli "tls-ca-file"), for transport "tls"."""
+    def radcli_conf(self, port, transport="udp", dictionary=RADCLI_DICTIONARY, trust=None, serv_type=None):
+        """trust: the CA whose certificates A accepts from B (radcli "tls-ca-file"), for transport "tls".
+
+        serv_type: the "serv-type" line of the file, if it is not the transport.
+        """
         text = RADIUSCLIENT_CONF.format(server=f"127.0.0.1:{port}" + ("" if transport == "tls" else ":" + SECRET),
-                                        transport=transport, nas=NAS, dictionary=dictionary,
+                                        transport=serv_type or transport, nas=NAS, dictionary=dictionary,
                                         seqfile=self.scratch_file("radius.seq", ""))
         if transport == "tls":
             crt, key = self.ca.issue("certnas", "/CN=certnas.tactest")
@@ -239,20 +242,26 @@ class RadmavisTestCase(DaemonTestCase):
                                             ca=(trust or self.ca).cert, cert=crt, key=key)
         return self.scratch_file("radiusclient.conf", text)
 
-    def start_client(self, port, template=CLIENT, dictionary=RADCLI_DICTIONARY, transport="udp"):
-        """Daemon A, with the backend asking the RADIUS server on port."""
-        conf = self.radcli_conf(port, transport, dictionary)
+    def start_client(self, port, template=CLIENT, dictionary=RADCLI_DICTIONARY, transport="udp", serv_type=None,
+                     options=()):
+        """Daemon A, with the backend asking the RADIUS server on port.
+
+        options: radcli options for the command line of the backend, "option=value".
+        """
+        conf = self.radcli_conf(port, transport, dictionary, serv_type=serv_type)
         name = os.path.basename(self.BACKEND)
+        args = (["group_attribute=Class"] if template in (CLIENT, CLIENT_MFA) else []) + list(options)
         module = MODULE.substitute(module="external-mt" if name == "radmavis-mt" else "external",
-                                   path=self.BACKEND, name=name, conf=conf,
-                                   args='"group_attribute=Class"' if template in (CLIENT, CLIENT_MFA) else "")
+                                   path=self.BACKEND, name=name, conf=conf, args=" ".join(f'"{a}"' for a in args))
         return self.start_daemon(template.substitute(module=module))
 
-    def start_pair(self, check_server=True, dictionary=RADCLI_DICTIONARY, transport="udp", template=CLIENT):
+    def start_pair(self, check_server=True, dictionary=RADCLI_DICTIONARY, transport="udp", template=CLIENT,
+                   serv_type=None, options=()):
         """B first, then A with a radcli configuration that points at B over the transport of the test."""
         server = self.start_server(transport, check_server)
         port = {"udp": server.udp_port, "tcp": server.port, "tls": server.ports.get("tls")}[transport]
-        return server, self.start_client(port, template=template, dictionary=dictionary, transport=transport)
+        return server, self.start_client(port, template=template, dictionary=dictionary, transport=transport,
+                                         serv_type=serv_type, options=options)
 
     def responder(self, reply=None):
         r = Responder(reply)
@@ -353,6 +362,32 @@ class RadiusTests(FailedLogin):
         with a.connect() as c:
             r = c.ascii_login("alice", "alicepw")
             self.assertEqual((r.status_name, r.server_msg), ("PASS", NETADMINS_MOTD), r)
+
+    def test_option_on_the_command_line(self):
+        """The option "serv-type=tcp" on the command line overrides "serv-type udp" in the file."""
+        _, a = self.start_pair(transport="tcp", serv_type="udp", options=["serv-type=tcp"])
+        for password, status in (("alicepw", "PASS"), ("wrong", "FAIL")):
+            with self.subTest(password=password), a.connect() as c:
+                self.assertEqual(c.pap("alice", password).status_name, status)
+
+    def test_bad_option_on_the_command_line(self):
+        """The backend exits when radcli cannot apply an option of the command line."""
+        conf = self.radcli_conf(self.start_server().udp_port)
+        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
+        p = exchange(self.BACKEND, conf, request, ["serv-type=bogus"])
+        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
+        self.assertIn(b"Applying the command line options failed.", p.stderr)
+
+    def test_tls_option_on_the_command_line(self):
+        """Over TLS the backend starts a second session for the options: "tls-ca-file" of another CA fails it."""
+        b = self.start_server("tls")
+        conf = self.radcli_conf(b.ports.get("tls"), "tls")
+        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
+        p = exchange(self.BACKEND, conf, request, ["radius_timeout=2"])
+        self.assertEqual(reply_pairs(p).get("6"), "ACK", p)
+        p = exchange(self.BACKEND, conf, request, ["tls-ca-file=" + self.tls_ca("other").cert])
+        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
+        self.assertIn(b"Applying the command line options failed.", p.stderr)
 
     def test_tls_server_not_trusted(self):
         """radcli does the TLS handshake when it reads its configuration: without trust in B, the backend exits.

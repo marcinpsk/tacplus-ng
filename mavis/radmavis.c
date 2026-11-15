@@ -14,6 +14,7 @@
 #endif
 #ifdef WITH_RADCLI
 #include <radcli/radcli.h>
+#include <radcli/version.h>
 #define RADLIB "radcli"
 #else
 #include <freeradius-client.h>
@@ -135,10 +136,8 @@ int main(int argc, char **argv)
 	    }
     }
 #endif
-#if defined(WITH_RADCLI) && (RADCLI_VERSION_NUMBER > 0x010209)
-    rc_apply_config(rh);
-#endif
 
+    int rc_options = 0;
     a = argv;
     a++;
     while (*a) {
@@ -148,8 +147,10 @@ int main(int argc, char **argv)
 	    if (!strcmp(*a, "group_attribute")) {
 		group_attribute_name = strdup(eq + 1);
 		group_attribute = atoi(group_attribute_name);
-	    } else		// assume this is a freeradius-client option:
+	    } else {		// assume this is a freeradius-client option:
 		set_rc(rh, *a, eq + 1);
+		rc_options = 1;
+	    }
 	    *eq = '=';
 	} else if (!strcmp(*a, "-h")) {
 	    usage();
@@ -161,6 +162,16 @@ int main(int argc, char **argv)
 	}
 	a++;
     }
+
+#if defined(WITH_RADCLI) && RADCLI_VERSION_NUMBER >= 0x01020a
+    // rc_read_config() applied the file already, so apply again for the command line options
+    if (rc_options && rc_apply_config(rh)) {
+	fprintf(stderr, "Applying the command line options failed.\n");
+	exit(-1);
+    }
+#else
+    (void) rc_options;	// freeradius-client and radcli before 1.2.10 have no rc_apply_config()
+#endif
 
     if (rc_read_dictionary(rh, rc_conf_str(rh, "dictionary"))) {
 	fprintf(stderr, "reading %s failed\n", rc_conf_str(rh, "dictionary"));
