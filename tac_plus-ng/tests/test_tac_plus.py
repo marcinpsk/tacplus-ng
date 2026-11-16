@@ -8,7 +8,7 @@ import os
 import time
 import unittest
 
-from tactest import DaemonTestCase, Stub, config, prefix
+from tactest import DaemonTestCase, Stub, config, prefix, sample
 from tactest.daemon import parse_only
 from tactest.tacacs import AUTHEN_TYPE_ASCII, Packet
 
@@ -288,15 +288,10 @@ class PortAndRealmOperators(TacPlusTestCase):
 
 
 class DocScriptExample(TacPlusTestCase):
-    """The "acl script" example of doc/tac_plus.html, with "nac ==" and "nac-name" as its grammar says."""
+    """The "acl script" example of tac_plus/doc/manual.xml."""
 
-    CONFIG = r"""
-	host = SomeHostName { address = 127.0.7.0/24 }
-	acl script = myacl123 {
-		if (nas == 1.2.3.4 || nac == SomeHostName || nac-name =~ /\\.example\\.com$$/) deny
-		permit
-	}
-""" + users([("joe", "acl == myacl123")])
+    CONFIG = "\thost = SomeHostName { address = 127.0.7.0/24 }\n" + sample.manual_screen("tac_plus", "acl script = myacl123") \
+        + users([("joe", "acl == myacl123")])
 
     def test_client_in_the_host_is_denied(self):
         self.assertEqual(self.connect().author("joe", ["service=shell", "cmd="], rem_addr="127.0.7.1").status_name, "FAIL")

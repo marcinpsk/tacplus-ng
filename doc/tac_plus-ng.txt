@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
+   $Id: 485e463d1802bb64e3db163fa5f711bdf5372a59 $
      __________________________________________________________
 
    Table of Contents
@@ -769,8 +769,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -2054,8 +2054,9 @@ profile A {
      * acl aclName{ tac_action ... }
        Example:
     acl myacl123 {
-        if (nas == 1.2.3.4 || nac = SomeHostName || nac-dns =~ /\\.examp
-le\\.com$/) deny
+        if (nas == 1.2.3.4 || nac == SomeNetName || nac-name =~ /\\.exam
+ple\\.com$/) deny
+        permit
     }
      * script ( = aclName | { tacAction } )
        Example:

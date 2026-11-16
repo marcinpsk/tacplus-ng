@@ -2,7 +2,7 @@ TACACS+
 
 Marc Huber
 
-   $Id: 9001b8e24ce7f055a819607b2e52a7ad53eec4bc $
+   $Id: fe61488620d45fe6268e0649d154b8bd11cf6ac5 $
      __________________________________________________________
 
    Table of Contents
@@ -1659,8 +1659,9 @@ host = ... {
      * acl script = acl_name { tac_action ... }
        Example:
     acl script = myacl123 {
-        if (nas == 1.2.3.4 || nac = SomeHostName || nac-dns =~ /\\.examp
-le\\.com$/) deny
+        if (nas == 1.2.3.4 || nac == SomeHostName || nac-name =~ /\\.exa
+mple\\.com$/) deny
+        permit
     }
      * script = { tac_action ... }
        Example:
