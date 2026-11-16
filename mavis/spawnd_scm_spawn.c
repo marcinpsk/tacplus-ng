@@ -41,6 +41,7 @@ void spawnd_cleanup_internal(struct spawnd_context *ctx, int fd __attribute__((u
 	    spawnd_adjust_tracking(common_data.servers_cur, i);
 	    spawnd_data.server_arr[common_data.servers_cur] = NULL;
 	}
+	spawnd_udp_forget(ctx);
 	set_proctitle(ACCEPT);
     }
 
@@ -81,6 +82,16 @@ int spawnd_spawn_child(pid_t * pidp)
     if (socketpair(PF_UNIX, SOCK_DGRAM, 0, socks)) {
 	logerr("socketpair (%s:%d)", __FILE__, __LINE__);
 	exit(EX_OSERR);
+    }
+    // room for the largest datagram that spawnd passes: some systems keep less by default
+    for (int s = 0; s < 2; s++) {
+	int opts[] = { SO_SNDBUF, SO_RCVBUF };
+	for (int o = 0; o < 2; o++) {
+	    int size = 0, min = (int) (sizeof(struct scm_data_udp) + SCM_UDP_DATA_MAX);
+	    socklen_t size_len = (socklen_t) sizeof(size);
+	    if (!getsockopt(socks[s], SOL_SOCKET, opts[o], &size, &size_len) && size < min)
+		setsockopt(socks[s], SOL_SOCKET, opts[o], &min, (socklen_t) sizeof(min));
+	}
     }
 
     switch ((pid = fork())) {
@@ -136,37 +147,50 @@ int spawnd_spawn_child(pid_t * pidp)
     }
 }
 
+void spawnd_users_done(struct spawnd_context *ctx, int count)
+{
+    common_data.users_cur -= count, ctx->use -= count;
+    if (spawnd_data.listeners_inactive) {
+	logmsg("resuming normal operation");
+	spawnd_data.listeners_inactive = 0;
+	switch (spawnd_data.overload) {
+	case S_queue:
+	    for (int i = 0; i < spawnd_data.listeners_max; i++) {
+		if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM
+		    && spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
+		    listen(spawnd_data.listener_arr[i]->fn, spawnd_data.listener_arr[i]->listen_backlog);
+		io_set_i(ctx->io, spawnd_data.listener_arr[i]->fn);
+	    }
+	    break;
+	case S_reset:
+	    for (int i = 0; i < spawnd_data.listeners_max; i++)
+		if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM)
+		    spawnd_bind_listener(spawnd_data.listener_arr[i], spawnd_data.listener_arr[i]->fn);
+	    break;
+	default:;
+	}
+    }
+    set_proctitle(ACCEPT);
+}
+
 static void recv_childmsg(struct spawnd_context *ctx, int cur)
 {
     int max = -1;
-    struct scm_data_accept sd;
-    int result = common_data.scm_recv_msg(cur, &sd, sizeof(sd), NULL);
+    union {
+	struct scm_data_accept sd;
+	struct scm_data_udpdone udpdone;
+    } u;
+    int result = common_data.scm_recv_msg(cur, &u.sd, sizeof(u), NULL);
 
     if (result)
 	spawnd_cleanup_internal(ctx, cur);
     else
-	switch (sd.type) {
+	switch (u.sd.type) {
 	case SCM_DONE:
-	    common_data.users_cur -= (((struct scm_data *) &sd))->count, ctx->use -= (((struct scm_data *) &sd))->count;
-	    if (spawnd_data.listeners_inactive) {
-		logmsg("resuming normal operation");
-		spawnd_data.listeners_inactive = 0;
-		switch (spawnd_data.overload) {
-		case S_queue:
-		    for (int i = 0; i < spawnd_data.listeners_max; i++) {
-			if (spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
-			    listen(spawnd_data.listener_arr[i]->fn, spawnd_data.listener_arr[i]->listen_backlog);
-			io_set_i(ctx->io, spawnd_data.listener_arr[i]->fn);
-		    }
-		    break;
-		case S_reset:
-		    for (int i = 0; i < spawnd_data.listeners_max; i++)
-			spawnd_bind_listener(spawnd_data.listener_arr[i], spawnd_data.listener_arr[i]->fn);
-		    break;
-		default:;
-		}
-	    }
-	    set_proctitle(ACCEPT);
+	    spawnd_users_done(ctx, ((struct scm_data *) &u.sd)->count);
+	    break;
+	case SCM_UDPDONE:
+	    spawnd_udp_done(ctx, &u.udpdone);
 	    break;
 	case SCM_BAD_CFG:
 	    logmsg("Child reported fatal configuration problem. Exiting.");
@@ -175,7 +199,7 @@ static void recv_childmsg(struct spawnd_context *ctx, int cur)
 	    spawnd_cleanup_internal(ctx, cur);
 	    break;
 	case SCM_MAX:
-	    max = (((struct scm_data *) &sd))->count;
+	    max = (((struct scm_data *) &u.sd))->count;
 	    if (common_data.users_max > max) {
 		common_data.users_max = max;
 		logmsg("child limits maximum number of users to %d", common_data.users_max);
@@ -185,8 +209,18 @@ static void recv_childmsg(struct spawnd_context *ctx, int cur)
 	case SCM_KEEPALIVE:
 	    break;
 	default:
-	    logmsg("Child used unknown message type %d", (int) sd.type);
+	    logmsg("Child used unknown message type %d", (int) u.sd.type);
 	}
+}
+
+void spawnd_register_server(struct spawnd_context *ctx)
+{
+    io_register(common_data.io, ctx->fn, ctx);
+    io_set_cb_i(common_data.io, ctx->fn, (void *) recv_childmsg);
+    io_set_cb_h(common_data.io, ctx->fn, (void *) spawnd_cleanup_internal);
+    io_set_cb_e(common_data.io, ctx->fn, (void *) spawnd_cleanup_internal);
+    io_set_cb_o(common_data.io, ctx->fn, (void *) spawnd_udp_flush);
+    io_set_i(common_data.io, ctx->fn);
 }
 
 void spawnd_add_child()
@@ -199,13 +233,7 @@ void spawnd_add_child()
 	    ctx->pid = pid;
 	    ctx->fn = cur;
 	    ctx->tv = io_now;
-
-	    io_register(common_data.io, cur, ctx);
-	    io_set_cb_i(common_data.io, cur, (void *) recv_childmsg);
-	    io_set_cb_h(common_data.io, cur, (void *) spawnd_cleanup_internal);
-	    io_set_cb_e(common_data.io, cur, (void *) spawnd_cleanup_internal);
-	    io_clr_cb_o(common_data.io, cur);
-	    io_set_i(common_data.io, cur);
+	    spawnd_register_server(ctx);
 	    spawnd_data.server_arr[common_data.servers_cur++] = ctx;
 	}
     }

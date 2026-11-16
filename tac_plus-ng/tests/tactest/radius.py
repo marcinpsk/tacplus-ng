@@ -224,6 +224,10 @@ class Client:
         reply.message_authenticator: None (none in the reply), True or False (wrong).
         """
         self.send_raw(request.encode(self.secret, message_authenticator=message_authenticator))
+        return self.reply(request)
+
+    def reply(self, request):
+        """Read the reply to request, which was sent before; checks as exchange() does."""
         reply = Packet.decode(self.recv_raw())
         if reply.identifier != request.identifier:
             raise ProtocolError("reply identifier %d, request %d" % (reply.identifier, request.identifier))
@@ -234,10 +238,30 @@ class Client:
         reply.message_authenticator = reply_message_authenticator(raw, request.authenticator, self.secret)
         return reply
 
-    def access_request(self, user, password, attributes=(), message_authenticator=False):
-        """Access-Request with a PAP User-Password; password may be any bytes, also not UTF-8."""
+    def retransmit(self, request, message_authenticator=False, tries=5, interval=1.0):
+        """As a RADIUS client does: send the same request again when no reply came within interval."""
+        data = request.encode(self.secret, message_authenticator=message_authenticator)
+        timeout = self.sock.gettimeout()
+        self.sock.settimeout(interval)
+        try:
+            for _ in range(tries):
+                self.send_raw(data)
+                try:
+                    return self.reply(request)
+                except TimeoutError:
+                    pass
+        finally:
+            self.sock.settimeout(timeout)
+        raise TimeoutError("no RADIUS reply from the daemon to %d copies of the request" % tries)
+
+    def pap_request(self, user, password, attributes=()):
+        """An Access-Request with a PAP User-Password; password may be any bytes, also not UTF-8."""
         req = Packet(ACCESS_REQUEST)
         req.attributes = [(USER_NAME, _b(user)),
                           (USER_PASSWORD, encrypt_password(password, self.secret, req.authenticator))]
         req.attributes += [(t, _b(v)) for t, v in attributes]
-        return self.exchange(req, message_authenticator)
+        return req
+
+    def access_request(self, user, password, attributes=(), message_authenticator=False):
+        """Send pap_request(), return the reply."""
+        return self.exchange(self.pap_request(user, password, attributes), message_authenticator)

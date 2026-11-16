@@ -75,11 +75,63 @@ static void die(int signum)
 int die_when_idle = 0;
 static struct context *ctx_spawnd = NULL;
 
+// The messages to spawnd that found its socket full wait here, in order.
+struct spawnd_msg {
+    struct spawnd_msg *next;
+    union {
+	struct scm_data d;
+	struct scm_data_udpdone udpdone;
+    };
+};
+static struct spawnd_msg *spawnd_msgs = NULL, *spawnd_msgs_last = NULL;
+
+static int full(void)
+{
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS;
+}
+
+static void spawnd_msg_drop(void)
+{
+    struct spawnd_msg *m = spawnd_msgs;
+    spawnd_msgs = m->next;
+    if (!spawnd_msgs)
+	spawnd_msgs_last = NULL;
+    free(m);
+}
+
+static void spawnd_flush(struct context *ctx __attribute__((unused)), int cur __attribute__((unused)))
+{
+    // a message that spawnd does not take for another reason is lost: spawnd is gone
+    while (spawnd_msgs) {
+	if (common_data.scm_send_msg(ctx_spawnd->sock, &spawnd_msgs->d, -1) && full())
+	    return;
+	spawnd_msg_drop();
+    }
+    io_clr_o(ctx_spawnd->io, ctx_spawnd->sock);
+}
+
+// A message that spawnd must get (it counts users by them): when the socket is full, it waits for room.
+static void spawnd_send(struct scm_data *d, size_t len)
+{
+    if (!ctx_spawnd || (!spawnd_msgs && (!common_data.scm_send_msg(ctx_spawnd->sock, d, -1) || !full())))
+	return;
+    struct spawnd_msg *m = calloc(1, sizeof(struct spawnd_msg));
+    memcpy(&m->d, d, len);
+    if (spawnd_msgs_last)
+	spawnd_msgs_last->next = m;
+    else
+	spawnd_msgs = m;
+    spawnd_msgs_last = m;
+    io_set_o(ctx_spawnd->io, ctx_spawnd->sock);
+}
+
 static void cleanup_spawnd(struct context *ctx __attribute__((unused)), int cur __attribute__((unused)))
 {
     if (ctx_spawnd) {
 	io_close(ctx->io, ctx_spawnd->sock);
 	ctx_spawnd = NULL;
+	while (spawnd_msgs)
+	    spawnd_msg_drop();
     }
 
     if (common_data.users_cur == 0 /*&& logs_flushed(config.default_realm) FIXME */ ) {
@@ -213,16 +265,31 @@ static void users_inc(void)
 
 void users_dec(void)
 {
-    static int pending = 0;
-    pending++;
     common_data.users_cur--;
-    struct scm_data d = {.type = SCM_DONE,.count = pending };
-    if (ctx_spawnd && (common_data.scm_send_msg(ctx_spawnd->sock, &d, -1) < 0)) {
-	if (errno != EAGAIN && errno != EWOULDBLOCK)
-	    die_when_idle = 1;
-    } else
-	pending = 0;
+    struct scm_data d = {.type = SCM_DONE,.count = 1 };
+    spawnd_send(&d, sizeof(d));
     set_proctitle(die_when_idle ? ACCEPT_NEVER : ACCEPT_YES);
+}
+
+// spawnd's UDP listeners, by listener number: the worker sends from them and never reads them
+static struct udp_listener {
+    int fd;
+    int wildcard;		// a reply names its source address
+} *udp_listeners = NULL;
+static int udp_listeners_max = 0;
+
+static rb_tree_t *udp_contexts = NULL;	// by listener and peer
+
+static int compare_udp_context(const void *a, const void *b)
+{
+    return scm_udp_client_cmp(&((struct context *) a)->udp_client, &((struct context *) b)->udp_client);
+}
+
+// Tell spawnd that this worker has no context for the client. If this is lost, the next datagram of the client tells it again.
+static void udp_done(struct scm_udp_client *client, u_int id)
+{
+    struct scm_data_udpdone d = {.type = SCM_UDPDONE,.id = id,.client = *client };
+    spawnd_send((struct scm_data *) &d, sizeof(d));
 }
 
 struct context *new_context(struct io_context *io, tac_realm *r)
@@ -279,12 +346,11 @@ static void periodics(struct context *ctx, int cur __attribute__((unused)))
 	if (config.suicide && (config.suicide < io_now.tv_sec)) {
 	    report(NULL, LOG_INFO, ~0, "Retire timeout is up. Told parent about this.");
 	    struct scm_data sd = {.type = SCM_DYING };
-	    if (ctx_spawnd)
-		common_data.scm_send_msg(ctx_spawnd->sock, &sd, -1);
+	    spawnd_send(&sd, sizeof(sd));
 	    die_when_idle = -1;
-	} else {
+	} else if (!spawnd_msgs) {	// messages that wait show that spawnd is there
 	    struct scm_data sd = {.type = SCM_KEEPALIVE };
-	    if (ctx_spawnd && common_data.scm_send_msg(ctx_spawnd->sock, &sd, -1) && errno != EAGAIN && errno != EWOULDBLOCK)
+	    if (ctx_spawnd && common_data.scm_send_msg(ctx_spawnd->sock, &sd, -1) && !full())
 		die_when_idle = -1;
 	}
     }
@@ -337,9 +403,9 @@ static void periodics_ctx(struct context *ctx, int cur __attribute__((unused)))
 
 static void accept_control(struct context *, int __attribute__((unused)));
 static void accept_control_final(struct context *);
-static void accept_control_common(int, struct scm_data_accept_ext *, sockaddr_union *, u_char *, size_t);
+static void accept_control_common(int, struct scm_data_accept_ext *, sockaddr_union *, struct scm_data_udp *);
 static void accept_control_singleprocess(int, struct scm_data_accept *);
-static void accept_control_udp_singleprocess(int s, struct scm_data_udp *sd);
+static void accept_control_udp(int, struct scm_data_udp *);
 static void accept_control_raw(int, struct scm_data_accept_ext *);
 static void accept_control_px(int, struct scm_data_accept_ext *);
 #if defined(WITH_SSL)
@@ -381,7 +447,7 @@ int main(int argc, char **argv, char **envp)
     setup_signals();
     if (common_data.singleprocess) {
 	common_data.scm_accept = accept_control_singleprocess;
-	common_data.scm_udpdata = accept_control_udp_singleprocess;
+	common_data.scm_udpdata = accept_control_udp;
     } else {
 	setproctitle_init(argv, envp);
 	ctx_spawnd = new_context(common_data.io, NULL);
@@ -390,7 +456,7 @@ int main(int argc, char **argv, char **envp)
 	fcntl(ctx_spawnd->sock, F_SETFL, O_NONBLOCK);
 	io_register(common_data.io, ctx_spawnd->sock, ctx_spawnd);
 	io_set_cb_i(common_data.io, ctx_spawnd->sock, (void *) accept_control);
-	io_clr_cb_o(common_data.io, ctx_spawnd->sock);
+	io_set_cb_o(common_data.io, ctx_spawnd->sock, (void *) spawnd_flush);
 	io_set_cb_h(common_data.io, ctx_spawnd->sock, (void *) cleanup_spawnd);
 	io_set_cb_e(common_data.io, ctx_spawnd->sock, (void *) cleanup_spawnd);
 	io_set_i(common_data.io, ctx_spawnd->sock);
@@ -446,7 +512,7 @@ static str_t msgid_ ## A = { .txt = B, .len = sizeof(B) - 1 }
     log_exec(NULL, ctx, S_connection, io_now.tv_sec);
 
     io_sched_drop(ctx->io, ctx);
-    if (ctx->reset_tcp) {
+    if (ctx->reset_tcp && ctx->sock > -1) {
 	struct linger linger = {.l_onoff = 1 };;
 	setsockopt(ctx->sock, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger));
     }
@@ -479,7 +545,13 @@ static str_t msgid_ ## A = { .txt = B, .len = sizeof(B) - 1 }
 	    mavis_cancel(mcx, ctx);
     }
 
-    users_dec();
+    if (ctx->udp) {
+	RB_search_and_delete(udp_contexts, ctx);
+	common_data.users_cur--;
+	udp_done(&ctx->udp_client, ctx->udp_id);
+	set_proctitle(die_when_idle ? ACCEPT_NEVER : ACCEPT_YES);
+    } else
+	users_dec();
     context_lru_remove(ctx);
     mem_destroy(ctx->mem);
 
@@ -578,17 +650,9 @@ static void accept_control_singleprocess(int s, struct scm_data_accept *sd)
 	accept_control_raw(s, &sd_ext);
 }
 
-static void accept_control_udp_singleprocess(int s, struct scm_data_udp *sd)
-{
-    struct scm_data_accept_ext sd_ext = {.sd_udp = *sd };
-    set_sd_realm(-1, &sd_ext);
-    users_inc();
-    accept_control_common(s, &sd_ext, NULL, sd->data, sd->data_len);
-}
-
 static void accept_control_raw(int s, struct scm_data_accept_ext *sd)
 {
-    accept_control_common(s, sd, NULL, NULL, 0);
+    accept_control_common(s, sd, NULL, NULL);
 }
 
 static struct context_px *new_context_px(struct io_context *io, struct scm_data_accept_ext *sd)
@@ -643,7 +707,7 @@ static void read_px(struct context_px *ctx, int cur)
 
     io_sched_drop(ctx->io, ctx);
     io_unregister(ctx->io, ctx->sock);
-    accept_control_common(ctx->sock, &ctx->sd, &from, NULL, 0);
+    accept_control_common(ctx->sock, &ctx->sd, &from, NULL);
     free(ctx);
 }
 
@@ -1689,40 +1753,48 @@ static tac_realm *set_sd_realm(int s __attribute__((unused)), struct scm_data_ac
 
 static void complete_host_mavis(struct context *);
 
-static void set_ctx_info(struct context *ctx, struct scm_data_accept_ext *sd_ext)
+static void set_ctx_info(struct context *ctx, struct scm_data_accept_ext *sd_ext, sockaddr_union *me)
 {
-    sockaddr_union me = { 0 };
-    socklen_t me_len = (socklen_t) sizeof(me);
-    if (!getsockname(ctx->sock, &me.sa, &me_len)) {
+    if (me) {
 	char buf[256];
-	su_convert(&me, AF_INET);
-	snprintf(buf, 10, "%u", su_get_port(&me));
+	sockaddr_union su = *me;
+	su_convert(&su, AF_INET);
+	snprintf(buf, 10, "%u", su_get_port(&su));
 	str_set(&ctx->server_port_ascii, mem_strdup(ctx->mem, buf), 0);
-	if (su_ntoa(&me, buf, sizeof(buf)))
+	if (su_ntoa(&su, buf, sizeof(buf)))
 	    str_set(&ctx->server_addr_ascii, mem_strdup(ctx->mem, buf), 0);
     }
     if (sd_ext->vrf_len)
 	str_set(&ctx->vrf, mem_strndup(ctx->mem, (u_char *) sd_ext->vrf, sd_ext->vrf_len), 0);
 }
 
-static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, sockaddr_union *device_addr, u_char *inject_buf, size_t inject_len)
+// s: the connection; udp: the first datagram of a UDP client instead, s is then -1
+static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, sockaddr_union *device_addr, struct scm_data_udp *udp)
 {
-    fcntl(s, F_SETFD, FD_CLOEXEC);
-    fcntl(s, F_SETFL, O_NONBLOCK);
+    sockaddr_union peer = { 0 }, me = { 0 };
+    int me_valid = 0;
 
-    sockaddr_union peer = { 0 };
-    socklen_t peer_len = (socklen_t) sizeof(peer);
+    if (udp) {
+	peer = udp->client.peer;
+	me = udp->client.local;
+	me_valid = 1;
+    } else {
+	fcntl(s, F_SETFD, FD_CLOEXEC);
+	fcntl(s, F_SETFL, O_NONBLOCK);
 
-    if (getpeername(s, &peer.sa, &peer_len)) {
-	// error path
-	report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "getpeername: %s", strerror(errno));
-	io_close(common_data.io, s);
+	socklen_t peer_len = (socklen_t) sizeof(peer), me_len = (socklen_t) sizeof(me);
+	if (getpeername(s, &peer.sa, &peer_len)) {
+	    // error path
+	    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "getpeername: %s", strerror(errno));
+	    io_close(common_data.io, s);
 
-	users_dec();
+	    users_dec();
 
-	if (ctx_spawnd && die_when_idle)
-	    cleanup_spawnd(ctx_spawnd, -1);
-	return;
+	    if (ctx_spawnd && die_when_idle)
+		cleanup_spawnd(ctx_spawnd, -1);
+	    return;
+	}
+	me_valid = !getsockname(s, &me.sa, &me_len);
     }
 
     tac_realm *r = set_sd_realm(s, sd_ext);
@@ -1767,6 +1839,17 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
     ctx->rad_acct = (sd_ext->sd.flags & SCM_FLAG_RADACCT) ? BISTATE_YES : BISTATE_NO;
     ctx->sock = s;
     io_register(ctx->io, ctx->sock, ctx);
+    if (udp) {
+	ctx->udp = BISTATE_YES;
+	ctx->inject_buf = mem_alloc(ctx->mem, INJECT_BUF_SIZE);
+	memcpy(ctx->inject_buf, udp->data, udp->data_len);
+	ctx->inject_len = udp->data_len;
+	ctx->udp_client = udp->client;
+	ctx->udp_id = udp->id;
+	if (!udp_contexts)
+	    udp_contexts = RB_tree_new(compare_udp_context, NULL);
+	RB_insert(udp_contexts, ctx);
+    }
 
     context_lru_append(ctx);
 #ifdef WITH_SSL
@@ -1795,13 +1878,6 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
     }
     ctx->use_tls_psk = (r->use_tls_psk && (sd_ext->sd.flags & SCM_FLAG_TLSPSK)) ? BISTATE_YES : BISTATE_NO;
 #endif
-    if (inject_buf) {
-	ctx->udp = BISTATE_YES;
-	ctx->inject_buf = mem_alloc(ctx->mem, INJECT_BUF_SIZE);
-	memcpy(ctx->inject_buf, inject_buf, inject_len);
-	ctx->inject_len = inject_len;
-    }
-
     if (ctx->use_tls == BISTATE_NO) {
 	if (h) {
 	    if (!h->key)
@@ -1826,7 +1902,7 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
     }
     ctx->host = h;
 
-    set_ctx_info(ctx, sd_ext);
+    set_ctx_info(ctx, sd_ext, me_valid ? &me : NULL);
 
     complete_host_mavis(ctx);
 }
@@ -1880,25 +1956,22 @@ ssize_t recv_inject(struct context *ctx, void *buf, size_t len, int flags, enum 
     errno = 0;
 
     if (ctx->inject_buf) {
-	if (!ctx->inject_len) {
-	    res = Recv(ctx->sock, ctx->inject_buf, INJECT_BUF_SIZE, 0);
-	    if (res > -1)
-		ctx->inject_len = res;
+	// UDP: the datagram that spawnd passed last
+	if (ctx->inject_len == ctx->inject_off && len) {
+	    *status = io_status_retry;
+	    return 0;
 	}
-	if (ctx->inject_len == ctx->inject_off)
-	    res = 0;
-	else if (ctx->inject_len > ctx->inject_off) {
-	    if (ctx->inject_len - ctx->inject_off < len)
-		len = ctx->inject_len - ctx->inject_off;
-	    memcpy(buf, ctx->inject_buf + ctx->inject_off, len);
-	    res = len;
-	    if (!(flags & MSG_PEEK))
-		ctx->inject_off += len;
-	    if (ctx->inject_off == ctx->inject_len)
-		ctx->inject_off = ctx->inject_len = 0;
-	}
-    } else
-	res = Recv(ctx->sock, buf, len, flags);
+	if (ctx->inject_len - ctx->inject_off < len)
+	    len = ctx->inject_len - ctx->inject_off;
+	memcpy(buf, ctx->inject_buf + ctx->inject_off, len);
+	if (!(flags & MSG_PEEK))
+	    ctx->inject_off += len;
+	if (ctx->inject_off == ctx->inject_len)
+	    ctx->inject_off = ctx->inject_len = 0;
+	*status = io_status_ok;
+	return (ssize_t) len;
+    }
+    res = Recv(ctx->sock, buf, len, flags);
 
     if (res < 0) {
 	if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -2050,7 +2123,7 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 	    // DTLS Application Data, but we haven't seen the handshake, possibly due to a daemon
 	    // restart. Just return some junk data back , the peer is likely to retry with a new handshake.
 	    char junk[128] = { 0 };
-	    UNUSED_RESULT(Write(ctx->sock, junk, sizeof(junk)));
+	    udp_send(ctx, junk, sizeof(junk));
 	    cleanup(ctx, ctx->sock);
 	    return;
 	}
@@ -2219,17 +2292,161 @@ static void accept_control_final(struct context *ctx)
     io_sched_add(ctx->io, ctx, (void *) periodics_ctx, 60, 0);
     if (config.retire && (++count == config.retire) && !common_data.singleprocess) {
 	report(&session, LOG_INFO, ~0, "Retire limit reached. Told parent about this.");
-	if (ctx_spawnd) {
-	    struct scm_data d = {.type = SCM_DYING };
-	    common_data.scm_send_msg(ctx_spawnd->sock, &d, -1);
-	}
+	struct scm_data d = {.type = SCM_DYING };
+	spawnd_send(&d, sizeof(d));
     }
     STATICSTR(start, "CONN-START");
     ctx->msgid = &msgid_start;
     ctx->acct_type = &conn_start;
     log_exec(NULL, ctx, S_connection, io_now.tv_sec);
     ctx->msgid = NULL;
+    ctx->udp_read = tac_read;
     tac_read(ctx, ctx->sock);
+}
+
+static struct udp_listener *udp_listener(int listener)
+{
+    return (listener > -1 && listener < udp_listeners_max && udp_listeners[listener].fd > -1) ? &udp_listeners[listener] : NULL;
+}
+
+// The descriptor of a listener comes with its first datagram. In single process mode it is the listener itself.
+static void udp_listener_set(int listener, int fd)
+{
+    if (fd < 0)
+	return;
+    struct udp_listener *l = udp_listener(listener);
+    if (l || listener < 0) {
+	if (!l || l->fd != fd)
+	    close(fd);
+	return;
+    }
+    if (listener >= udp_listeners_max) {
+	udp_listeners = Xrealloc(udp_listeners, (listener + 1) * sizeof(struct udp_listener));
+	for (; udp_listeners_max <= listener; udp_listeners_max++)
+	    udp_listeners[udp_listeners_max].fd = -1;
+    }
+    sockaddr_union me = { 0 };
+    socklen_t me_len = (socklen_t) sizeof(me);
+    if (getsockname(fd, &me.sa, &me_len)) {
+	report(NULL, LOG_ERR, ~0, "getsockname: %s", strerror(errno));
+	close(fd);
+	return;
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    l = &udp_listeners[listener];
+    l->fd = fd;
+    l->wildcard = (me.sa.sa_family == AF_INET && me.sin.sin_addr.s_addr == INADDR_ANY)
+	|| (me.sa.sa_family == AF_INET6 && IN6_IS_ADDR_UNSPECIFIED(&me.sin6.sin6_addr));
+}
+
+// Send from the listener to the client, from the address the client sent to. A datagram the system does not take is lost, as on the network.
+ssize_t udp_send(struct context *ctx, const void *buf, size_t len)
+{
+    struct udp_listener *l = udp_listener(ctx->udp_client.listener);
+    if (!l)
+	return (ssize_t) len;
+    sockaddr_union *local = &ctx->udp_client.local;
+    struct iovec iov = {.iov_base = (void *) buf,.iov_len = len };
+    struct msghdr msg = {.msg_name = &ctx->udp_client.peer,.msg_namelen = su_len(&ctx->udp_client.peer),.msg_iov = &iov,.msg_iovlen = 1 };
+    union {
+	char buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
+	struct cmsghdr align;
+    } control;
+    memset(&control, 0, sizeof(control));
+
+    if (l->wildcard) {
+	msg.msg_control = control.buf;
+	msg.msg_controllen = sizeof(control.buf);
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	msg.msg_controllen = 0;
+	switch (local->sa.sa_family) {
+	case AF_INET:
+	    if (local->sin.sin_addr.s_addr == INADDR_ANY)
+		break;
+#if defined(IP_PKTINFO)
+	    {
+		struct in_pktinfo pi = {.ipi_spec_dst = local->sin.sin_addr };
+		cmsg->cmsg_level = IPPROTO_IP;
+		cmsg->cmsg_type = IP_PKTINFO;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(pi));
+		memcpy(CMSG_DATA(cmsg), &pi, sizeof(pi));
+		msg.msg_controllen = CMSG_SPACE(sizeof(pi));
+	    }
+#elif defined(IP_SENDSRCADDR)
+	    cmsg->cmsg_level = IPPROTO_IP;
+	    cmsg->cmsg_type = IP_SENDSRCADDR;
+	    cmsg->cmsg_len = CMSG_LEN(sizeof(struct in_addr));
+	    memcpy(CMSG_DATA(cmsg), &local->sin.sin_addr, sizeof(struct in_addr));
+	    msg.msg_controllen = CMSG_SPACE(sizeof(struct in_addr));
+#endif
+	    break;
+	case AF_INET6:
+	    if (IN6_IS_ADDR_UNSPECIFIED(&local->sin6.sin6_addr))
+		break;
+	    {
+		struct in6_pktinfo pi = {.ipi6_addr = local->sin6.sin6_addr,.ipi6_ifindex = local->sin6.sin6_scope_id };
+		cmsg->cmsg_level = IPPROTO_IPV6;
+		cmsg->cmsg_type = IPV6_PKTINFO;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(pi));
+		memcpy(CMSG_DATA(cmsg), &pi, sizeof(pi));
+		msg.msg_controllen = CMSG_SPACE(sizeof(pi));
+	    }
+	    break;
+	}
+	if (!msg.msg_controllen)
+	    msg.msg_control = NULL;
+    }
+
+    if (sendmsg(l->fd, &msg, 0) < 0)
+	report(NULL, LOG_DEBUG, DEBUG_NET_FLAG, "sendmsg to %s: %s", ctx->peer_addr_ascii.txt, strerror(errno));
+    return (ssize_t) len;
+}
+
+// One RADIUS packet, as rad_read() reads it.
+static int udp_radius(u_char *data, size_t len)
+{
+    return len >= RADIUS_HDR_SIZE && len <= RADIUS_MAX_PACKET_SIZE && (size_t) ((data[2] << 8) | data[3]) == len;
+}
+
+// spawnd passes each datagram of a client to the context of the client, as the system passed them to a socket of its own.
+static void udp_input(struct context *ctx, u_char *data, size_t len)
+{
+    // a datagram that comes before the context has read the last one is lost, as on a full socket
+    if (ctx->inject_off < ctx->inject_len || !udp_radius(data, len))
+	return;
+    memcpy(ctx->inject_buf, data, len);
+    ctx->inject_len = len;
+    ctx->inject_off = 0;
+    if (ctx->udp_read)
+	ctx->udp_read(ctx, -1);
+}
+
+static void accept_control_udp(int s, struct scm_data_udp *sd)
+{
+    udp_listener_set(sd->client.listener, s);
+
+    struct context *ctx = NULL;
+    if (udp_contexts) {
+	struct context key;
+	key.udp_client = sd->client;
+	ctx = RB_lookup(udp_contexts, &key);
+    }
+    if (ctx) {
+	udp_input(ctx, sd->data, (size_t) sd->data_len);
+	return;
+    }
+
+    struct udp_listener *l = udp_listener(sd->client.listener);
+    if (!(sd->flags & SCM_FLAG_UDPNEW) || !l || !rad_dict_initialized() || !udp_radius(sd->data, (size_t) sd->data_len)) {
+	// not users_inc(): at "last-recently-used limit" it would end another context
+	udp_done(&sd->client, sd->id);
+	return;
+    }
+
+    struct scm_data_accept_ext sd_ext = {.sd_udp = *sd };
+    users_inc();
+    set_sd_realm(l->fd, &sd_ext);
+    accept_control_common(-1, &sd_ext, NULL, sd);
 }
 
 static void accept_control(struct context *ctx, int cur)
@@ -2239,7 +2456,7 @@ static void accept_control(struct context *ctx, int cur)
     union {
 	struct scm_data_accept sd;
 	struct scm_data_udp sd_udp;
-	u_char buf[4096 + sizeof(struct scm_data_udp)];
+	u_char buf[SCM_UDP_DATA_MAX + sizeof(struct scm_data_udp)];
     } u;
 
     if (common_data.scm_recv_msg(cur, &u.sd, sizeof(u), &s)) {
@@ -2264,18 +2481,7 @@ static void accept_control(struct context *ctx, int cur)
 	cleanup_spawnd(ctx, cur);
 	return;
     case SCM_UDPDATA:
-	if (rad_dict_initialized()) {
-	    rad_pak_hdr *hdr = (rad_pak_hdr *) (&u.sd_udp.data);
-	    if (u.sd_udp.data_len != ntohs(hdr->length))
-		return;
-	    sd_ext.sd_udp = u.sd_udp;
-	    users_inc();
-	    set_sd_realm(s, &sd_ext);
-	    accept_control_common(s, &sd_ext, NULL, u.sd_udp.data, u.sd_udp.data_len);
-	    return;
-	}
-	users_inc();
-	users_dec();
+	accept_control_udp(s, &u.sd_udp);
 	return;
     case SCM_ACCEPT:
 	sd_ext.sd = u.sd;

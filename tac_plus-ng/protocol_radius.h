@@ -52,6 +52,7 @@ typedef struct {
 #define RADIUS_HDR_SIZE sizeof(rad_pak_hdr)
 #define RADIUS_DATA(A) (((u_char *)(A)) + RADIUS_HDR_SIZE)
 #define RADIUS_DATA_LEN(A) (ntohs(((rad_pak_hdr *)A)->length) - RADIUS_HDR_SIZE)
+#define RADIUS_MAX_PACKET_SIZE 4096	// RFC 2865 3
 
 // various #defines, mostly derived from RFC2856/RFC2866. 
 

@@ -328,7 +328,7 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 
 	cur = su_socket(ctx->sa.sa.sa_family, ctx->socktype, ctx->protocol);
 	if (ctx->socktype == SOCK_DGRAM) {
-	    // spawnd_accepted() binds the reply socket to the destination address of each datagram
+	    // the worker replies from the destination address of each datagram
 	    int one = 1;
 #if defined(IP_PKTINFO)
 	    setsockopt(cur, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one));
@@ -338,10 +338,6 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 #if defined(IPV6_RECVPKTINFO)
 	    if (ctx->sa.sa.sa_family == AF_INET6)
 		setsockopt(cur, IPPROTO_IPV6, IPV6_RECVPKTINFO, &one, sizeof(one));
-#endif
-#if defined(SO_REUSEPORT) && !defined(__linux__)
-	    // the BSDs bind the reply socket to this address and port only if both sockets have SO_REUSEPORT
-	    setsockopt(cur, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
 	}
 	fcntl(cur, F_SETFD, fcntl(cur, F_GETFD, 0) | FD_CLOEXEC);
@@ -387,7 +383,8 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 	}
 #endif
 	ctx->port = su_get_port(&ctx->sa);
-	if (su_bind(cur, &ctx->sa)) {
+	// no SO_REUSEADDR on a UDP listener: another socket could bind its port and get its datagrams
+	if ((ctx->socktype == SOCK_DGRAM) ? bind(cur, &ctx->sa.sa, su_len(&ctx->sa)) : su_bind(cur, &ctx->sa)) {
 	    if (!ctx->logged_retry)
 		logerr("bind (%s:%d)", __FILE__, __LINE__);
 #ifdef AF_UNIX
