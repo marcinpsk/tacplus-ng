@@ -327,17 +327,23 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 	io_sched_del(common_data.io, ctx, (void *) spawnd_bind_listener);
 
 	cur = su_socket(ctx->sa.sa.sa_family, ctx->socktype, ctx->protocol);
-#if defined(IP_PKTINFO) || defined(IPV6_PKTINFO)
 	if (ctx->socktype == SOCK_DGRAM) {
+	    // spawnd_accepted() binds the reply socket to the destination address of each datagram
 	    int one = 1;
-#ifdef IP_PKTINFO
+#if defined(IP_PKTINFO)
 	    setsockopt(cur, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one));
+#elif defined(IP_RECVDSTADDR)
+	    setsockopt(cur, IPPROTO_IP, IP_RECVDSTADDR, &one, sizeof(one));
 #endif
-#ifdef IPV6_PKTINFO
-	    setsockopt(cur, IPPROTO_IP, IPV6_PKTINFO, &one, sizeof(one));
+#if defined(IPV6_RECVPKTINFO)
+	    if (ctx->sa.sa.sa_family == AF_INET6)
+		setsockopt(cur, IPPROTO_IPV6, IPV6_RECVPKTINFO, &one, sizeof(one));
+#endif
+#if defined(SO_REUSEPORT) && !defined(__linux__)
+	    // the BSDs bind the reply socket to this address and port only if both sockets have SO_REUSEPORT
+	    setsockopt(cur, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
 	}
-#endif
 	fcntl(cur, F_SETFD, fcntl(cur, F_GETFD, 0) | FD_CLOEXEC);
 
 	if (cur < 0) {
