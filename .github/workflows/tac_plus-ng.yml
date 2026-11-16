@@ -114,6 +114,8 @@ jobs:
       # test_vrf.py: a VRF device in an unprivileged user namespace
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 && sudo modprobe vrf
       - uses: actions/checkout@v5
+      # the second local IPv6 address of the tests (test_radius.PapOverIpv6)
+      - run: sudo sh tac_plus-ng/tests/loopback-aliases
       # the Samba AD DC of test_ldapmavis_ad.py builds and provisions in the background; "wait for the DC" reads the result
       # timeout: the one deadline for the image build and the LDAPS probe, so the wait step has no deadline of its own
       - run: mkdir -p build && (set +e; timeout -k 10 480 tac_plus-ng/tests/samba-dc/start > build/samba-dc.env; echo $? > build/samba-dc.rc.tmp; mv build/samba-dc.rc.tmp build/samba-dc.rc) > build/samba-dc.log 2>&1 < /dev/null &
