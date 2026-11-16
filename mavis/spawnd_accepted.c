@@ -217,6 +217,12 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 		local_su.sa.sa_family = AF_INET;
 		break;
 	    }
+#elif defined(IP_RECVDSTADDR)
+	    if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVDSTADDR) {
+		memcpy(&local_su.sin.sin_addr, CMSG_DATA(cmsg), 4);
+		local_su.sa.sa_family = AF_INET;
+		break;
+	    }
 #endif
 #ifdef IPV6_PKTINFO
 #ifndef SOL_IPV6
@@ -242,6 +248,9 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 	s = socket(sa.sa.sa_family, SOCK_DGRAM, 0);
 	int one = 1;
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *) &one, (socklen_t) sizeof(one));
+#if defined(SO_REUSEPORT) && !defined(__linux__)
+	setsockopt(s, SOL_SOCKET, SO_REUSEPORT, (char *) &one, (socklen_t) sizeof(one));
+#endif
 
 	switch (sa.sa.sa_family) {
 #ifdef AF_INET
@@ -258,8 +267,13 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 	    DebugOut(DEBUG_NET);
 	    return;
 	}
-	if (-1 < su_bind(s, &local_su))
-	    su_connect(s, &sa);
+	if (su_bind(s, &local_su) || su_connect(s, &sa)) {
+	    char buf[INET6_ADDRSTRLEN];
+	    logerr("UDP reply socket for %s (%s:%d)", su_ntoa(&sa, buf, (socklen_t) sizeof(buf)), __FILE__, __LINE__);
+	    close(s);
+	    DebugOut(DEBUG_NET);
+	    return;
+	}
     } else {
 	s = accept(cur, &sa.sa, &sa_len);
 	if (s < 0) {
