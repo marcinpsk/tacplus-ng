@@ -198,8 +198,12 @@ jobs:
             sh tac_plus-ng/tests/loopback-aliases
             # the VM copies the tree back only after a run without error: keep the exit code for the next step
             rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
-            ls build/*/tests-prefix/sbin
-      - run: exit "$(cat build/tests-rc)"
+            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1
+      # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
+      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/tac_plus
+      - run: grep /ARES build/tac_plus-ng-version
+      - if: success() || failure()
+        run: exit "$(cat build/tests-rc)"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -230,8 +234,12 @@ jobs:
             sh tac_plus-ng/tests/loopback-aliases
             # the VM copies the tree back only after a run without error: keep the exit code for the next step
             rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
-            ls build/*/tests-prefix/sbin
-      - run: exit "$(cat build/tests-rc)"
+            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1
+      # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
+      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/tac_plus
+      - run: grep /ARES build/tac_plus-ng-version
+      - if: success() || failure()
+        run: exit "$(cat build/tests-rc)"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
