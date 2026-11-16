@@ -800,6 +800,10 @@ struct context {
     u_char *inject_buf;
     size_t inject_len;
     size_t inject_off;
+    // UDP: no socket of its own; the replies go through the spawnd listener from the local address to the peer
+    struct scm_udp_client udp_client;
+    u_int udp_id;		// spawnd's number of the client
+    void (*udp_read)(struct context *, int);	// reads the next datagram; NULL: the context does not read now
     struct context *lru_prev;
     struct context *lru_next;
 };
@@ -910,8 +914,8 @@ void rad_read(struct context *, int);
 
 int rad_get_password(tac_session * session, char **val, size_t *val_len);
 
-void rad_udp_inject(struct context *);
 ssize_t recv_inject(struct context *ctx, void *buf, size_t len, int flags, enum io_status *status);
+ssize_t udp_send(struct context *, const void *, size_t);
 
 void cleanup_session(tac_session *, int);
 struct log_item *parse_log_format(struct sym *, mem_t *);

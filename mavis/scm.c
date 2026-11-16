@@ -35,6 +35,9 @@ int scm_send_msg(int sock, struct scm_data *sd, int fd)
     case SCM_UDPDATA:
 	vector.iov_len = sizeof(struct scm_data_udp) + ((struct scm_data_udp *) sd)->data_len;
 	break;
+    case SCM_UDPDONE:
+	vector.iov_len = sizeof(struct scm_data_udpdone);
+	break;
     default:
 	vector.iov_len = sizeof(struct scm_data);
     }
@@ -57,10 +60,44 @@ int scm_send_msg(int sock, struct scm_data *sd, int fd)
 #endif				/* MSG_NOSIGNAL */
 
     errno = 0;
-    int res = sendmsg(sock, &msg, MSG_NOSIGNAL);
-    if (res < 0)
+    // a datagram never waits for a full queue: it is lost, as on the network, and the caller sees errno
+    int res = sendmsg(sock, &msg, MSG_NOSIGNAL | ((sd->type == SCM_UDPDATA) ? MSG_DONTWAIT : 0));
+    if (res < 0 && sd->type != SCM_UDPDATA) {
+	int e = errno;
 	logmsg("scm_send_msg: sendmsg: %s", strerror(errno));
+	errno = e;
+    }
     return (res != (ssize_t) vector.iov_len);
+}
+
+static int su_cmp_scope(const sockaddr_union *a, const sockaddr_union *b)
+{
+    if (a->sa.sa_family != b->sa.sa_family)
+	return (a->sa.sa_family < b->sa.sa_family) ? -1 : 1;
+    int r = 0;
+    switch (a->sa.sa_family) {
+    case AF_INET:
+	r = memcmp(&a->sin.sin_addr, &b->sin.sin_addr, sizeof(a->sin.sin_addr));
+	if (!r && a->sin.sin_port != b->sin.sin_port)
+	    r = (ntohs(a->sin.sin_port) < ntohs(b->sin.sin_port)) ? -1 : 1;
+	break;
+    case AF_INET6:
+	r = memcmp(&a->sin6.sin6_addr, &b->sin6.sin6_addr, sizeof(a->sin6.sin6_addr));
+	if (!r && a->sin6.sin6_port != b->sin6.sin6_port)
+	    r = (ntohs(a->sin6.sin6_port) < ntohs(b->sin6.sin6_port)) ? -1 : 1;
+	if (!r && a->sin6.sin6_scope_id != b->sin6.sin6_scope_id)
+	    r = (a->sin6.sin6_scope_id < b->sin6.sin6_scope_id) ? -1 : 1;
+	break;
+    }
+    return r;
+}
+
+int scm_udp_client_cmp(const struct scm_udp_client *a, const struct scm_udp_client *b)
+{
+    if (a->listener != b->listener)
+	return (a->listener < b->listener) ? -1 : 1;
+    int r = su_cmp_scope(&a->local, &b->local);
+    return r ? r : su_cmp_scope(&a->peer, &b->peer);
 }
 
 int scm_recv_msg(int sock, struct scm_data_accept *sd, size_t sd_len, int *fd)

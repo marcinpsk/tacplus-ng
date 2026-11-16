@@ -147,6 +147,151 @@ void spawnd_adjust_tracking(int old, int new)
 	spawnd_adjust_tracking_one(&spawnd_data.track_data, old, new);
 }
 
+struct udp_client {
+    struct scm_udp_client key;
+    u_int id;
+    struct spawnd_context *server;
+};
+
+static int compare_udp_client(const void *a, const void *b)
+{
+    return scm_udp_client_cmp(&((struct udp_client *) a)->key, &((struct udp_client *) b)->key);
+}
+
+static struct udp_client *udp_client_lookup(struct scm_udp_client *key)
+{
+    struct udp_client c = {.key = *key };
+    return spawnd_data.udp_clients ? RB_lookup(spawnd_data.udp_clients, &c) : NULL;
+}
+
+static void udp_client_add(struct scm_data_udp *sd, struct spawnd_context *server)
+{
+    if (!spawnd_data.udp_clients)
+	spawnd_data.udp_clients = RB_tree_new(compare_udp_client, free);
+    struct udp_client *c = Xcalloc(1, sizeof(struct udp_client));
+    c->key = sd->client;
+    c->id = sd->id;
+    c->server = server;
+    RB_insert(spawnd_data.udp_clients, c);
+}
+
+void spawnd_udp_done(struct spawnd_context *server, struct scm_data_udpdone *d)
+{
+    struct udp_client *c = udp_client_lookup(&d->client);
+    // a done message of an older client with the same address is not for this one
+    if (c && c->server == server && c->id == d->id) {
+	RB_search_and_delete(spawnd_data.udp_clients, c);
+	spawnd_users_done(server, 1);
+    }
+}
+
+struct udp_queued {
+    struct udp_queued *next;
+    int fd;			// the listener descriptor to pass with the datagram, or -1
+    int listener;		// index of listener_arr
+    size_t len;			// of the struct scm_data_udp that follows
+};
+
+#define UDP_QUEUE_MAX (1 << 20)	// bytes that wait for one server
+
+static void udp_queue_drop(struct spawnd_context *server)
+{
+    struct udp_queued *q = server->udp_queue;
+    server->udp_queue = q->next;
+    if (!server->udp_queue)
+	server->udp_queue_last = NULL;
+    server->udp_queue_len -= q->len;
+    free(q);
+}
+
+void spawnd_udp_forget(struct spawnd_context *server)
+{
+    for (rb_node_t * rbn = RB_first(spawnd_data.udp_clients), *next; rbn; rbn = next) {
+	next = RB_next(rbn);
+	if (RB_payload(rbn, struct udp_client *)->server == server)
+	     RB_delete(spawnd_data.udp_clients, rbn);
+    }
+    while (server->udp_queue)
+	udp_queue_drop(server);
+    Xfree(&server->udp_listeners);
+}
+
+// The socket of the server has room again: send what waits, in order.
+void spawnd_udp_flush(struct spawnd_context *server, int cur)
+{
+    while (server->udp_queue) {
+	struct udp_queued *q = server->udp_queue;
+	struct scm_data_udp *sd = (struct scm_data_udp *) (q + 1);
+	if (common_data.scm_send_msg(server->fn, (struct scm_data *) sd, q->fd)) {
+	    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
+		return;
+	    if (errno != EMSGSIZE) {
+		logerr("scm_send_msg (%s:%d), pid: %d", __FILE__, __LINE__, (int) server->pid);
+		spawnd_cleanup_internal(server, cur);
+		return;
+	    }
+	    logmsg("UDP datagram of %u bytes too large for the socket to the worker, dropped", sd->data_len);
+	    // the next queued datagram of the listener takes its descriptor, or the next datagram of the listener
+	    if (q->fd > -1) {
+		struct udp_queued *n;
+		for (n = q->next; n && n->listener != q->listener; n = n->next);
+		if (n)
+		    n->fd = q->fd;
+		else
+		    server->udp_listeners[q->listener] = 0;
+	    }
+	    // a new client of the lost datagram has no context in the worker
+	    if (sd->flags & SCM_FLAG_UDPNEW) {
+		struct scm_data_udpdone d = {.type = SCM_UDPDONE,.id = sd->id,.client = sd->client };
+		udp_queue_drop(server);
+		spawnd_udp_done(server, &d);
+		continue;
+	    }
+	}
+	udp_queue_drop(server);
+    }
+    io_clr_o(common_data.io, server->fn);
+}
+
+// The first datagram of a listener (index of listener_arr) for a server takes the descriptor of the listener with it.
+// 0: sent, or queued; -1: lost (UDP_QUEUE_MAX, or the datagram too large); 1: the server failed
+static int udp_send(struct spawnd_context *server, struct scm_data_udp *sd, int listener)
+{
+    if (!server->udp_listeners)
+	server->udp_listeners = Xcalloc(spawnd_data.listeners_max, 1);
+    int fd = server->udp_listeners[listener] ? -1 : sd->client.listener;
+    if (!server->udp_queue) {
+	if (!common_data.scm_send_msg(server->fn, (struct scm_data *) sd, fd)) {
+	    server->udp_listeners[listener] = 1;
+	    return 0;
+	}
+	if (errno == EMSGSIZE) {
+	    logmsg("UDP datagram of %u bytes too large for the socket to the worker, dropped", sd->data_len);
+	    return -1;
+	}
+	if (errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS)
+	    return 1;
+    }
+    // the socket of the server is full: the datagram waits in spawnd, up to UDP_QUEUE_MAX
+    size_t len = sizeof(struct scm_data_udp) + sd->data_len;
+    if (server->udp_queue_len + len > UDP_QUEUE_MAX)
+	return -1;
+    struct udp_queued *q = Xcalloc(1, sizeof(struct udp_queued) + len);
+    q->fd = fd;
+    q->listener = listener;
+    q->len = len;
+    memcpy(q + 1, sd, len);
+    if (server->udp_queue_last)
+	server->udp_queue_last->next = q;
+    else
+	server->udp_queue = q;
+    server->udp_queue_last = q;
+    server->udp_queue_len += len;
+    server->udp_listeners[listener] = 1;
+    io_set_o(common_data.io, server->fn);
+    return 0;
+}
+
 static void tracking_register(struct track_data *data, u_char *digest, int i)
 {
     if (data->tracking_period < 1)
@@ -176,12 +321,13 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
     struct in6_addr addr;
     struct scm_data_accept *sd = NULL;
     struct scm_data_udp *sd_udp = NULL;
+    int listener = -1;		// UDP: index of listener_arr
 
     DebugIn(DEBUG_NET);
 
     if (ctx->socktype == SOCK_DGRAM) {
 
-	char buf[4096];
+	char buf[SCM_UDP_DATA_MAX];
 	char cbuf[512];
 
 	struct iovec iov = {
@@ -204,23 +350,49 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 	    DebugOut(DEBUG_NET);
 	    return;
 	}
+	if (msg.msg_flags & MSG_TRUNC) {
+	    char b[INET6_ADDRSTRLEN];
+	    logmsg("UDP datagram from %s longer than %d bytes dropped", su_ntoa(&sa, b, (socklen_t) sizeof(b)), (int) sizeof(buf));
+	    DebugOut(DEBUG_NET);
+	    return;
+	}
 
-	sockaddr_union local_su = {.sa.sa_family = sa.sa.sa_family };
+	for (listener = 0; listener < spawnd_data.listeners_max && spawnd_data.listener_arr[listener] != ctx; listener++);
+	if (listener == spawnd_data.listeners_max) {
+	    DebugOut(DEBUG_NET);
+	    return;
+	}
 
+	sd_udp = alloca(sizeof(struct scm_data_udp) + len);
+	memset(sd_udp, 0, sizeof(struct scm_data_udp));
+	sd_udp->type = SCM_UDPDATA;
+	sd_udp->flags = ctx->sd_flags;
+	sd_udp->tls_versions = ctx->dtls_versions;
+	sd_udp->aaa_protocol = ctx->aaa_protocol;
+	memcpy(sd_udp->realm, ctx->tag, SCM_REALM_SIZE);
+	// the descriptor names the listener: it stays the same across SIGHUP
+	sd_udp->client.listener = cur;
+	sd_udp->client.peer = sa;
+	sd_udp->data_len = len;
+	memcpy(sd_udp->data, buf, len);
+
+	// the worker replies from the destination address of the datagram
+	sockaddr_union *local_su = &sd_udp->client.local;
+	local_su->sa.sa_family = sa.sa.sa_family;
 	for (struct cmsghdr * cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 #ifdef IP_PKTINFO
 #ifndef SOL_IP
 #define SOL_IP IPPROTO_IP
 #endif
 	    if (cmsg->cmsg_level == SOL_IP && cmsg->cmsg_type == IP_PKTINFO) {
-		memcpy(&local_su.sin.sin_addr, &((struct in_pktinfo *) CMSG_DATA(cmsg))->ipi_addr, 4);
-		local_su.sa.sa_family = AF_INET;
+		memcpy(&local_su->sin.sin_addr, &((struct in_pktinfo *) CMSG_DATA(cmsg))->ipi_addr, 4);
+		local_su->sa.sa_family = AF_INET;
 		break;
 	    }
 #elif defined(IP_RECVDSTADDR)
 	    if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVDSTADDR) {
-		memcpy(&local_su.sin.sin_addr, CMSG_DATA(cmsg), 4);
-		local_su.sa.sa_family = AF_INET;
+		memcpy(&local_su->sin.sin_addr, CMSG_DATA(cmsg), 4);
+		local_su->sa.sa_family = AF_INET;
 		break;
 	    }
 #endif
@@ -230,53 +402,43 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 #endif
 	    if (cmsg->cmsg_level == SOL_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
 		struct in6_pktinfo *pi = (struct in6_pktinfo *) CMSG_DATA(cmsg);
-		memcpy(&local_su.sin6.sin6_addr, &pi->ipi6_addr, 16);
-		if (IN6_IS_ADDR_LINKLOCAL(&local_su.sin6.sin6_addr))	// bind() needs the interface of the address
-		    local_su.sin6.sin6_scope_id = pi->ipi6_ifindex;
-		local_su.sa.sa_family = AF_INET6;
+		memcpy(&local_su->sin6.sin6_addr, &pi->ipi6_addr, 16);
+		// the interface is part of a link-local address only
+		if (IN6_IS_ADDR_LINKLOCAL(&pi->ipi6_addr))
+		    local_su->sin6.sin6_scope_id = pi->ipi6_ifindex;
+		local_su->sa.sa_family = AF_INET6;
 		break;
 	    }
 #endif
 	}
-	su_convert(&local_su, sa.sa.sa_family);
+	su_convert(local_su, sa.sa.sa_family);
+	su_set_port(local_su, ctx->port);
 
-	sd_udp = alloca(sizeof(struct scm_data_udp) + len);
-	sd_udp->data_len = len;
-	memcpy(sd_udp->data, buf, len);
-	sd_udp->type = SCM_UDPDATA;
-	sd_udp->flags = ctx->sd_flags;
-	sd_udp->tls_versions = ctx->dtls_versions;
-	sd_udp->aaa_protocol = ctx->aaa_protocol;
-	memcpy(sd_udp->realm, ctx->tag, SCM_REALM_SIZE);
-	s = socket(sa.sa.sa_family, SOCK_DGRAM, 0);
-	int one = 1;
-	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *) &one, (socklen_t) sizeof(one));
-#if defined(SO_REUSEPORT) && !defined(__linux__)
-	setsockopt(s, SOL_SOCKET, SO_REUSEPORT, (char *) &one, (socklen_t) sizeof(one));
-#endif
-
-	switch (sa.sa.sa_family) {
-#ifdef AF_INET
-	case AF_INET:
-	    local_su.sin.sin_port = htons(ctx->port);
-	    break;
-#endif
-#ifdef AF_INET6
-	case AF_INET6:
-	    local_su.sin6.sin6_port = htons(ctx->port);
-	    break;
-#endif
-	default:
+	if (common_data.singleprocess) {
+	    sd_udp->flags |= SCM_FLAG_UDPNEW;
+	    common_data.scm_send_msg(-1, (struct scm_data *) sd_udp, cur);
 	    DebugOut(DEBUG_NET);
 	    return;
 	}
-	if (su_bind(s, &local_su) || su_connect(s, &sa)) {
-	    char buf[INET6_ADDRSTRLEN];
-	    logerr("UDP reply socket for %s (%s:%d)", su_ntoa(&sa, buf, (socklen_t) sizeof(buf)), __FILE__, __LINE__);
-	    close(s);
+
+	// a client stays with the worker that has its context
+	struct udp_client *c = udp_client_lookup(&sd_udp->client);
+	if (c) {
+	    sd_udp->id = c->id;
+	    if (udp_send(c->server, sd_udp, listener) < 1) {
+		DebugOut(DEBUG_NET);
+		return;
+	    }
+	    logerr("scm_send_msg (%s:%d), pid: %d", __FILE__, __LINE__, (int) c->server->pid);
+	    spawnd_cleanup_internal(c->server, c->server->fn);
+	}
+	// no worker can take a new client now; the client sends again
+	if (common_data.users_cur >= common_data.users_max_total) {
 	    DebugOut(DEBUG_NET);
 	    return;
 	}
+	sd_udp->flags |= SCM_FLAG_UDPNEW;
+	sd_udp->id = ++spawnd_data.udp_client_id;
     } else {
 	s = accept(cur, &sa.sa, &sa_len);
 	if (s < 0) {
@@ -360,7 +522,7 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
     su_ptoh(&sa, &addr);
 
     if (common_data.singleprocess)
-	common_data.scm_send_msg(-1, sd ? (struct scm_data *) sd : (struct scm_data *) sd_udp, s);
+	common_data.scm_send_msg(-1, (struct scm_data *) sd, s);
     else {
 	struct track_data *track_data = (ctx->track_data.tracking_period > 0) ? &ctx->track_data : &spawnd_data.track_data;
 	struct iovec iov[5];
@@ -462,7 +624,14 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 		exit(EX_SOFTWARE);
 	    }
 
-	    res = common_data.scm_send_msg(spawnd_data.server_arr[min_i]->fn, sd ? (struct scm_data *) sd : (struct scm_data *) sd_udp, s);
+	    if (sd_udp) {
+		res = udp_send(spawnd_data.server_arr[min_i], sd_udp, listener);
+		if (res < 0) {	// the client sends again
+		    DebugOut(DEBUG_NET);
+		    return;
+		}
+	    } else
+		res = common_data.scm_send_msg(spawnd_data.server_arr[min_i]->fn, (struct scm_data *) sd, s);
 
 	    if (res) {
 		logerr("scm_send_msg (%s:%d), pid: %d", __FILE__, __LINE__, (int) spawnd_data.server_arr[min_i]->pid);
@@ -476,8 +645,12 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 		    exit(EX_TEMPFAIL);
 		}
 		min_i = -1;
-	    } else if (track_data->tracking_period > 0)
-		tracking_register(track_data, digest, min_i);
+	    } else {
+		if (track_data->tracking_period > 0)
+		    tracking_register(track_data, digest, min_i);
+		if (sd_udp)
+		    udp_client_add(sd_udp, spawnd_data.server_arr[min_i]);
+	    }
 	}
 	while (res);
 
@@ -491,19 +664,23 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 	logmsg("limit of %d concurrent users reached, %s new connections", common_data.users_cur, spawnd_data.overload_hint);
 	set_proctitle(ACCEPT_NO);
 	spawnd_data.listeners_inactive = -1;
+	// UDP listeners stay: the clients that have a worker keep it, a new client is dropped above
 	for (i = 0; i < spawnd_data.listeners_max; i++)
-	    if (spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
+	    if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM
+		&& spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
 		listen(spawnd_data.listener_arr[i]->fn, spawnd_data.listener_arr[i]->overload_backlog);
 	switch (spawnd_data.overload) {
 	case S_queue:
 	    for (i = 0; i < spawnd_data.listeners_max; i++)
-		io_clr_i(ctx->io, spawnd_data.listener_arr[i]->fn);
+		if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM)
+		    io_clr_i(ctx->io, spawnd_data.listener_arr[i]->fn);
 	    break;
 	case S_reset:
-	    for (i = 0; i < spawnd_data.listeners_max; i++) {
-		io_close(spawnd_data.listener_arr[i]->io, spawnd_data.listener_arr[i]->fn);
-		spawnd_data.listener_arr[i]->fn = -1;
-	    }
+	    for (i = 0; i < spawnd_data.listeners_max; i++)
+		if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM) {
+		    io_close(spawnd_data.listener_arr[i]->io, spawnd_data.listener_arr[i]->fn);
+		    spawnd_data.listener_arr[i]->fn = -1;
+		}
 	    break;
 	default:
 	    ;

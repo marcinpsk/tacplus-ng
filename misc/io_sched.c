@@ -2173,6 +2173,8 @@ static int io_lookup_stats_index(struct io_context *io, char *name)
 
 void io_set_cb_i_internal(struct io_context *io, int fd, void *f, char *fname)
 {
+    if (fd < 0)
+	return;
     int ix = io_lookup_stats_index(io, fname);
     io->handler[fd].i_app = f;
     io->handler[fd].i_app_ix = ix;
@@ -2184,6 +2186,8 @@ void io_set_cb_i_internal(struct io_context *io, int fd, void *f, char *fname)
 
 void io_set_cb_o_internal(struct io_context *io, int fd, void *f, char *fname)
 {
+    if (fd < 0)
+	return;
     int ix = io_lookup_stats_index(io, fname);
     io->handler[fd].o_app = f;
     io->handler[fd].o_app_ix = ix;
@@ -2195,6 +2199,8 @@ void io_set_cb_o_internal(struct io_context *io, int fd, void *f, char *fname)
 
 void io_set_cb_e_internal(struct io_context *io, int fd, void *f, char *fname)
 {
+    if (fd < 0)
+	return;
     int ix = io_lookup_stats_index(io, fname);
     io->handler[fd].e = f;
     io->handler[fd].e_ix = ix;
@@ -2202,6 +2208,8 @@ void io_set_cb_e_internal(struct io_context *io, int fd, void *f, char *fname)
 
 void io_set_cb_h_internal(struct io_context *io, int fd, void *f, char *fname)
 {
+    if (fd < 0)
+	return;
     int ix = io_lookup_stats_index(io, fname);
     io->handler[fd].h = f;
     io->handler[fd].h_ix = ix;
@@ -2209,6 +2217,8 @@ void io_set_cb_h_internal(struct io_context *io, int fd, void *f, char *fname)
 #else
 void io_set_cb_i(struct io_context *io, int fd, void *f)
 {
+    if (fd < 0)
+	return;
     io->handler[fd].i_app = f;
     if (!io->handler[fd].reneg)
 	io->handler[fd].i = f;
@@ -2216,6 +2226,8 @@ void io_set_cb_i(struct io_context *io, int fd, void *f)
 
 void io_set_cb_o(struct io_context *io, int fd, void *f)
 {
+    if (fd < 0)
+	return;
     io->handler[fd].o_app = f;
     if (!io->handler[fd].reneg)
 	io->handler[fd].o = f;
@@ -2223,11 +2235,15 @@ void io_set_cb_o(struct io_context *io, int fd, void *f)
 
 void io_set_cb_e(struct io_context *io, int fd, void *f)
 {
+    if (fd < 0)
+	return;
     io->handler[fd].e = f;
 }
 
 void io_set_cb_h(struct io_context *io, int fd, void *f)
 {
+    if (fd < 0)
+	return;
     io->handler[fd].h = f;
 }
 #endif
@@ -2254,6 +2270,8 @@ void io_set_cb_inv_e(struct io_context *io, void *f)
 
 void io_clr_cb_i(struct io_context *io, int fd)
 {
+    if (fd < 0)
+	return;
     io->handler[fd].want_read_app = 0;
 #if defined(WITH_SSL) || defined(WITH_TLS)
     if (io->handler[fd].want_read_ssl)
@@ -2266,6 +2284,8 @@ void io_clr_cb_i(struct io_context *io, int fd)
 
 void io_clr_cb_o(struct io_context *io, int fd)
 {
+    if (fd < 0)
+	return;
     io->handler[fd].want_write_app = 0;
 #if defined(WITH_SSL) || defined(WITH_TLS)
     if (io->handler[fd].want_write_ssl)

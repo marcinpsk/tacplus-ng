@@ -290,7 +290,7 @@ static int same_vrf(struct spawnd_context *ctx, int fd)
     return -1;
 }
 
-// spawnd_accepted() binds the reply socket to the destination address of each datagram
+// the worker replies from the destination address of each datagram
 static void set_dgram_options(int fd, int family)
 {
     int one = 1;
@@ -302,10 +302,6 @@ static void set_dgram_options(int fd, int family)
 #if defined(IPV6_RECVPKTINFO)
     if (family == AF_INET6)
 	setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &one, sizeof(one));
-#endif
-#if defined(SO_REUSEPORT) && !defined(__linux__)
-    // the BSDs bind the reply socket to this address and port only if both sockets have SO_REUSEPORT
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
 }
 
@@ -328,8 +324,22 @@ static void adopt_listener(struct spawnd_context *ctx)
 		continue;
 	}
 #endif
-	if (type == SOCK_DGRAM)	// an older image can have made the socket without these options
+	if (type == SOCK_DGRAM) {	// an older image can have made the socket with other options
 	    set_dgram_options(fd, sa.sa.sa_family);
+	    // as spawnd_bind_listener() makes it: no SO_REUSEADDR, SO_REUSEPORT only with "reuse-port = yes"
+	    int zero = 0;
+	    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &zero, sizeof(zero));
+#ifdef SO_REUSEPORT
+#ifdef SOCKOPT_REUSEPORT
+	    if (SOCKOPT_REUSEPORT != SO_REUSEPORT || !spawnd_data.reuse_port)	// one option on Linux: no gap while it stays set
+#endif
+		setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &zero, sizeof(zero));
+#endif
+#ifdef SOCKOPT_REUSEPORT
+	    int reuse_port = spawnd_data.reuse_port ? 1 : 0;
+	    setsockopt(fd, SOL_SOCKET, SOCKOPT_REUSEPORT, &reuse_port, sizeof(reuse_port));
+#endif
+	}
 	fcntl(fd, F_SETFD, fcntl(fd, F_GETFD, 0) | FD_CLOEXEC);
 	inherited[i] = -1;
 	ctx->fn = fd;
@@ -393,7 +403,8 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 	}
 #endif
 	ctx->port = su_get_port(&ctx->sa);
-	if (su_bind(cur, &ctx->sa)) {
+	// no SO_REUSEADDR on a UDP listener: another socket could bind its port and get its datagrams
+	if ((ctx->socktype == SOCK_DGRAM) ? bind(cur, &ctx->sa.sa, su_len(&ctx->sa)) : su_bind(cur, &ctx->sa)) {
 	    if (!ctx->logged_retry)
 		logerr("bind (%s:%d)", __FILE__, __LINE__);
 #ifdef AF_UNIX

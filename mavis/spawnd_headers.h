@@ -87,6 +87,8 @@ struct spawnd_data {
     int keepintvl;
     int scm_bufsize;
     struct track_data track_data;
+    rb_tree_t *udp_clients;	/* the worker of each UDP client */
+    u_int udp_client_id;
 };
 
 struct spawnd_context {
@@ -107,6 +109,10 @@ struct spawnd_context {
     struct timeval tv;		/* server only */
     int use;			/* server only */
     pid_t pid;			/* server only */
+    u_char *udp_listeners;	/* server only: UDP listener descriptors passed, by index of listener_arr */
+    struct udp_queued *udp_queue;	/* server only: datagrams that wait for room in the socket */
+    struct udp_queued *udp_queue_last;
+    size_t udp_queue_len;
     char tag[SCM_REALM_SIZE + 1];	/* listener only */
     ssize_t tag_len;		/* listener only */
 #ifdef VRF_BINDTODEVICE
@@ -146,3 +152,8 @@ int spawnd_acl_check(sockaddr_union *);
 void spawnd_cleanup_internal(struct spawnd_context *, int);
 struct spawnd_context *spawnd_new_context(struct io_context *);
 void spawnd_adjust_tracking(int, int);
+void spawnd_udp_done(struct spawnd_context *, struct scm_data_udpdone *);
+void spawnd_udp_forget(struct spawnd_context *);
+void spawnd_register_server(struct spawnd_context *);
+void spawnd_udp_flush(struct spawnd_context *, int);
+void spawnd_users_done(struct spawnd_context *, int);
