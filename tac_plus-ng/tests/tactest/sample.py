@@ -11,8 +11,10 @@ user tactest-generation-$generation, which the hang detector logs in as.
 A sample whose rules deny that user still answers the probe, only later.
 """
 
+import html
 import os
 import re
+import textwrap
 
 from .daemon import TOP
 
@@ -40,3 +42,13 @@ def template(name, edits=()):
     if len(found) != 1:
         raise ValueError("%s: \"id = tac_plus-ng {\" occurs %d times, not once" % (name, len(found)))
     return HEAD + text[:found[0].end()] + GENERATION_USER + text[found[0].end():]
+
+
+def manual_screen(component, marker):
+    """The <screen> example of <component>/doc/manual.xml that contains marker, as template text."""
+    with open(os.path.join(TOP, component, "doc", "manual.xml")) as f:
+        screens = [html.unescape(m) for m in re.findall(r"<screen[^>]*>(.*?)</screen>", f.read(), re.S)]
+    found = [m for m in screens if marker in m]
+    if len(found) != 1:
+        raise ValueError("%s/doc/manual.xml: %d examples contain %r, not one" % (component, len(found), marker))
+    return textwrap.dedent(found[0]).replace("$", "$$") + "\n"
