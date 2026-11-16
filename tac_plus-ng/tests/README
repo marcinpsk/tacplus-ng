@@ -10,7 +10,7 @@ that look at processes through /proc (dead workers, sockets a worker
 keeps open, MAVIS children left behind) are skipped, and so are the
 self-tests of those checks; run-tests uses gmake if there is one.
 On FreeBSD and OpenBSD, lo0 has only 127.0.0.1; as root,
-"sh tac_plus-ng/tests/loopback-aliases" adds the other loopback
+"sh tac_plus-ng/tests/loopback-aliases" adds the other local
 addresses that the tests bind. CI runs both systems this way.
 
 Quick start on a fresh Ubuntu:

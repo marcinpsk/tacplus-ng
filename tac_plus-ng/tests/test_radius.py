@@ -36,7 +36,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, config, features, radius, tacacs
+from tactest import LINUX, SOURCE, DaemonTestCase, config, features, ipv6_available, radius, tacacs
 from tactest.daemon import binary, parse_only, sanitizer_env
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
@@ -70,6 +70,36 @@ POLICY = """
 		rule { script { profile = admin permit } }
 	}
 """ % (DICTIONARY, SECRET)
+
+
+# a second local IPv6 address: tests/loopback-aliases adds it
+NAS6 = "fd00:7ac::6"
+
+
+def local_address(addr):
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in addr else socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind((addr, 0))
+        return True
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(ipv6_available() and local_address(NAS6), "no local address %s (tests/loopback-aliases)" % NAS6)
+class PapOverIpv6(DaemonTestCase):
+    """The reply to a datagram for [::1] comes from [::1], also for a client with another local source address.
+
+    spawnd binds the reply socket to the destination address of the datagram (IPV6_RECVPKTINFO).
+    Without it, the system picks the source address, and the client, connected to [::1], drops the reply.
+    """
+
+    CONFIG = POLICY.replace("address = 127.0.0.6", "address = %s" % NAS6)
+    ADDRESS = "::1"
+    UDP = True
+
+    def test_access_accept(self):
+        r = self.radius(SECRET, source=NAS6).access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
 
 
 class Pap(DaemonTestCase):
