@@ -224,3 +224,66 @@ jobs:
           name: tests-work-ubuntu-debug-minimum-${{ matrix.cc }}
           path: build/tests-work
           if-no-files-found: ignore
+
+  # FreeBSD and OpenBSD run in a QEMU VM on the Linux runner (vmactions), as
+  # root. tests/loopback-aliases adds the 127.0.0.0/8 addresses of the tests.
+  # The jobs do not block a pull request until the first BSD findings are fixed.
+  freebsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      TACTEST_TIMEOUT: 2400
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          cpu: 4
+          mem: 8192
+          envs: TACTEST_TIMEOUT
+          # OpenSSL and PAM are in the base system
+          prepare: |
+            pkg install -y gmake perl5 pcre2 python3 openldap26-client c-ares curl
+            pkg search -q radcli || true
+          run: |
+            freebsd-version; openssl version
+            sh tac_plus-ng/tests/loopback-aliases
+            tac_plus-ng/tests/run-tests
+            ls build/*/tests-prefix/sbin
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-work-freebsd
+          path: build/tests-work
+          if-no-files-found: ignore
+
+  openbsd:
+    # LibreSSL of the base system, as OpenBSD users run it
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      TACTEST_TIMEOUT: 2400
+    steps:
+      - uses: actions/checkout@v5
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          release: "8"
+          cpu: 4
+          mem: 8192
+          envs: TACTEST_TIMEOUT
+          prepare: |
+            pkg_add -I gmake pcre2 python%3 openldap-client-- libcares curl
+            pkg_info -Q radcli || true
+          run: |
+            uname -a; openssl version
+            sh tac_plus-ng/tests/loopback-aliases
+            tac_plus-ng/tests/run-tests
+            ls build/*/tests-prefix/sbin
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-work-openbsd
+          path: build/tests-work
+          if-no-files-found: ignore
