@@ -1,0 +1,47 @@
+# Throwaway probe for the RADIUS/UDP reply on the BSDs. Not for merging.
+name: bsd-udp-probe
+
+on:
+  push:
+    branches: [experiments/bsd-udp-probe]
+
+env:
+  UBUNTU_PACKAGES: build-essential perl libpcre2-dev libssl-dev libcrypt-dev python3 openssl libc-ares-dev
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [freebsd, openbsd, linux]
+    steps:
+      - uses: actions/checkout@v5
+      - if: matrix.os == 'freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15"
+          cpu: 4
+          mem: 8192
+          prepare: pkg install -y gmake perl5 pcre2 python3 openldap26-client c-ares curl
+          run: sh .github/bsd-udp-probe.sh
+      - if: matrix.os == 'openbsd'
+        uses: vmactions/openbsd-vm@v1
+        with:
+          release: "8"
+          cpu: 4
+          mem: 8192
+          prepare: pkg_add -I gmake pcre2 python%3 openldap-client-- libcares curl
+          run: sh .github/bsd-udp-probe.sh
+      - if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq $UBUNTU_PACKAGES strace tcpdump
+          sudo sh .github/bsd-udp-probe.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.os }}
+          path: build/probe
