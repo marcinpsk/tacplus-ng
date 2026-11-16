@@ -97,6 +97,8 @@ jobs:
     steps:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq $UBUNTU_PACKAGES
       - uses: actions/checkout@v5
+      # the second local IPv6 address of the tests (test_radius.PapOverIpv6)
+      - run: sudo sh tac_plus-ng/tests/loopback-aliases
       - run: tac_plus-ng/tests/run-tests
         env:
           CC: gcc

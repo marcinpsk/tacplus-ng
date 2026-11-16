@@ -1,10 +1,12 @@
 #!/bin/sh
-# Add the 127.0.0.0/8 addresses of the tests to lo0 (FreeBSD, OpenBSD; run as root).
+# Add the local addresses of the tests to lo/lo0 (Linux, FreeBSD, OpenBSD; run as root).
 #
 # Linux makes all of 127.0.0.0/8 local. The BSDs have only 127.0.0.1 on lo0,
 # so a test that binds another loopback source fails there. The addresses
-# come from the tests themselves: 127.0.0.2-254, and each other 127.x.y.z
-# address that a test names (network addresses ending in .0 excepted).
+# come from the tests themselves: 127.0.0.2-254 and each other 127.x.y.z
+# address that a test names (network addresses ending in .0 excepted), on
+# the BSDs only; and on every system each fd00:7ac::/64 address, the second
+# local IPv6 address of the tests.
 
 set -e
 
@@ -20,9 +22,19 @@ addrs() {
 }
 
 n=0
-for a in $(addrs | sort -u); do
-	[ "$a" = 127.0.0.1 ] && continue
-	ifconfig lo0 inet "$a/32" alias
+if [ "$(uname -s)" != Linux ]; then
+	for a in $(addrs | sort -u); do
+		[ "$a" = 127.0.0.1 ] && continue
+		ifconfig lo0 inet "$a/32" alias
+		n=$((n + 1))
+	done
+fi
+for a in $(grep -ohE 'fd00:7ac::[0-9a-f]+' "$TESTS"/*.py "$TESTS"/tactest/*.py | sort -u); do
+	if [ "$(uname -s)" = Linux ]; then
+		ip -6 addr add "$a/128" dev lo
+	else
+		ifconfig lo0 inet6 "$a/128" alias
+	fi
 	n=$((n + 1))
 done
-echo "loopback-aliases: $n addresses on lo0"
+echo "loopback-aliases: $n addresses"
