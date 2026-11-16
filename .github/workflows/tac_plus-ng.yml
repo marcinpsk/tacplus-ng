@@ -189,15 +189,17 @@ jobs:
           cpu: 4
           mem: 8192
           envs: TACTEST_TIMEOUT
-          # OpenSSL and PAM are in the base system
+          # OpenSSL and PAM are in the base system. The package system has only radcli 2,
+          # so radmavis-mt (radcli 1) is not built and its tests skip.
           prepare: |
             pkg install -y gmake perl5 pcre2 python3 openldap26-client c-ares curl
-            pkg search -q radcli || true
           run: |
             freebsd-version; openssl version
             sh tac_plus-ng/tests/loopback-aliases
-            tac_plus-ng/tests/run-tests
+            # the VM copies the tree back only after a run without error: keep the exit code for the next step
+            rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
             ls build/*/tests-prefix/sbin
+      - run: exit "$(cat build/tests-rc)"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -220,14 +222,16 @@ jobs:
           cpu: 4
           mem: 8192
           envs: TACTEST_TIMEOUT
+          # only radcli 2 is packaged: radmavis-mt (radcli 1) is not built and its tests skip
           prepare: |
             pkg_add -I gmake pcre2 python%3 openldap-client-- libcares curl
-            pkg_info -Q radcli || true
           run: |
             uname -a; openssl version
             sh tac_plus-ng/tests/loopback-aliases
-            tac_plus-ng/tests/run-tests
+            # the VM copies the tree back only after a run without error: keep the exit code for the next step
+            rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
             ls build/*/tests-prefix/sbin
+      - run: exit "$(cat build/tests-rc)"
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
