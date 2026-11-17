@@ -17,7 +17,7 @@
     connections on IP, UNIX or possibly IPv6 sockets, accepts them and finally
     forwards them (using ancillary messages over UNIX domain sockets) to the
     spawned worker processes.</para>
-    <para>Support for receiving and forwarding UDP packets to the worker processes is available, too (<emphasis role="bold">tac_plus-ng</emphasis> uses that for processing RADIUS/UDP) </para>
+    <para>Support for receiving and forwarding UDP packets to the worker processes is available, too (<emphasis role="bold">tac_plus-ng</emphasis> uses that for processing RADIUS/UDP and RADIUS/DTLS). <emphasis role="bold">spawnd</emphasis> is the only reader of a UDP listener. It passes each datagram to the worker process that has the context of its client (the listener, the destination address, and the address and port of the client). The worker process replies through the listener, from the destination address of the request. A UDP listener has neither <literal>SO_REUSEADDR</literal> nor <literal>SO_REUSEPORT</literal> (unless <literal>reuse-port</literal> is set), so no other socket can bind its address and port.</para>
     <section>
       <title>Download</title>
       <para>You can download the source code from the GitHub repository at <ulink url="https://github.com/tacplus-ng/event-driven-servers/">https://github.com/tacplus-ng/event-driven-servers/</ulink>.
@@ -160,7 +160,7 @@ acl accept ::1</screen>
           </listitem>
           <listitem>
             <para><literal>reuse-port =</literal> ( <literal>yes</literal> | <literal>no</literal> )</para>
-            <para>On Linux, FreeBSD and DragonFly: use <literal>SO_REUSEPORT</literal> to allow multiple <literal>spawnd</literal> instances to bind to the same TCP or UDP ports. Disabled by default.</para>
+            <para>On Linux, FreeBSD and DragonFly: use <literal>SO_REUSEPORT</literal> to allow multiple <literal>spawnd</literal> instances to bind to the same TCP or UDP ports. Disabled by default. Without this option, no other socket can bind the port of a UDP listener.</para>
           </listitem>
         </itemizedlist>
         <para>For listening on UNIX domain sockets, a different syntax
@@ -428,6 +428,7 @@ acl accept ::1</screen>
             <para>The spawned processes may have their own idea about the
             maximum number of users permitted and may lower the specified
             maximum number of users to a more suitable value.</para>
+            <para>A UDP client counts as one user while its worker process keeps its context.</para>
           </listitem>
           <listitem>
             <para><literal>userid =</literal> UserID</para>
@@ -459,6 +460,7 @@ acl accept ::1</screen>
         <literal>queue</literal> | <literal>reset</literal>)</para>
         <para>If the maximum number of users is reached, either close, reset
         or queue new connections. The latter is the default.</para>
+        <para>UDP listeners are not affected: <emphasis role="bold">spawnd</emphasis> keeps reading them. A datagram of a client that has a worker process goes to it, and a datagram of a new client is dropped while the limit is reached.</para>
       </listitem>
       <listitem>
         <para><literal>tcp keepalive</literal> ( <literal>count</literal> |
@@ -590,6 +592,7 @@ syslog severity = INFO</screen>
     scratch. Listening sockets that the new configuration still
     has are kept open across the restart, so clients are neither
     refused nor reset during a reload.</para>
+    <para>After the restart, the old worker processes get no new connections. They serve their existing TCP connections until these end. Their RADIUS/UDP and RADIUS/DTLS contexts end at once: a RADIUS/UDP client goes to a new worker process, and a RADIUS/DTLS client starts a new session there. A worker process that retires (<literal>retire limit</literal> or <literal>retire timeout</literal> of <emphasis role="bold">tac_plus-ng</emphasis>) keeps its RADIUS/DTLS sessions, but only until the <literal>stateless timeout</literal> after the retirement; its RADIUS/UDP clients go to another worker process at once.</para>
     <para>The daemon is only checking for signals every couple of seconds, so
     actions aren't necessarily immediate.</para>
   </section>

@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
+   $Id: 925634f6625584865554eb81debe265e856da6a8 $
      __________________________________________________________
 
    Table of Contents
@@ -246,7 +246,10 @@ tac_plus-ng [ -P ] [ -d level ] [ -i child_id ] configuration-file [ id
        re-reading the configuration file. The child processes will
        recognize that the master process is no longer available.
        It will continue to serve the existing connections and
-       terminate when idle.
+       terminate when idle. Their RADIUS/UDP and RADIUS/DTLS
+       contexts end at once: a RADIUS/UDP client goes to a new
+       child process, and a RADIUS/DTLS client starts a new
+       session there.
      * If SIGHUP is sent to a child process it will stop accepting
        new connections from its master process. It will continue
        to serve the existing connections and terminate when idle.
@@ -596,6 +599,11 @@ s too.
        The particular daemon instance will terminate after
        processing n requests. The spawnd instance will spawn a new
        instance if necessary.
+       The retiring instance serves its existing TCP connections
+       until these end. A RADIUS/UDP client goes to another
+       instance at once. A RADIUS/DTLS session stays, at most
+       until the stateless timeout after the retirement. This is
+       also true for retire timeout.
        Default: unset
      * retire timeout = s
        The particular daemon instance will terminate after s
@@ -769,8 +777,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -1118,6 +1126,14 @@ message USERNAME = "Utilisateur: "
        Terminate a connection to a NAS if fragmented packets
        aren't completed in time.
        Default: 3
+     * stateless timeout = s
+       End the context of a RADIUS/UDP or RADIUS/DTLS client after
+       an idle period of at least s seconds. When the child
+       process retires, a RADIUS/DTLS session ends at most s
+       seconds later, also if it is not idle. After SIGHUP it ends
+       at once.
+       Default: 30
+       This configuration will be accepted at device level, too.
      * context timeout = s
        Clears context cache entries after s seconds of inactivity.
        Default: 3600 seconds.
@@ -1369,10 +1385,20 @@ mavis format custom_0 = "${server.address} ${server.port}"
 4.7.3. TLS and DTLS
 
    TACACS+ over TLS1.3 is supported, as is RADIUS over both TLS
-   and DTLS. Availability of toese features may depend on your
+   and DTLS. Availability of these features may depend on your
    OpenSSL version.
 
-   The following configuration options are availablet:
+   A new RADIUS/DTLS client must do the cookie exchange of RFC
+   6347, section 4.2.1. A ClientHello without a valid cookie gets
+   only a HelloVerifyRequest, and the daemon keeps no state for
+   it. Thus a spoofed source address gets no other handshake
+   message and uses no user slot. The cookie is an HMAC of the
+   address and port of the client and the local address. Its key
+   is a random secret that spawnd makes at start and gives to its
+   worker processes, and a SIGHUP makes a new one. A first
+   datagram of a new client that is not a ClientHello is dropped.
+
+   The following configuration options are available:
 
      * tls cert-file = cert-file
        Specifies the public part of a TLS server certificate in
