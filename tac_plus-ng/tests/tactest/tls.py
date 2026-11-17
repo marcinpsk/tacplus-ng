@@ -38,6 +38,9 @@ The standard library ssl module has no TLS-PSK client before Python 3.13,
 so PskSocket runs "openssl s_client -psk" and talks through its pipes; it
 has the few socket methods tacacs.Connection uses.
 
+RecordVersionRelay changes the record version of a ClientHello on its way
+to the daemon.
+
 openssl_available() lets a test skip when the command is missing.
 """
 
@@ -49,6 +52,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 
 from .daemon import scratch_dir
 
@@ -167,23 +171,79 @@ def self_signed(directory, name, subject):
     return crt, key
 
 
+def _recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("peer closed after %d of %d bytes" % (len(data), n))
+        data += chunk
+    return data
+
+
+class RecordVersionRelay:
+    """A TCP relay for one connection that sets the record version of the first TLS record the client sends.
+
+    The record header is not part of the handshake transcript, so the
+    handshake still completes. The relay forwards the first record in one
+    piece, as the daemon peeks at it before the handshake. Connect to addr.
+    """
+
+    def __init__(self, target, version, timeout=10.0):
+        family = socket.AF_INET6 if ":" in target[0] else socket.AF_INET
+        self.listener = socket.socket(family, socket.SOCK_STREAM)
+        self.listener.bind((target[0], 0))
+        self.listener.listen(1)
+        self.listener.settimeout(timeout)
+        self.addr = self.listener.getsockname()[:2]
+        self.thread = threading.Thread(target=self._run, args=(target, version.to_bytes(2, "big"), timeout),
+                                       daemon=True)
+        self.thread.start()
+
+    def _run(self, target, version, timeout):
+        with self.listener, self.listener.accept()[0] as client, \
+                socket.create_connection(target, timeout=timeout) as server:
+            header = _recv_exact(client, 5)
+            if header[0] != 0x16:
+                raise ValueError("the first record is no TLS handshake: %r" % header)
+            server.sendall(header[:1] + version + header[3:] + _recv_exact(client, int.from_bytes(header[3:], "big")))
+            peer = {client: server, server: client}
+            try:
+                while True:
+                    readable, _, _ = select.select(list(peer), [], [], timeout)
+                    if not readable:
+                        return
+                    for s in readable:
+                        data = s.recv(65536)
+                        if not data:
+                            return
+                        peer[s].sendall(data)
+            except ConnectionResetError:
+                pass    # the client sees the relay close the connection
+
+    def close(self):
+        self.thread.join(15)
+
+
 class PskSocket:
     """TLS 1.3 with a pre-shared key through "openssl s_client", for tacacs.Connection(sock=...).
 
     -quiet: no session information on stdout, only what the server sends;
-    -nocommands: no command letters in what we send. If the handshake fails,
+    -nocommands: no command letters in what we send. groups: the key
+    exchange groups ("-groups"). If the handshake fails,
     s_client exits and the reader sees EOF -- a connection the daemon
     closed. MSG_PEEK is emulated with a buffer.
     """
 
-    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256"):
+    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256", groups=None):
         host, port = addr[0], addr[1]
         target = "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
         self.timeout = timeout
         self.peeked = b""
         self.err = tempfile.TemporaryFile()
         self.proc = subprocess.Popen(["openssl", "s_client", "-connect", target, "-tls1_3", "-ciphersuites", cipher,
-                                      "-psk_identity", identity, "-psk", key_hex, "-quiet", "-nocommands"],
+                                      "-psk_identity", identity, "-psk", key_hex, "-quiet", "-nocommands"]
+                                     + (["-groups", groups] if groups else []),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
                                      start_new_session=True)
         self.out = self.proc.stdout.fileno()

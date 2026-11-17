@@ -1922,6 +1922,12 @@ static int dtls_ver_ok(u_int ver, u_char v)
 	    return -1;
     return 0;
 }
+
+// RFC 5246 E.1: accept any {03,XX} as the record version of a ClientHello
+static int tls_hello_record_version_ok(u_char *v)
+{
+    return v[0] == 0x03;
+}
 #endif
 
 #if defined(WITH_SSL) && !defined(OPENSSL_NO_PSK)
@@ -1937,11 +1943,10 @@ static void get_tls13_hello_identifier(u_char *buf, size_t buf_len, char **ident
 		return;
 	    next_len = 2;
 	    continue;
-	case 1:		// TLS1.0
-	    if (*buf++ != 0x03)
+	case 1:		// record version
+	    if (!tls_hello_record_version_ok(buf))
 		return;
-	    if (*buf++ != 0x01)
-		return;
+	    buf += 2;
 	    next_len = 2;
 	    continue;
 	case 2:		// length, 2 bytes
@@ -2058,7 +2063,7 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 	    if (ctx->udp)
 		ctx->use_dtls = (tmp[1] == 0xfe && dtls_ver_ok(ctx->tls_versions, tmp[2])) ? BISTATE_YES : BISTATE_NO;
 	    else
-		ctx->use_tls = (tmp[1] == 0x03 && tmp[2] == 0x01 && tmp[5] == 1) ? BISTATE_YES : BISTATE_NO;
+		ctx->use_tls = (tls_hello_record_version_ok(tmp + 1) && tmp[5] == 1) ? BISTATE_YES : BISTATE_NO;
 	}
     }
 #ifndef OPENSSL_NO_PSK
