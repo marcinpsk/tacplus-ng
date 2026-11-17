@@ -35,6 +35,7 @@ openssl command or in a build without OpenSSL.
 
 import os
 import select
+import signal
 import socket
 import ssl
 import struct
@@ -908,6 +909,96 @@ class RadiusOverDtls(TlsTestCase):
         c = self.dtls()
         for password, code in (("alicepw", "Access-Accept"), ("wrong", "Access-Reject"), ("alicepw", "Access-Accept")):
             self.assertEqual(c.access_request("alice", password).code_name, code)
+
+    def assertSessionWorks(self, c, rounds=3):
+        for _ in range(rounds):
+            self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+
+    def test_session_after_the_retire_limit(self):
+        """A worker that retires (SCM_DYING) keeps the DTLS sessions it has, as it keeps its TCP connections.
+
+        spawnd forgot the clients of the worker at once, and their next records went to a new worker,
+        which has no session for them.
+        """
+        d = self.start_daemon("\tretire limit = 1\n" + self.BODY % self.paths, listen=self.LISTEN)
+        self.assertSessionWorks(self.dtls(daemon=d))
+
+    def test_session_after_the_retire_timeout(self):
+        """At "retire timeout" the worker closed its socket to spawnd itself; it keeps it while it has UDP contexts."""
+        d = self.start_daemon("\tretire timeout = 1\n" + self.BODY % self.paths, listen=self.LISTEN)
+        c = self.dtls(daemon=d)
+        self.assertSessionWorks(c, 1)
+        time.sleep(4)  # the worker checks the timeout every 2 s
+        self.assertSessionWorks(c)
+
+    def test_session_ends_at_sighup(self):
+        """SIGHUP ends a DTLS session: no request runs with the policy before the reload, and a new session gets the new one.
+
+        The old worker gets SCM_MAY_DIE, ends its UDP contexts with a DTLS close, and exits when idle.
+        """
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        c = self.dtls(daemon=d)
+        self.assertEqual(c.access_request("alice", "alicepw").get(radius.REPLY_MESSAGE), [b"certnas"])
+        for pid in d.workers():
+            d.baseline.forget(pid)  # it exits after the reload
+        d.reload((self.BODY % self.paths).replace('"certnas"', '"certnas again"'))
+        c.timeout = 2.0
+        c.sock.settimeout(2.0)
+        with self.assertRaises((TimeoutError, ConnectionError, OSError), msg="the session went on after the reload"):
+            c.access_request("alice", "alicepw")
+        r = self.dtls(daemon=d).access_request("alice", "alicepw")
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas again"], r)
+
+    def assertSessionEnds(self, d, c, since, deadline=4.0):
+        """A request every 0.5 s, each with 1 s to answer: answered until shortly before the deadline, not long after it.
+
+        The answers before the deadline set the lower bound, so a session that ends without a word
+        right after the retirement does not pass on the receive timeout.
+        """
+        c.timeout = 1.0
+        c.sock.settimeout(1.0)
+        answered, ended = None, None
+        while ended is None and time.monotonic() < since + 15.0:
+            try:
+                self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+                answered = time.monotonic() - since
+            except (TimeoutError, ConnectionError, OSError):
+                ended = time.monotonic() - since
+            time.sleep(0.5)
+        self.assertIsNotNone(ended, "the session on the old worker did not end")
+        self.assertIsNotNone(answered, "the session on the old worker got no answer after the retirement")
+        self.assertGreater(answered, deadline - 2.0, "the session ended %.1f s before the deadline" % (deadline - answered))
+        self.assertLess(ended, deadline + 3.0, "the session ended %.1f s after the deadline" % (ended - deadline))
+        self.assertSessionWorks(self.dtls(daemon=d))
+
+    def test_session_ends_at_the_deadline_after_the_retire_limit(self):
+        d = self.start_daemon("\tretire limit = 1\n\tstateless timeout = 4\n" + self.BODY % self.paths, listen=self.LISTEN)
+        for pid in d.workers():
+            d.baseline.forget(pid)
+        since = time.monotonic()
+        c = self.dtls(daemon=d)
+        self.assertSessionWorks(c, 1)
+        self.assertSessionEnds(d, c, since)
+
+    @unittest.skipUnless(LINUX, "processes and descriptors through /proc")
+    def test_dead_retired_worker_is_forgotten(self):
+        """spawnd finds a retired worker that exited with waitpid(), as it finds the others.
+
+        A socket pair of datagrams tells nothing when its other end closes, and the waitpid()
+        loop looked only at the workers that were not retired: without a datagram of a client
+        spawnd kept the socket, the context and the clients of a retired worker that was gone.
+        """
+        d = self.start_daemon("\tretire limit = 1\n" + self.BODY % self.paths, listen=self.LISTEN)
+        (old,) = d.workers()
+        d.baseline.forget(old)
+        self.assertSessionWorks(self.dtls(daemon=d), 1)
+        fds = lambda: len(os.listdir("/proc/%d/fd" % d.pid))
+        before = fds()
+        os.kill(old, signal.SIGKILL)
+        deadline = time.monotonic() + 5.0
+        while fds() >= before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(fds(), before - 1, "spawnd keeps the socket to the dead worker")
 
     def test_two_workers(self):
         """Several clients over DTLS and over plain UDP to two workers: each datagram goes to the worker of its client."""

@@ -19,6 +19,25 @@
 
 static const char rcsid[] __attribute__((used)) = "$Id$";
 
+// The server gets no new connection and no new client; its users no longer count.
+static void server_remove(struct spawnd_context *ctx)
+{
+    int i;
+    for (i = 0; i < common_data.servers_cur && ctx != spawnd_data.server_arr[i]; i++);
+    if (i < common_data.servers_cur) {
+	common_data.users_cur -= ctx->use;
+	ctx->use = 0;
+	spawnd_adjust_tracking(i, -1);
+	common_data.servers_cur--;
+	spawnd_data.server_arr[i] = spawnd_data.server_arr[common_data.servers_cur];
+	spawnd_adjust_tracking(common_data.servers_cur, i);
+	spawnd_data.server_arr[common_data.servers_cur] = NULL;
+    }
+    for (i = 0; i < spawnd_data.retired_cur && ctx != spawnd_data.retired_arr[i]; i++);
+    if (i < spawnd_data.retired_cur)
+	spawnd_data.retired_arr[i] = spawnd_data.retired_arr[--spawnd_data.retired_cur];
+}
+
 void spawnd_cleanup_internal(struct spawnd_context *ctx, int fd __attribute__((unused)))
 {
     DebugIn(DEBUG_PROC);
@@ -30,17 +49,7 @@ void spawnd_cleanup_internal(struct spawnd_context *ctx, int fd __attribute__((u
     if (ctx->is_listener)
 	spawnd_data.listeners_max--;
     else {
-	int i;
-	for (i = 0; i < common_data.servers_cur && ctx != spawnd_data.server_arr[i]; i++);
-	if (i < common_data.servers_cur) {
-	    common_data.users_cur -= ctx->use;
-	    ctx->use = 0;
-	    spawnd_adjust_tracking(i, -1);
-	    common_data.servers_cur--;
-	    spawnd_data.server_arr[i] = spawnd_data.server_arr[common_data.servers_cur];
-	    spawnd_adjust_tracking(common_data.servers_cur, i);
-	    spawnd_data.server_arr[common_data.servers_cur] = NULL;
-	}
+	server_remove(ctx);
 	spawnd_udp_forget(ctx);
 	set_proctitle(ACCEPT);
     }
@@ -48,6 +57,23 @@ void spawnd_cleanup_internal(struct spawnd_context *ctx, int fd __attribute__((u
     free(ctx);
 
     DebugOut(DEBUG_PROC);
+}
+
+// A server that retires (SCM_DYING) keeps its DTLS clients, as it keeps its TCP connections, until their contexts end.
+void spawnd_retire(struct spawnd_context *ctx)
+{
+    if (ctx->retired)
+	return;
+    spawnd_udp_forget_plain(ctx);
+    if (!ctx->udp_clients) {
+	spawnd_cleanup_internal(ctx, ctx->fn);
+	return;
+    }
+    server_remove(ctx);
+    ctx->retired = 1;
+    spawnd_data.retired_arr = Xrealloc(spawnd_data.retired_arr, (spawnd_data.retired_cur + 1) * sizeof(struct spawnd_context *));
+    spawnd_data.retired_arr[spawnd_data.retired_cur++] = ctx;
+    set_proctitle(ACCEPT);
 }
 
 int spawnd_spawn_child(pid_t * pidp)
@@ -187,7 +213,9 @@ static void recv_childmsg(struct spawnd_context *ctx, int cur)
     else
 	switch (u.sd.type) {
 	case SCM_DONE:
-	    spawnd_users_done(ctx, ((struct scm_data *) &u.sd)->count);
+	    // the users of a retired server no longer count
+	    if (!ctx->retired)
+		spawnd_users_done(ctx, ((struct scm_data *) &u.sd)->count);
 	    break;
 	case SCM_UDPDONE:
 	    spawnd_udp_done(ctx, &u.udpdone);
@@ -196,7 +224,7 @@ static void recv_childmsg(struct spawnd_context *ctx, int cur)
 	    logmsg("Child reported fatal configuration problem. Exiting.");
 	    exit(EX_CONFIG);
 	case SCM_DYING:
-	    spawnd_cleanup_internal(ctx, cur);
+	    spawnd_retire(ctx);
 	    break;
 	case SCM_MAX:
 	    max = (((struct scm_data *) &u.sd))->count;

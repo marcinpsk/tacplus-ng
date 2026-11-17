@@ -60,8 +60,9 @@ int scm_send_msg(int sock, struct scm_data *sd, int fd)
 #endif				/* MSG_NOSIGNAL */
 
     errno = 0;
-    // a datagram never waits for a full queue: it is lost, as on the network, and the caller sees errno
-    int res = sendmsg(sock, &msg, MSG_NOSIGNAL | ((sd->type == SCM_UDPDATA) ? MSG_DONTWAIT : 0));
+    // these never wait for a full queue; the caller sees errno: a datagram is lost, as on the network
+    int nowait = sd->type == SCM_UDPDATA || sd->type == SCM_MAY_DIE;
+    int res = sendmsg(sock, &msg, MSG_NOSIGNAL | (nowait ? MSG_DONTWAIT : 0));
     if (res < 0 && sd->type != SCM_UDPDATA) {
 	int e = errno;
 	logmsg("scm_send_msg: sendmsg: %s", strerror(errno));

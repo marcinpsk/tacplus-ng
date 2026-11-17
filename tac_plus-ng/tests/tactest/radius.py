@@ -47,6 +47,7 @@ import hmac
 import os
 import socket
 import struct
+import time
 
 ACCESS_REQUEST = 1
 ACCOUNTING_REQUEST = 4
@@ -257,11 +258,14 @@ class Client:
         self.sock.settimeout(interval)
         try:
             for _ in range(tries):
-                self.send_raw(data)
+                sent = time.monotonic()
                 try:
+                    self.send_raw(data)     # Linux reports the ICMP error of an earlier datagram here
                     return self.reply(request)
                 except TimeoutError:
                     pass
+                except ConnectionRefusedError:  # for a moment no socket had the port (ICMP port unreachable)
+                    time.sleep(max(0.0, interval - (time.monotonic() - sent)))
         finally:
             self.sock.settimeout(timeout)
         raise TimeoutError("no RADIUS reply from the daemon to %d copies of the request" % tries)

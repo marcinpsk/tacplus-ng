@@ -89,6 +89,9 @@ struct spawnd_data {
     struct track_data track_data;
     rb_tree_t *udp_clients;	/* the worker of each UDP client */
     u_int udp_client_id;
+    struct spawnd_context **retired_arr;	/* retired servers that still have UDP clients */
+    int retired_cur;
+    int restarted;		/* this image follows a SIGHUP: old workers can hold copies of UDP listeners */
 };
 
 struct spawnd_context {
@@ -98,6 +101,7 @@ struct spawnd_context {
     u_int dying:1;		/* server only */
     u_int logged_retry:1;	/* server only */
     u_int inherited:1;		/* listener only, kept across SIGHUP */
+    u_int retired:1;		/* server only: gets the datagrams of its UDP clients, nothing new */
     uint32_t sd_flags;
     u_int tls_versions;
     u_int dtls_versions;
@@ -110,9 +114,11 @@ struct spawnd_context {
     int use;			/* server only */
     pid_t pid;			/* server only */
     u_char *udp_listeners;	/* server only: UDP listener descriptors passed, by index of listener_arr */
+    int udp_clients;		/* server only: UDP clients with their context in this server */
     struct udp_queued *udp_queue;	/* server only: datagrams that wait for room in the socket */
     struct udp_queued *udp_queue_last;
     size_t udp_queue_len;
+    int bind_tries;		/* listener only */
     char tag[SCM_REALM_SIZE + 1];	/* listener only */
     ssize_t tag_len;		/* listener only */
 #ifdef VRF_BINDTODEVICE
@@ -152,8 +158,10 @@ int spawnd_acl_check(sockaddr_union *);
 void spawnd_cleanup_internal(struct spawnd_context *, int);
 struct spawnd_context *spawnd_new_context(struct io_context *);
 void spawnd_adjust_tracking(int, int);
-void spawnd_udp_done(struct spawnd_context *, struct scm_data_udpdone *);
+int spawnd_udp_done(struct spawnd_context *, struct scm_data_udpdone *);
 void spawnd_udp_forget(struct spawnd_context *);
+void spawnd_retire(struct spawnd_context *);
+void spawnd_udp_forget_plain(struct spawnd_context *);
 void spawnd_register_server(struct spawnd_context *);
 void spawnd_udp_flush(struct spawnd_context *, int);
 void spawnd_users_done(struct spawnd_context *, int);
