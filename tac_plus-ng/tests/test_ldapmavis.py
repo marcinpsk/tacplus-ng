@@ -293,6 +293,9 @@ $module
 class LdapTests:
     """The tests for all back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
+    # the LDAP_SCOPE values of the back-end for subtree, one level and base
+    SCOPES = ("sub", "one", "base")
+
     def start(self, tls="", starttls=False, check=True, settings="", **env):
         """Start slapd and the daemon; tls, starttls: see Slapd, settings: tac_plus-ng lines, env: of the back-end."""
         # a directory of its own for every slapd: a test may start more than one
@@ -332,7 +335,7 @@ class LdapTests:
 
     def test_scope(self):
         """LDAP_SCOPE takes the documented values; the users are two levels below LDAP_BASE."""
-        for scope, status in (("sub", "PASS"), ("one", "FAIL"), ("base", "FAIL")):
+        for scope, status in zip(self.SCOPES, ("PASS", "FAIL", "FAIL")):
             with self.subTest(scope=scope):
                 _, d = self.start(LDAP_SCOPE=scope)
                 with d.connect() as c:
@@ -340,7 +343,7 @@ class LdapTests:
 
     def test_group_scope(self):
         """LDAP_SCOPE_GROUP = one below LDAP_BASE_GROUP = ou=groups finds both groups of alice."""
-        _, d = self.start(LDAP_SCOPE_GROUP="one", LDAP_BASE_GROUP="ou=groups," + BASE)
+        _, d = self.start(LDAP_SCOPE_GROUP=self.SCOPES[1], LDAP_BASE_GROUP="ou=groups," + BASE)
         with d.connect() as c:
             r = c.ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
@@ -395,6 +398,7 @@ class LdapPython(LdapTests, DaemonTestCase):
     """mavis_tacplus_ldap.py; slapd with "security simple_bind=1" refuses simple binds without TLS."""
     CONFIG = None
     exe = None
+    SCOPES = ("SUBTREE", "LEVEL", "BASE")
 
     def module(self, url, extra):
         command = f'"{self.exe}" "python3"' if self.exe else f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
