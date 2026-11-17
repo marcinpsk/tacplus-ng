@@ -126,6 +126,8 @@ static void spawnd_send(struct scm_data *d, size_t len)
     io_set_o(ctx_spawnd->io, ctx_spawnd->sock);
 }
 
+static void udp_release(void);
+
 static void cleanup_spawnd(struct context *ctx __attribute__((unused)), int cur __attribute__((unused)))
 {
     if (ctx_spawnd) {
@@ -133,6 +135,8 @@ static void cleanup_spawnd(struct context *ctx __attribute__((unused)), int cur 
 	ctx_spawnd = NULL;
 	while (spawnd_msgs)
 	    spawnd_msg_drop();
+	// without spawnd no datagram comes: the UDP contexts end, and the copies of the listeners close
+	udp_release();
     }
 
     if (common_data.users_cur == 0 /*&& logs_flushed(config.default_realm) FIXME */ ) {
@@ -286,6 +290,58 @@ static int compare_udp_context(const void *a, const void *b)
     return scm_udp_client_cmp(&((struct context *) a)->udp_client, &((struct context *) b)->udp_client);
 }
 
+// A retiring worker keeps its socket to spawnd while it has UDP contexts: spawnd sends their datagrams until they end.
+static int keep_spawnd(void)
+{
+    return ctx_spawnd && RB_count(udp_contexts);
+}
+
+// No datagram comes again: the UDP contexts end, and the copies of the listeners close.
+static void udp_release(void)
+{
+    for (rb_node_t * rbn = RB_first(udp_contexts), *next; rbn; rbn = next) {
+	next = RB_next(rbn);
+	cleanup(RB_payload(rbn, struct context *), -1);
+    }
+    for (int i = 0; i < udp_listeners_max; i++)
+	if (udp_listeners[i].fd > -1) {
+	    if (!common_data.singleprocess)	// there it is the listener of spawnd
+		close(udp_listeners[i].fd);
+	    udp_listeners[i].fd = -1;
+	}
+}
+
+static time_t retired = 0;	// when the worker retired: it gets no new connection and no new client
+
+// After retirement a plain UDP context ends, and a DTLS context at "stateless timeout" from the retirement, however busy it is.
+static int udp_expired(struct context *ctx)
+{
+#ifdef WITH_SSL
+    int session = ctx->tls != NULL;
+#else
+    int session = 0;
+#endif
+    return retired && (!session || !ctx->host || retired + ctx->host->udp_timeout <= io_now.tv_sec);
+}
+
+static void udp_end_expired(void)
+{
+    for (rb_node_t * rbn = RB_first(udp_contexts), *next; rbn; rbn = next) {
+	next = RB_next(rbn);
+	struct context *c = RB_payload(rbn, struct context *);
+	if (udp_expired(c))
+	    cleanup(c, -1);
+    }
+}
+
+static void retire(void)
+{
+    if (!retired)
+	retired = io_now.tv_sec;
+    die_when_idle = -1;
+    set_proctitle(ACCEPT_NEVER);
+}
+
 // Tell spawnd that this worker has no context for the client. If this is lost, the next datagram of the client tells it again.
 static void udp_done(struct scm_udp_client *client, u_int id)
 {
@@ -343,20 +399,22 @@ static void periodics(struct context *ctx, int cur __attribute__((unused)))
     process_signals();
     io_child_reap();
 
-    if (!die_when_idle) {
-	if (config.suicide && (config.suicide < io_now.tv_sec)) {
-	    report(NULL, LOG_INFO, ~0, "Retire timeout is up. Told parent about this.");
-	    struct scm_data sd = {.type = SCM_DYING };
-	    spawnd_send(&sd, sizeof(sd));
-	    die_when_idle = -1;
-	} else if (!spawnd_msgs) {	// messages that wait show that spawnd is there
-	    struct scm_data sd = {.type = SCM_KEEPALIVE };
-	    if (ctx_spawnd && common_data.scm_send_msg(ctx_spawnd->sock, &sd, -1) && !full())
-		die_when_idle = -1;
-	}
+    if (!die_when_idle && config.suicide && (config.suicide < io_now.tv_sec)) {
+	report(NULL, LOG_INFO, ~0, "Retire timeout is up. Told parent about this.");
+	struct scm_data sd = {.type = SCM_DYING };
+	spawnd_send(&sd, sizeof(sd));
+	retire();
+    } else if (ctx_spawnd && !spawnd_msgs) {	// messages that wait show that spawnd is there
+	// a retired worker sends it too: a socket pair of datagrams tells nothing when spawnd is gone
+	struct scm_data sd = {.type = SCM_KEEPALIVE };
+	if (common_data.scm_send_msg(ctx_spawnd->sock, &sd, -1) && !full())
+	    cleanup_spawnd(ctx, -1);
     }
 
-    if (die_when_idle)
+    if (retired)
+	udp_end_expired();
+
+    if (die_when_idle && !keep_spawnd())
 	cleanup_spawnd(ctx, -1 /* unused */ );
 
     expire_dynamic_users(config.default_realm);
@@ -552,7 +610,7 @@ static str_t msgid_ ## A = { .txt = B, .len = sizeof(B) - 1 }
     if (common_data.debug & DEBUG_TACTRACE_FLAG)
 	die_when_idle = 1;
 
-    if (ctx_spawnd && die_when_idle)
+    if (ctx_spawnd && die_when_idle && !keep_spawnd())
 	cleanup_spawnd(ctx_spawnd, 0);
 }
 
@@ -597,7 +655,7 @@ static void cleanup_px(struct context_px *ctx, int cur)
     context_px_lru_remove(ctx);
     free(ctx);
 
-    if (ctx_spawnd && die_when_idle)
+    if (ctx_spawnd && die_when_idle && !keep_spawnd())
 	cleanup_spawnd(ctx_spawnd, cur);
 }
 
@@ -1785,7 +1843,7 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 
 	    users_dec();
 
-	    if (ctx_spawnd && die_when_idle)
+	    if (ctx_spawnd && die_when_idle && !keep_spawnd())
 		cleanup_spawnd(ctx_spawnd, -1);
 	    return;
 	}
@@ -2366,6 +2424,7 @@ static void accept_control_final(struct context *ctx)
 	report(&session, LOG_INFO, ~0, "Retire limit reached. Told parent about this.");
 	struct scm_data d = {.type = SCM_DYING };
 	spawnd_send(&d, sizeof(d));
+	retire();		// this context may be a plain UDP context: periodics() ends it
     }
     STATICSTR(start, "CONN-START");
     ctx->msgid = &msgid_start;
@@ -2622,6 +2681,11 @@ static int udp_radius(u_char *data, size_t len)
 // spawnd passes each datagram of a client to the context of the client, as the system passed them to a socket of its own.
 static void udp_input(struct context *ctx, u_char *data, size_t len)
 {
+    // the datagram is lost; spawnd sends the next one of the client to another worker
+    if (udp_expired(ctx)) {
+	cleanup(ctx, -1);
+	return;
+    }
 #ifdef WITH_SSL
     if (ctx->rbio) {
 	// keep at most what one DTLS read takes, so that a read never splits a record; the rest is lost, as on a full socket

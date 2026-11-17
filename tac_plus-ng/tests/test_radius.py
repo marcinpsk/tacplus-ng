@@ -28,6 +28,7 @@
 
 """RADIUS: Access-Request with PAP over UDP and RADIUS/TCP."""
 
+import contextlib
 import errno
 import hashlib
 import os
@@ -246,6 +247,106 @@ class UdpListener(DaemonTestCase):
                 failed += 1
         self.assertEqual(failed, 0, "%d of %d clients got no Access-Accept" % (failed, clients))
 
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_sighup_with_a_stopped_worker(self):
+        """SIGHUP sends SCM_MAY_DIE without waiting for room in the socket of a worker.
+
+        spawnd waited in sendmsg() for a stopped worker whose socket was full of datagrams, and the
+        reload did not happen until the worker went on. That worker does not get SCM_MAY_DIE: it
+        keeps its copy of the dropped wildcard listener until its keepalive fails, and the new
+        listener on the same port must bind after that, also when this is later than the 5 s of
+        fast bind retries, and also after a second reload while the bind still waits.
+        """
+        port = free_udp_port("0.0.0.0")
+        spawn = "\tspawn { instances min = 2 instances max = 2 }\n"
+        # two workers: a TCP connection still waits for a full socket, so the probe of reload() goes to the other one
+        d = self.start_daemon(POLICY, spawnd=spawn + "\tlisten { address = 0.0.0.0 port = %d protocol = UDP }\n" % port)
+        c = radius.Client(("127.0.0.1", port), SECRET, source=NAS)
+        self.addCleanup(c.close)
+        self.assertEqual(self.welcome(c), [b"welcome"])
+        (worker,) = [pid for pid in d.workers() if d.users(pid) == 1]
+        for pid in d.workers():
+            d.baseline.forget(pid)  # they exit after the reload
+        os.kill(worker, signal.SIGSTOP)
+        self.addCleanup(self.resume, worker)  # it exits when it goes on
+        deadline = time.monotonic() + 5.0
+        while proc_stat(worker)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        for _ in range(3000):
+            c.send_raw(b"x" * 100)
+        d.spawnd = spawn + "\tlisten { address = 127.0.0.1 port = %d protocol = UDP }\n" % port
+        d.reload(POLICY.replace('"welcome"', '"welcome back"'))
+        d.reload(POLICY.replace('"welcome"', '"welcome again"'))  # the listener of the first reload is not bound yet
+        time.sleep(6)  # the new image tried the first bind before the reload was visible
+        os.kill(worker, signal.SIGCONT)
+        with radius.Client(("127.0.0.1", port), SECRET, source=NAS) as c:
+            r = c.retransmit(c.pap_request("alice", "alicepw"), message_authenticator=True, tries=8)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"welcome again"], r)
+
+    @staticmethod
+    def resume(pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGCONT)
+
+    def welcome(self, c):
+        r = c.access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        return r.get(radius.REPLY_MESSAGE)
+
+    def test_plain_client_gets_the_new_policy_after_sighup(self):
+        """Plain RADIUS/UDP has no session: after SIGHUP the next request of a client goes to a new worker at once.
+
+        A client that kept sending kept its context in the old worker, with the old policy, without
+        a limit: a user that the reload removed stayed accepted. The reload changes the reply
+        message and removes bob, so the replies tell the workers apart.
+        """
+        policy = POLICY.replace("\tuser alice {", "\tuser bob {\n\t\tpassword login = clear bobpw\n\t\tpassword pap = login\n\t}\n\tuser alice {")
+        d = self.start_daemon(policy, udp=True)
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(self.welcome(c), [b"welcome"])
+        self.assertEqual(c.access_request("bob", "bobpw", message_authenticator=True).code_name, "Access-Accept")
+        d.reload(POLICY.replace('"welcome"', '"welcome back"'))
+        self.assertEqual(self.welcome(c), [b"welcome back"], "the client stayed with the old worker")
+        self.assertEqual(c.access_request("bob", "bobpw", message_authenticator=True).code_name, "Access-Reject")
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_plain_client_leaves_a_retired_worker(self):
+        """A worker that retires keeps no plain UDP client: the client goes on with another worker, and the old one exits."""
+        d = self.start_daemon("\tretire limit = 1\n" + POLICY, udp=True)
+        (old,) = d.workers()
+        d.baseline.forget(old)
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        deadline = time.monotonic() + 10.0
+        while alive(old) and time.monotonic() < deadline:
+            self.assertEqual(self.welcome(c), [b"welcome"])
+            select.select([], [], [], 0.2)
+        self.assertFalse(alive(old), "the retired worker still serves the client")
+        self.assertEqual(self.welcome(c), [b"welcome"])
+
+    def test_sighup_replaces_a_wildcard_listener(self):
+        """A new listener can bind the port of a UDP listener that the reload dropped.
+
+        The old worker kept its copy of the old listener while it lived, here for a TCP
+        connection, so the port stayed bound, and the listener of the reload failed to bind.
+        """
+        port = free_udp_port("0.0.0.0")
+        d = self.start_daemon(POLICY, spawnd="\tlisten { address = 0.0.0.0 port = %d protocol = UDP }\n" % port)
+        with radius.Client(("127.0.0.1", port), SECRET, source=NAS) as c:
+            self.assertEqual(self.welcome(c), [b"welcome"])
+        tcp = self.connect(daemon=d)
+        d.spawnd = "\tlisten { address = 127.0.0.1 port = %d protocol = UDP }\n" % port
+        d.reload()
+        # spawnd binds again while the old worker closes its copy; the client sends again, as a RADIUS client does
+        deadline, reply = time.monotonic() + 10.0, None
+        while reply is None and time.monotonic() < deadline:
+            with radius.Client(("127.0.0.1", port), SECRET, source=NAS, timeout=0.5) as c:
+                try:
+                    reply = self.welcome(c)
+                except (TimeoutError, ConnectionRefusedError):
+                    pass
+        self.assertEqual(reply, [b"welcome"], "no listener on the port after the reload")
+        self.assertFalse(tcp.closed(timeout=0.1))
+
     def wildcard(self, any_address, address, source, policy=POLICY):
         """Access-Request from source to address on a listener of any_address: the client takes only a reply from address."""
         port = free_udp_port(any_address)
@@ -369,6 +470,38 @@ class UdpUsers(DaemonTestCase):
         b = self.radius(SECRET, daemon=d, listener="b", source=NAS)
         r = b.retransmit(b.pap_request("alice", "alicepw"), message_authenticator=True)
         self.assertEqual(r.code_name, "Access-Accept", r)
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_lost_queued_datagram_of_a_retired_worker(self):
+        """A queued first datagram of a DTLS client is lost after its worker retired: spawnd frees the worker once.
+
+        The client was the last one of the retired worker, so its end freed the worker, and the
+        flush of the queue went on with it (use after free; the address sanitizer shows it).
+        """
+        d = self.start_daemon("\tretire limit = 2\n" + POLICY, udp=True, spawnd="\ttcp bufsize = 4096\n")
+        a = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(a.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        (worker,) = d.workers()
+        d.baseline.forget(worker)  # it retires and exits
+        os.kill(worker, signal.SIGSTOP)
+        self.addCleanup(os.kill, worker, signal.SIGCONT)
+        deadline = time.monotonic() + 5.0
+        while proc_stat(worker)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        b = self.radius(SECRET, daemon=d, source=NAS)
+        b.send_raw(b.pap_request("alice", "alicepw").encode(b.secret, message_authenticator=True))  # the second context: it retires
+        for _ in range(200):
+            a.send_raw(b"x" * 100)
+        # the first datagram of a new client, a DTLS record: it stays with the retired worker, and does not fit its socket
+        self.radius(SECRET, daemon=d, source=NAS).send_raw(bytes([22, 0xfe, 0xfd]) + b"x" * 12000)
+        self.wait_users(d, 3, datagrams_sent=True)
+        os.kill(worker, signal.SIGCONT)
+        deadline = time.monotonic() + 10.0
+        while alive(worker) and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertFalse(alive(worker), "the retired worker did not exit")
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(c.retransmit(c.pap_request("alice", "alicepw"), message_authenticator=True).code_name, "Access-Accept")
 
     @unittest.skipUnless(LINUX, "processes through /proc")
     def test_done_messages_wait_for_spawnd(self):

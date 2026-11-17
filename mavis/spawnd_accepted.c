@@ -151,6 +151,7 @@ struct udp_client {
     struct scm_udp_client key;
     u_int id;
     struct spawnd_context *server;
+    int dtls;			// a session: it stays with a retired server, a plain client does not
 };
 
 static int compare_udp_client(const void *a, const void *b)
@@ -164,7 +165,7 @@ static struct udp_client *udp_client_lookup(struct scm_udp_client *key)
     return spawnd_data.udp_clients ? RB_lookup(spawnd_data.udp_clients, &c) : NULL;
 }
 
-static void udp_client_add(struct scm_data_udp *sd, struct spawnd_context *server)
+static void udp_client_add(struct scm_data_udp *sd, struct spawnd_context *server, int dtls)
 {
     if (!spawnd_data.udp_clients)
 	spawnd_data.udp_clients = RB_tree_new(compare_udp_client, free);
@@ -172,17 +173,40 @@ static void udp_client_add(struct scm_data_udp *sd, struct spawnd_context *serve
     c->key = sd->client;
     c->id = sd->id;
     c->server = server;
+    c->dtls = dtls;
     RB_insert(spawnd_data.udp_clients, c);
+    server->udp_clients++;
 }
 
-void spawnd_udp_done(struct spawnd_context *server, struct scm_data_udpdone *d)
+// Plain RADIUS/UDP has no session: when its server retires, the next datagram of a client goes to another server.
+void spawnd_udp_forget_plain(struct spawnd_context *server)
+{
+    for (rb_node_t * rbn = RB_first(spawnd_data.udp_clients), *next; rbn; rbn = next) {
+	next = RB_next(rbn);
+	struct udp_client *c = RB_payload(rbn, struct udp_client *);
+	if (c->server == server && !c->dtls) {
+	    RB_delete(spawnd_data.udp_clients, rbn);
+	    server->udp_clients--;
+	}
+    }
+}
+
+// -1: the server is gone (a retired server without UDP clients)
+int spawnd_udp_done(struct spawnd_context *server, struct scm_data_udpdone *d)
 {
     struct udp_client *c = udp_client_lookup(&d->client);
     // a done message of an older client with the same address is not for this one
     if (c && c->server == server && c->id == d->id) {
 	RB_search_and_delete(spawnd_data.udp_clients, c);
-	spawnd_users_done(server, 1);
+	server->udp_clients--;
+	if (!server->retired)
+	    spawnd_users_done(server, 1);
+	else if (!server->udp_clients) {	// as at SCM_DYING without UDP clients
+	    spawnd_cleanup_internal(server, server->fn);
+	    return -1;
+	}
     }
+    return 0;
 }
 
 struct udp_queued {
@@ -211,6 +235,7 @@ void spawnd_udp_forget(struct spawnd_context *server)
 	if (RB_payload(rbn, struct udp_client *)->server == server)
 	     RB_delete(spawnd_data.udp_clients, rbn);
     }
+    server->udp_clients = 0;
     while (server->udp_queue)
 	udp_queue_drop(server);
     Xfree(&server->udp_listeners);
@@ -240,11 +265,12 @@ void spawnd_udp_flush(struct spawnd_context *server, int cur)
 		else
 		    server->udp_listeners[q->listener] = 0;
 	    }
-	    // a new client of the lost datagram has no context in the worker
+	    // a new client of the lost datagram has no context in the worker; when it was the last client of a retired server, the server goes
 	    if (sd->flags & SCM_FLAG_UDPNEW) {
 		struct scm_data_udpdone d = {.type = SCM_UDPDONE,.id = sd->id,.client = sd->client };
 		udp_queue_drop(server);
-		spawnd_udp_done(server, &d);
+		if (spawnd_udp_done(server, &d))
+		    return;
 		continue;
 	    }
 	}
@@ -649,7 +675,7 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 		if (track_data->tracking_period > 0)
 		    tracking_register(track_data, digest, min_i);
 		if (sd_udp)
-		    udp_client_add(sd_udp, spawnd_data.server_arr[min_i]);
+		    udp_client_add(sd_udp, spawnd_data.server_arr[min_i], scm_udp_dtls(sd_udp->data, sd_udp->data_len));
 	    }
 	}
 	while (res);

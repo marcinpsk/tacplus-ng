@@ -64,12 +64,20 @@ static void periodics(struct spawnd_context *ctx, int cur __attribute__((unused)
 
 	if (i < common_data.servers_cur)
 	    spawnd_cleanup_internal(spawnd_data.server_arr[i], spawnd_data.server_arr[i]->fn);
+	else
+	    for (i = 0; i < spawnd_data.retired_cur; i++)
+		if (spawnd_data.retired_arr[i]->pid == deadpid) {
+		    spawnd_cleanup_internal(spawnd_data.retired_arr[i], spawnd_data.retired_arr[i]->fn);
+		    break;
+		}
     }
 
     if (spawnd_data.abandon) {
 	spawnd_data.abandon = 0;
 	while (common_data.servers_cur)
 	    spawnd_cleanup_internal(spawnd_data.server_arr[0], spawnd_data.server_arr[0]->fn);
+	while (spawnd_data.retired_cur)
+	    spawnd_cleanup_internal(spawnd_data.retired_arr[0], spawnd_data.retired_arr[0]->fn);
     }
 
     if (io_now.tv_sec & 7) {
@@ -93,9 +101,10 @@ static void periodics(struct spawnd_context *ctx, int cur __attribute__((unused)
 	    if (!spawnd_data.server_arr[i]->use) {
 		if (!spawnd_data.server_arr[i]->dying) {
 		    struct scm_data sd = {.type = SCM_MAY_DIE };
-		    spawnd_data.server_arr[i]->dying = 1;
 		    Debug((DEBUG_PROC, "server %d may die\n", i));
-		    common_data.scm_send_msg(spawnd_data.server_arr[i]->fn, &sd, -1);
+		    // a full socket: the next periodics() tries again
+		    if (!common_data.scm_send_msg(spawnd_data.server_arr[i]->fn, &sd, -1))
+			spawnd_data.server_arr[i]->dying = 1;
 		}
 		servers_count--;
 	    }
@@ -260,6 +269,7 @@ static void get_inherited(void)
     char *e = getenv(LISTEN_FDS);
     if (!e)
 	return;
+    spawnd_data.restarted = 1;	// also after a second SIGHUP, before an old worker released a port
     while (*e) {
 	char *t;
 	long fd = strtol(e, &t, 10);
@@ -403,6 +413,21 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 	ctx->port = su_get_port(&ctx->sa);
 	// no SO_REUSEADDR on a UDP listener: another socket could bind its port and get its datagrams
 	if ((ctx->socktype == SOCK_DGRAM) ? bind(cur, &ctx->sa.sa, su_len(&ctx->sa)) : su_bind(cur, &ctx->sa)) {
+	    // an old worker holds a copy of a dropped UDP listener until it reads SCM_MAY_DIE or sees spawnd gone
+	    if (ctx->socktype == SOCK_DGRAM && errno == EADDRINUSE && spawnd_data.restarted) {
+		int fast = ctx->bind_tries < 50;	// every 0.1 s for 5 s, then every second without a limit
+		if (fast)
+		    ctx->bind_tries++;
+		else if (ctx->bind_tries == 50) {
+		    ctx->bind_tries++;
+		    logmsg("bind to [%s]:%d failed: the address is in use, maybe by an old worker process. Will retry every second.",
+			   su_ntoa(&ctx->sa, buf, (socklen_t) sizeof(buf)), su_get_port(&ctx->sa));
+		}
+		close(cur);
+		io_sched_add(common_data.io, ctx, (void *) spawnd_bind_listener, (time_t) (fast ? 0 : 1), (suseconds_t) (fast ? 100000 : 0));
+		DebugOut(DEBUG_NET);
+		return;
+	    }
 	    if (!ctx->logged_retry)
 		logerr("bind (%s:%d)", __FILE__, __LINE__);
 #ifdef AF_UNIX
