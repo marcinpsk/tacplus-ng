@@ -28,16 +28,21 @@
 
 """RADIUS: Access-Request with PAP over UDP and RADIUS/TCP."""
 
+import contextlib
+import errno
 import hashlib
 import os
+import select
+import signal
 import socket
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 
 from tactest import LINUX, SOURCE, DaemonTestCase, config, features, ipv6_available, radius, tacacs
-from tactest.daemon import binary, parse_only, sanitizer_env
+from tactest.daemon import alive, binary, free_udp_port, parse_only, proc_stat, sanitizer_env
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 SECRET = "radsecret"
@@ -100,6 +105,448 @@ class PapOverIpv6(DaemonTestCase):
     def test_access_accept(self):
         r = self.radius(SECRET, source=NAS6).access_request("alice", "alicepw", message_authenticator=True)
         self.assertEqual(r.code_name, "Access-Accept", r)
+
+
+class UdpListener(DaemonTestCase):
+    """spawnd reads every datagram from the one listener socket and passes it to the worker of its client.
+
+    spawnd made a socket for each new client: bind() to the address and port
+    of the listener with SO_REUSEADDR, then connect() to the client. A
+    datagram of another client that came between the two went to that
+    socket. For the same reason the listener had SO_REUSEADDR, so any local
+    user could bind its port and get its datagrams.
+    """
+
+    CONFIG = None
+    CLIENTS = 200
+
+    def test_many_clients_at_once(self):
+        """Every client sends its request before any reply is read; each gets its own Access-Accept."""
+        d = self.start_daemon(POLICY, udp=True, spawnd="\tspawn { users max = %d }\n" % (2 * self.CLIENTS))
+        clients = [self.radius(SECRET, daemon=d, source=NAS) for _ in range(self.CLIENTS)]
+        requests = [c.pap_request("alice", "alicepw") for c in clients]
+        for c, req in zip(clients, requests):
+            c.send_raw(req.encode(c.secret, message_authenticator=True))
+        deadline = time.monotonic() + 10.0
+        failed = []
+        for c, req in zip(clients, requests):
+            c.sock.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                r = c.reply(req)
+                if r.code_name != "Access-Accept":
+                    failed.append(r.code_name)
+            except (TimeoutError, radius.ProtocolError) as e:
+                failed.append(type(e).__name__)
+        self.assertEqual(failed, [], "%d of %d clients got no Access-Accept" % (len(failed), self.CLIENTS))
+
+    def test_port_cannot_be_bound_again(self):
+        """No SO_REUSEADDR or SO_REUSEPORT on the listener: another socket on its address and port must fail."""
+        d = self.start_daemon(POLICY, udp=True)
+        options = [[socket.SO_REUSEADDR]]
+        if hasattr(socket, "SO_REUSEPORT"):
+            options += [[socket.SO_REUSEPORT], [socket.SO_REUSEADDR, socket.SO_REUSEPORT]]
+        for opts in options:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                for opt in opts:
+                    s.setsockopt(socket.SOL_SOCKET, opt, 1)
+                with self.assertRaises(OSError, msg="bind with options %s succeeded" % opts) as e:
+                    s.bind(d.udp_addr)
+                self.assertEqual(e.exception.errno, errno.EADDRINUSE)
+        r = self.radius(SECRET, daemon=d, source=NAS).access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_many_clients_at_once_with_two_workers(self):
+        """Each client stays with the worker that has its context; both workers get clients."""
+        d = self.start_daemon(POLICY, udp=True,
+                              spawnd="\tspawn { instances min = 2 instances max = 2 users max = %d }\n" % self.CLIENTS)
+        self.assertEqual(len(d.workers()), 2)
+        clients = [self.radius(SECRET, daemon=d, source=NAS) for _ in range(self.CLIENTS)]
+        for _ in range(2):
+            requests = [c.pap_request("alice", "alicepw") for c in clients]
+            for c, req in zip(clients, requests):
+                c.send_raw(req.encode(c.secret, message_authenticator=True))
+            failed = []
+            for c, req in zip(clients, requests):
+                try:
+                    if c.reply(req).code_name != "Access-Accept":
+                        failed.append(c)
+                except (TimeoutError, radius.ProtocolError):
+                    failed.append(c)
+            self.assertEqual(len(failed), 0, "%d of %d clients got no Access-Accept" % (len(failed), self.CLIENTS))
+        users = sorted(d.users(pid) for pid in d.workers())
+        self.assertEqual(sum(users), self.CLIENTS, "contexts of the workers")
+        self.assertGreater(users[0], 0, "one worker got no client")
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_client_moves_when_its_worker_is_gone(self):
+        """spawnd forgets the clients of a worker that went away; their next datagram goes to another worker."""
+        d = self.start_daemon(POLICY, udp=True)
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        (worker,) = d.workers()
+        d.baseline.forget(worker)
+        os.kill(worker, signal.SIGKILL)
+        deadline = time.monotonic() + 5.0
+        while alive(worker) and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        self.assertNotIn(worker, d.workers())
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_a_stopped_worker_does_not_stop_spawnd(self):
+        """spawnd does not wait for a worker to take a datagram: the datagram waits in spawnd, beyond a limit it is lost.
+
+        A worker that reads nothing fills its queue with the datagrams of its client. spawnd waited in
+        sendmsg() then, and took no TCP connection and no datagram for any other worker.
+        """
+        d = self.start_daemon(POLICY, udp=True, spawnd="\tspawn { instances min = 2 instances max = 2 }\n")
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        (stopped,) = [pid for pid in d.workers() if d.users(pid) == 1]
+        os.kill(stopped, signal.SIGSTOP)
+        self.addCleanup(os.kill, stopped, signal.SIGCONT)
+        deadline = time.monotonic() + 5.0
+        while proc_stat(stopped)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        for _ in range(3000):
+            c.send_raw(b"x" * 100)
+        with d.connect(timeout=5.0) as t:
+            self.assertTrue(t.pap("alice", "alicepw").ok)
+        r = self.radius(SECRET, daemon=d, source=NAS).access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_burst_while_the_worker_is_busy(self):
+        """Datagrams that come while the worker reads none wait in spawnd, up to a limit, and are not lost.
+
+        The socket to a worker holds about 200 datagrams (Linux). When it was full, spawnd dropped
+        the next datagram at once, so a burst of new clients lost requests.
+        """
+        clients = 500
+        d = self.start_daemon(POLICY, udp=True, spawnd="\tspawn { users max = %d }\n" % (2 * clients))
+        (worker,) = d.workers()
+        os.kill(worker, signal.SIGSTOP)
+        self.addCleanup(os.kill, worker, signal.SIGCONT)
+        deadline = time.monotonic() + 5.0
+        while proc_stat(worker)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        burst = [self.radius(SECRET, daemon=d, source=NAS) for _ in range(clients)]
+        requests = [c.pap_request("alice", "alicepw") for c in burst]
+        for c, req in zip(burst, requests):
+            c.send_raw(req.encode(c.secret, message_authenticator=True))
+        os.kill(worker, signal.SIGCONT)
+        deadline = time.monotonic() + 20.0
+        failed = 0
+        for c, req in zip(burst, requests):
+            c.sock.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                if c.reply(req).code_name != "Access-Accept":
+                    failed += 1
+            except (TimeoutError, radius.ProtocolError):
+                failed += 1
+        self.assertEqual(failed, 0, "%d of %d clients got no Access-Accept" % (failed, clients))
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_sighup_with_a_stopped_worker(self):
+        """SIGHUP sends SCM_MAY_DIE without waiting for room in the socket of a worker.
+
+        spawnd waited in sendmsg() for a stopped worker whose socket was full of datagrams, and the
+        reload did not happen until the worker went on. That worker does not get SCM_MAY_DIE: it
+        keeps its copy of the dropped wildcard listener until its keepalive fails, and the new
+        listener on the same port must bind after that, also when this is later than the 5 s of
+        fast bind retries, and also after a second reload while the bind still waits.
+        """
+        port = free_udp_port("0.0.0.0")
+        spawn = "\tspawn { instances min = 2 instances max = 2 }\n"
+        # two workers: a TCP connection still waits for a full socket, so the probe of reload() goes to the other one
+        d = self.start_daemon(POLICY, spawnd=spawn + "\tlisten { address = 0.0.0.0 port = %d protocol = UDP }\n" % port)
+        c = radius.Client(("127.0.0.1", port), SECRET, source=NAS)
+        self.addCleanup(c.close)
+        self.assertEqual(self.welcome(c), [b"welcome"])
+        (worker,) = [pid for pid in d.workers() if d.users(pid) == 1]
+        for pid in d.workers():
+            d.baseline.forget(pid)  # they exit after the reload
+        os.kill(worker, signal.SIGSTOP)
+        self.addCleanup(self.resume, worker)  # it exits when it goes on
+        deadline = time.monotonic() + 5.0
+        while proc_stat(worker)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        for _ in range(3000):
+            c.send_raw(b"x" * 100)
+        d.spawnd = spawn + "\tlisten { address = 127.0.0.1 port = %d protocol = UDP }\n" % port
+        d.reload(POLICY.replace('"welcome"', '"welcome back"'))
+        d.reload(POLICY.replace('"welcome"', '"welcome again"'))  # the listener of the first reload is not bound yet
+        time.sleep(6)  # the new image tried the first bind before the reload was visible
+        os.kill(worker, signal.SIGCONT)
+        with radius.Client(("127.0.0.1", port), SECRET, source=NAS) as c:
+            r = c.retransmit(c.pap_request("alice", "alicepw"), message_authenticator=True, tries=8)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"welcome again"], r)
+
+    @staticmethod
+    def resume(pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGCONT)
+
+    def welcome(self, c):
+        r = c.access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        return r.get(radius.REPLY_MESSAGE)
+
+    def test_plain_client_gets_the_new_policy_after_sighup(self):
+        """Plain RADIUS/UDP has no session: after SIGHUP the next request of a client goes to a new worker at once.
+
+        A client that kept sending kept its context in the old worker, with the old policy, without
+        a limit: a user that the reload removed stayed accepted. The reload changes the reply
+        message and removes bob, so the replies tell the workers apart.
+        """
+        policy = POLICY.replace("\tuser alice {", "\tuser bob {\n\t\tpassword login = clear bobpw\n\t\tpassword pap = login\n\t}\n\tuser alice {")
+        d = self.start_daemon(policy, udp=True)
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(self.welcome(c), [b"welcome"])
+        self.assertEqual(c.access_request("bob", "bobpw", message_authenticator=True).code_name, "Access-Accept")
+        d.reload(POLICY.replace('"welcome"', '"welcome back"'))
+        self.assertEqual(self.welcome(c), [b"welcome back"], "the client stayed with the old worker")
+        self.assertEqual(c.access_request("bob", "bobpw", message_authenticator=True).code_name, "Access-Reject")
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_plain_client_leaves_a_retired_worker(self):
+        """A worker that retires keeps no plain UDP client: the client goes on with another worker, and the old one exits."""
+        d = self.start_daemon("\tretire limit = 1\n" + POLICY, udp=True)
+        (old,) = d.workers()
+        d.baseline.forget(old)
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        deadline = time.monotonic() + 10.0
+        while alive(old) and time.monotonic() < deadline:
+            self.assertEqual(self.welcome(c), [b"welcome"])
+            select.select([], [], [], 0.2)
+        self.assertFalse(alive(old), "the retired worker still serves the client")
+        self.assertEqual(self.welcome(c), [b"welcome"])
+
+    def test_sighup_replaces_a_wildcard_listener(self):
+        """A new listener can bind the port of a UDP listener that the reload dropped.
+
+        The old worker kept its copy of the old listener while it lived, here for a TCP
+        connection, so the port stayed bound, and the listener of the reload failed to bind.
+        """
+        port = free_udp_port("0.0.0.0")
+        d = self.start_daemon(POLICY, spawnd="\tlisten { address = 0.0.0.0 port = %d protocol = UDP }\n" % port)
+        with radius.Client(("127.0.0.1", port), SECRET, source=NAS) as c:
+            self.assertEqual(self.welcome(c), [b"welcome"])
+        tcp = self.connect(daemon=d)
+        d.spawnd = "\tlisten { address = 127.0.0.1 port = %d protocol = UDP }\n" % port
+        d.reload()
+        # spawnd binds again while the old worker closes its copy; the client sends again, as a RADIUS client does
+        deadline, reply = time.monotonic() + 10.0, None
+        while reply is None and time.monotonic() < deadline:
+            with radius.Client(("127.0.0.1", port), SECRET, source=NAS, timeout=0.5) as c:
+                try:
+                    reply = self.welcome(c)
+                except (TimeoutError, ConnectionRefusedError):
+                    pass
+        self.assertEqual(reply, [b"welcome"], "no listener on the port after the reload")
+        self.assertFalse(tcp.closed(timeout=0.1))
+
+    def wildcard(self, any_address, address, source, policy=POLICY):
+        """Access-Request from source to address on a listener of any_address: the client takes only a reply from address."""
+        port = free_udp_port(any_address)
+        self.start_daemon(policy, spawnd="\tlisten { address = %s port = %d protocol = UDP }\n" % (any_address, port))
+        with radius.Client((address, port), SECRET, source=source) as c:
+            r = c.access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+
+    def test_wildcard_listener(self):
+        """The worker names the source address of the reply (IP_PKTINFO, IP_SENDSRCADDR); else the system picks one.
+
+        Linux picks 127.0.0.1 for a reply to 127.0.0.6, so the request goes to 127.0.0.2.
+        """
+        self.wildcard("0.0.0.0", "127.0.0.2", NAS)
+
+    @unittest.skipUnless(ipv6_available() and local_address(NAS6), "no local address %s (tests/loopback-aliases)" % NAS6)
+    def test_wildcard_listener_ipv6(self):
+        self.wildcard("::", "::1", NAS6, POLICY.replace("address = 127.0.0.6", "address = %s" % NAS6))
+
+    @unittest.skipUnless(LINUX and ipv6_available(), "IPv4 on an IPv6 socket")
+    def test_wildcard_ipv6_listener_with_ipv4(self):
+        self.wildcard("::", "127.0.0.2", NAS)
+
+    def test_wildcard_listener_one_client_two_addresses(self):
+        """One client port sends to two addresses of a wildcard listener: two clients, each reply from its address.
+
+        spawnd and the worker named a client by listener and peer only, so the second address got the
+        context of the first, and its reply came from the first address.
+        """
+        port = free_udp_port("0.0.0.0")
+        self.start_daemon(POLICY, spawnd="\tlisten { address = 0.0.0.0 port = %d protocol = UDP }\n" % port)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind((NAS, 0))
+            s.settimeout(5.0)
+            for address in ("127.0.0.2", "127.0.0.3", "127.0.0.2", "127.0.0.3"):
+                req = radius.Packet(radius.ACCESS_REQUEST)
+                req.attributes = [(radius.USER_NAME, b"alice"),
+                                  (radius.USER_PASSWORD, radius.encrypt_password("alicepw", SECRET, req.authenticator))]
+                s.sendto(req.encode(SECRET, message_authenticator=True), (address, port))
+                data, source = s.recvfrom(65535)
+                self.assertEqual(source, (address, port), "the reply to %s" % address)
+                r = radius.Packet.decode(data)
+                self.assertEqual((r.code_name, r.identifier), ("Access-Accept", req.identifier))
+
+
+@unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+class UdpUsers(DaemonTestCase):
+    """spawnd counts a UDP client as one user while the worker has its context.
+
+    The worker tells spawnd when a context ends, and when it drops a
+    datagram of a client it has no context for. A dropped datagram must not
+    use up "users max", and must not end the least recently used context.
+    """
+
+    CONFIG = None
+
+    def wait_read(self, d, port=None):
+        """Wait until spawnd has read the datagrams on port (by default udp_port): it handled each one when it read it."""
+        deadline = time.monotonic() + 5.0
+        while d.udp_queued(port) and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(d.udp_queued(port), 0, "spawnd did not read the datagrams")
+
+    def wait_users(self, d, n, datagrams_sent=False):
+        """datagrams_sent: first wait until spawnd has read those on udp_port, so that the count is not the one before them."""
+        if datagrams_sent:
+            self.wait_read(d)
+        deadline = time.monotonic() + 5.0
+        while d.users() != n and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(d.users(), n, "users of spawnd")
+
+    def bad(self, d):
+        """From a new source port, a datagram whose RADIUS length field is not its size."""
+        req = radius.Packet(radius.ACCESS_REQUEST, attributes=[(radius.USER_NAME, b"alice")])
+        self.radius(SECRET, daemon=d, source=NAS).send_raw(req.encode(length=200))
+
+    def test_requests_of_one_client_are_one_user(self):
+        d = self.start_daemon(POLICY, udp=True)
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        for _ in range(5):
+            self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        self.wait_users(d, 1)
+
+    def test_bad_datagrams_do_not_use_up_the_user_limit(self):
+        d = self.start_daemon(POLICY, udp=True, spawnd="\tspawn { users max = 4 }\n")
+        for _ in range(6):
+            self.bad(d)
+        self.wait_users(d, 0, datagrams_sent=True)
+        # at the limit spawnd drops the datagram of a new client: the client sends it again, as a RADIUS client does
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        r = c.retransmit(c.pap_request("alice", "alicepw"), message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_lost_queued_datagram_keeps_the_listener_and_the_count(self):
+        """A queued datagram that does not fit the socket to the worker is lost, and with it nothing else.
+
+        It took the descriptor of its listener, the first one of listener b for this worker, and
+        spawnd took that as passed: the worker never got the listener, and dropped every later
+        datagram of b. And spawnd kept the new client of the lost datagram as a user.
+        """
+        d = self.start_daemon(POLICY, udp=True, listen={"b": "protocol = UDP"}, spawnd="\ttcp bufsize = 4096\n")
+        a = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(a.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        (worker,) = d.workers()
+        os.kill(worker, signal.SIGSTOP)
+        self.addCleanup(os.kill, worker, signal.SIGCONT)
+        deadline = time.monotonic() + 5.0
+        while proc_stat(worker)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        for _ in range(50):
+            a.send_raw(b"x" * 100)  # the socket to the worker is full: these wait in spawnd
+        # the datagram of b must find the queue, not try the socket first: it does not fit, and is lost at once
+        self.wait_read(d)
+        self.radius(SECRET, daemon=d, listener="b", source=NAS).send_raw(b"x" * 12000)
+        self.wait_read(d, d.ports["b"])
+        self.wait_users(d, 2)
+        os.kill(worker, signal.SIGCONT)
+        self.wait_users(d, 1)
+        b = self.radius(SECRET, daemon=d, listener="b", source=NAS)
+        r = b.retransmit(b.pap_request("alice", "alicepw"), message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_lost_queued_datagram_of_a_retired_worker(self):
+        """A queued first datagram of a DTLS client is lost after its worker retired: spawnd frees the worker once.
+
+        The client was the last one of the retired worker, so its end freed the worker, and the
+        flush of the queue went on with it (use after free; the address sanitizer shows it).
+        """
+        d = self.start_daemon("\tretire limit = 2\n" + POLICY, udp=True, spawnd="\ttcp bufsize = 4096\n")
+        a = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(a.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+        (worker,) = d.workers()
+        d.baseline.forget(worker)  # it retires and exits
+        os.kill(worker, signal.SIGSTOP)
+        self.addCleanup(os.kill, worker, signal.SIGCONT)
+        deadline = time.monotonic() + 5.0
+        while proc_stat(worker)[0] != "T" and time.monotonic() < deadline:
+            select.select([], [], [], 0.02)
+        b = self.radius(SECRET, daemon=d, source=NAS)
+        b.send_raw(b.pap_request("alice", "alicepw").encode(b.secret, message_authenticator=True))  # the second context: it retires
+        for _ in range(200):
+            a.send_raw(b"x" * 100)
+        # the first datagram of a new client, a DTLS record: it stays with the retired worker, and does not fit its socket
+        self.radius(SECRET, daemon=d, source=NAS).send_raw(bytes([22, 0xfe, 0xfd]) + b"x" * 12000)
+        self.wait_users(d, 3, datagrams_sent=True)
+        os.kill(worker, signal.SIGCONT)
+        deadline = time.monotonic() + 10.0
+        while alive(worker) and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertFalse(alive(worker), "the retired worker did not exit")
+        c = self.radius(SECRET, daemon=d, source=NAS)
+        self.assertEqual(c.retransmit(c.pap_request("alice", "alicepw"), message_authenticator=True).code_name, "Access-Accept")
+
+    @unittest.skipUnless(LINUX, "processes through /proc")
+    def test_done_messages_wait_for_spawnd(self):
+        """A message of the worker to spawnd (SCM_DONE, SCM_UDPDONE) waits when the socket is full, and is not lost.
+
+        The socket of the worker does not block. A message that did not fit was lost, and spawnd
+        counted its user (or kept its UDP client) for ever. Here 1000 connections end while
+        spawnd is stopped.
+        """
+        d = self.start_daemon(POLICY, spawnd="\tspawn { users max = 2000 }\n")
+        (worker,) = d.workers()
+        conns = []
+        for _ in range(1000):
+            conns.append(socket.create_connection(d.addr))
+            self.addCleanup(conns[-1].close)
+        deadline = time.monotonic() + 10.0
+        while d.users(worker) < 1000 and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(d.users(worker), 1000)
+        os.kill(d.pid, signal.SIGSTOP)
+        self.addCleanup(os.kill, d.pid, signal.SIGCONT)
+        for c in conns:
+            c.close()
+        while d.users(worker) and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(d.users(worker), 0)
+        os.kill(d.pid, signal.SIGCONT)
+        self.wait_users(d, 0)
+
+    def assertLruConnectionKept(self, body, datagram):
+        """At "last-recently-used limit", users_inc() ends the oldest context to make room."""
+        d = self.start_daemon(body + "\tlast-recently-used limit = 1\n", udp=True)
+        c = self.connect(daemon=d)
+        self.wait_users(d, 1)  # spawnd passed the connection: the worker reads it before the datagram
+        self.radius(SECRET, daemon=d, source=NAS).send_raw(datagram)
+        self.wait_users(d, 1, datagrams_sent=True)
+        self.assertFalse(c.closed(timeout=1.0), "a dropped datagram ended the TACACS+ connection")
+        return c
+
+    def test_bad_datagram_keeps_the_least_recently_used_connection(self):
+        c = self.assertLruConnectionKept(POLICY, radius.Packet(radius.ACCESS_REQUEST).encode(length=200))
+        self.assertTrue(c.pap("alice", "alicepw").ok)
+
+    def test_datagram_without_a_dictionary_keeps_the_least_recently_used_connection(self):
+        self.assertLruConnectionKept("", radius.Packet(radius.ACCESS_REQUEST).encode())
 
 
 class Pap(DaemonTestCase):

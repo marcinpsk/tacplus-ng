@@ -34,9 +34,10 @@ scratch directory, the way tac_plus-ng/sample/democa does it with make
 (root CA -> server and client certificates). EC P-256 keys, because RSA key
 generation is slow on a loaded host.
 
-The standard library ssl module has no TLS-PSK client before Python 3.13,
-so PskSocket runs "openssl s_client -psk" and talks through its pipes; it
-has the few socket methods tacacs.Connection uses.
+The standard library ssl module has no TLS-PSK client before Python 3.13
+and no DTLS, so PskSocket and DtlsSocket run "openssl s_client" and talk
+through its pipes; they have the few socket methods that
+tacacs.Connection and radius.Client use.
 
 openssl_available() lets a test skip when the command is missing.
 """
@@ -167,8 +168,12 @@ def self_signed(directory, name, subject):
     return crt, key
 
 
-class PskSocket:
-    """TLS 1.3 with a pre-shared key through "openssl s_client", for tacacs.Connection(sock=...).
+def _hostport(host, port):
+    return "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
+
+
+class SClient:
+    """A connection through "openssl s_client" with the options in args.
 
     -quiet: no session information on stdout, only what the server sends;
     -nocommands: no command letters in what we send. If the handshake fails,
@@ -176,14 +181,12 @@ class PskSocket:
     closed. MSG_PEEK is emulated with a buffer.
     """
 
-    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256"):
-        host, port = addr[0], addr[1]
-        target = "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
+    def __init__(self, addr, args, timeout=5.0):
         self.timeout = timeout
         self.peeked = b""
         self.err = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(["openssl", "s_client", "-connect", target, "-tls1_3", "-ciphersuites", cipher,
-                                      "-psk_identity", identity, "-psk", key_hex, "-quiet", "-nocommands"],
+        self.proc = subprocess.Popen(["openssl", "s_client", "-connect", _hostport(addr[0], addr[1])] + list(args)
+                                     + ["-quiet", "-nocommands"],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
                                      start_new_session=True)
         self.out = self.proc.stdout.fileno()
@@ -229,3 +232,27 @@ class PskSocket:
             except OSError:
                 pass
         self.err.close()
+
+
+class PskSocket(SClient):
+    """TLS 1.3 with a pre-shared key through "openssl s_client", for tacacs.Connection(sock=...)."""
+
+    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256"):
+        super().__init__(addr, ["-tls1_3", "-ciphersuites", cipher, "-psk_identity", identity, "-psk", key_hex],
+                         timeout)
+
+
+class DtlsSocket(SClient):
+    """DTLS 1.2 through "openssl s_client", for radius.Client(sock=...).
+
+    cert = (certificate, key) to present, ca the file of the CA to trust,
+    source the local address to send from. s_client sends what it reads
+    from its input in one go as one DTLS record, so sendall() must get one
+    RADIUS packet at a time.
+    """
+
+    def __init__(self, addr, cert, ca, source=None, timeout=5.0):
+        args = ["-dtls1_2", "-cert", cert[0], "-key", cert[1], "-CAfile", ca]
+        if source:
+            args += ["-bind", _hostport(source, 0)]
+        super().__init__(addr, args, timeout)

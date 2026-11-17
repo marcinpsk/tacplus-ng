@@ -64,12 +64,20 @@ static void periodics(struct spawnd_context *ctx, int cur __attribute__((unused)
 
 	if (i < common_data.servers_cur)
 	    spawnd_cleanup_internal(spawnd_data.server_arr[i], spawnd_data.server_arr[i]->fn);
+	else
+	    for (i = 0; i < spawnd_data.retired_cur; i++)
+		if (spawnd_data.retired_arr[i]->pid == deadpid) {
+		    spawnd_cleanup_internal(spawnd_data.retired_arr[i], spawnd_data.retired_arr[i]->fn);
+		    break;
+		}
     }
 
     if (spawnd_data.abandon) {
 	spawnd_data.abandon = 0;
 	while (common_data.servers_cur)
 	    spawnd_cleanup_internal(spawnd_data.server_arr[0], spawnd_data.server_arr[0]->fn);
+	while (spawnd_data.retired_cur)
+	    spawnd_cleanup_internal(spawnd_data.retired_arr[0], spawnd_data.retired_arr[0]->fn);
     }
 
     if (io_now.tv_sec & 7) {
@@ -93,9 +101,10 @@ static void periodics(struct spawnd_context *ctx, int cur __attribute__((unused)
 	    if (!spawnd_data.server_arr[i]->use) {
 		if (!spawnd_data.server_arr[i]->dying) {
 		    struct scm_data sd = {.type = SCM_MAY_DIE };
-		    spawnd_data.server_arr[i]->dying = 1;
 		    Debug((DEBUG_PROC, "server %d may die\n", i));
-		    common_data.scm_send_msg(spawnd_data.server_arr[i]->fn, &sd, -1);
+		    // a full socket: the next periodics() tries again
+		    if (!common_data.scm_send_msg(spawnd_data.server_arr[i]->fn, &sd, -1))
+			spawnd_data.server_arr[i]->dying = 1;
 		}
 		servers_count--;
 	    }
@@ -195,6 +204,24 @@ struct spawnd_context *spawnd_new_context(struct io_context *io)
     return c;
 }
 
+// A random secret for all workers of this image, in the environment that they get (DTLS cookies of tac_plus-ng).
+static void spawnd_secret(void)
+{
+    u_char r[SCM_SECRET_LEN];
+    char hex[2 * SCM_SECRET_LEN + 1];
+    int fd = open("/dev/urandom", O_RDONLY);
+    ssize_t len = (fd < 0) ? -1 : read(fd, r, sizeof(r));
+    if (fd > -1)
+	close(fd);
+    if (len != (ssize_t) sizeof(r)) {
+	logerr("/dev/urandom: no secret for the workers (%s:%d)", __FILE__, __LINE__);
+	return;
+    }
+    for (size_t i = 0; i < sizeof(r); i++)
+	snprintf(hex + 2 * i, 3, "%02x", r[i]);
+    setenv(SCM_SECRET, hex, 1);
+}
+
 int spawnd_note_listener(sockaddr_union *sa __attribute__((unused)), void *data)
 {
     spawnd_data.listener_arr = Xrealloc(spawnd_data.listener_arr, (spawnd_data.listeners_max + 1) * sizeof(struct spawnd_context *));
@@ -242,6 +269,7 @@ static void get_inherited(void)
     char *e = getenv(LISTEN_FDS);
     if (!e)
 	return;
+    spawnd_data.restarted = 1;	// also after a second SIGHUP, before an old worker released a port
     while (*e) {
 	char *t;
 	long fd = strtol(e, &t, 10);
@@ -328,7 +356,7 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 
 	cur = su_socket(ctx->sa.sa.sa_family, ctx->socktype, ctx->protocol);
 	if (ctx->socktype == SOCK_DGRAM) {
-	    // spawnd_accepted() binds the reply socket to the destination address of each datagram
+	    // the worker replies from the destination address of each datagram
 	    int one = 1;
 #if defined(IP_PKTINFO)
 	    setsockopt(cur, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one));
@@ -338,10 +366,6 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 #if defined(IPV6_RECVPKTINFO)
 	    if (ctx->sa.sa.sa_family == AF_INET6)
 		setsockopt(cur, IPPROTO_IPV6, IPV6_RECVPKTINFO, &one, sizeof(one));
-#endif
-#if defined(SO_REUSEPORT) && !defined(__linux__)
-	    // the BSDs bind the reply socket to this address and port only if both sockets have SO_REUSEPORT
-	    setsockopt(cur, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
 	}
 	fcntl(cur, F_SETFD, fcntl(cur, F_GETFD, 0) | FD_CLOEXEC);
@@ -387,7 +411,23 @@ void spawnd_bind_listener(struct spawnd_context *ctx, int cur)
 	}
 #endif
 	ctx->port = su_get_port(&ctx->sa);
-	if (su_bind(cur, &ctx->sa)) {
+	// no SO_REUSEADDR on a UDP listener: another socket could bind its port and get its datagrams
+	if ((ctx->socktype == SOCK_DGRAM) ? bind(cur, &ctx->sa.sa, su_len(&ctx->sa)) : su_bind(cur, &ctx->sa)) {
+	    // an old worker holds a copy of a dropped UDP listener until it reads SCM_MAY_DIE or sees spawnd gone
+	    if (ctx->socktype == SOCK_DGRAM && errno == EADDRINUSE && spawnd_data.restarted) {
+		int fast = ctx->bind_tries < 50;	// every 0.1 s for 5 s, then every second without a limit
+		if (fast)
+		    ctx->bind_tries++;
+		else if (ctx->bind_tries == 50) {
+		    ctx->bind_tries++;
+		    logmsg("bind to [%s]:%d failed: the address is in use, maybe by an old worker process. Will retry every second.",
+			   su_ntoa(&ctx->sa, buf, (socklen_t) sizeof(buf)), su_get_port(&ctx->sa));
+		}
+		close(cur);
+		io_sched_add(common_data.io, ctx, (void *) spawnd_bind_listener, (time_t) (fast ? 0 : 1), (suseconds_t) (fast ? 100000 : 0));
+		DebugOut(DEBUG_NET);
+		return;
+	    }
 	    if (!ctx->logged_retry)
 		logerr("bind (%s:%d)", __FILE__, __LINE__);
 #ifdef AF_UNIX
@@ -709,6 +749,8 @@ int spawnd_main(int argc, char **argv, char **envp, char *id)
 	spawnd_data.listener_arr[i]->io = common_data.io;
 	spawnd_bind_listener(spawnd_data.listener_arr[i], spawnd_data.listener_arr[i]->fn);
     }
+
+    spawnd_secret();
 
 #ifdef BROKEN_FD_PASSING
     common_data.singleprocess = 1;

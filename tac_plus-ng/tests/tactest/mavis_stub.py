@@ -52,6 +52,8 @@ State, all keys optional:
                 "<user>:<TYPE>", "<user>", "<TYPE>", "*" decides, TYPE
                 being the MAVIS request type (AUTH, INFO, CHPW, ...)
   message       the user response (AV_A_USER_RESPONSE) of every answer
+  delay         {TYPE: seconds}: wait that long before the answer to a
+                request of that type, as a slow backend does
   exit          exit without an answer on the n-th request of a child
   quit          exit after answering the n-th request of a child, once the
                 test released that request (see release)
@@ -220,6 +222,9 @@ def serve(libdir):
                 d.set_sshpubkey(known["sshkey"])
             d.password_mustchange(bool(known.get("mustchange")))
         verdict, code = answers[result]
+        delay = (state.get("delay") or {}).get(tactype)
+        if delay:
+            time.sleep(delay)
         d.write(verdict, code, state.get("message"))
         if state.get("double_write"):
             _wait_release(state_path, n)

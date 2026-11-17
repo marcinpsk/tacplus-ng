@@ -39,11 +39,19 @@ static void wait_for_servers(void)
 #endif
 }
 
-static void catchhup(int i __attribute__((unused)))
+// All workers, also retired ones, may die: they end their UDP contexts, DTLS sessions too. A worker whose socket is full sees spawnd gone.
+static void may_die(void)
 {
     struct scm_data sd = {.type = SCM_MAY_DIE };
     for (int j = 0; j < common_data.servers_cur; j++)
 	common_data.scm_send_msg(spawnd_data.server_arr[j]->fn, &sd, -1);
+    for (int j = 0; j < spawnd_data.retired_cur; j++)
+	common_data.scm_send_msg(spawnd_data.retired_arr[j]->fn, &sd, -1);
+}
+
+static void catchhup(int i __attribute__((unused)))
+{
+    may_die();
     wait_for_servers();
 
     logmsg("SIGHUP: restarting");
@@ -54,9 +62,7 @@ static void catchhup(int i __attribute__((unused)))
 
 static void catchterm(int i __attribute__((unused)))
 {
-    struct scm_data sd = {.type = SCM_MAY_DIE };
-    for (int j = 0; j < common_data.servers_cur; j++)
-	common_data.scm_send_msg(spawnd_data.server_arr[j]->fn, &sd, -1);
+    may_die();
     wait_for_servers();
 
     logmsg("SIGTERM: exiting");

@@ -34,12 +34,15 @@ openssl command or in a build without OpenSSL.
 """
 
 import os
+import select
+import signal
 import socket
 import ssl
+import threading
 import time
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, cpu_seconds, features, radius, tacacs, tls
+from tactest import LINUX, SOURCE, DaemonTestCase, Stub, cpu_seconds, features, radius, tacacs, tls
 
 TLS_REALM = """
 	tls cert-file = "%(server_crt)s"
@@ -600,6 +603,274 @@ class RadiusOverTls(TlsTestCase):
         except (TimeoutError, ConnectionError, ssl.SSLError):
             return
         self.assertNotEqual(r.code_name, "Access-Accept", r)
+
+
+CLASS = 25     # RADIUS attribute "Class"; the daemon ignores it in a request
+
+
+class DatagramRelay(threading.Thread):
+    """Forwards the datagrams between one client and addr, and counts those of the client with DTLS application data."""
+
+    def __init__(self, addr):
+        super().__init__(daemon=True)
+        self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.front.bind(("127.0.0.1", 0))
+        self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.back.connect(addr)
+        self.addr, self.client, self.application_data = self.front.getsockname(), None, 0
+        self.sent = threading.Event()  # a datagram with application data went to addr
+        self.stopping = False
+        self.start()
+
+    def run(self):
+        while not self.stopping:
+            for s in select.select([self.front, self.back], [], [], 0.05)[0]:
+                try:
+                    data, peer = s.recvfrom(65535)
+                    if s is self.back:
+                        if self.client:
+                            self.front.sendto(data, self.client)
+                        continue
+                    self.client = peer
+                    self.back.send(data)
+                except OSError:
+                    continue
+                if data[:1] == b"\x17":  # the first record of the datagram is application data
+                    self.application_data += 1
+                    self.sent.set()
+
+    def close(self):
+        self.stopping = True
+        self.join()
+        self.front.close()
+        self.back.close()
+
+
+class RadiusOverDtls(TlsTestCase):
+    """RADIUS over DTLS (RFC 7360) on a UDP listener with "tls = yes".
+
+    The DTLS session lives in the context of the worker: every datagram of
+    the client must reach that context, and every reply must leave from the
+    listener address. The worker dropped the first datagram of a client
+    when its bytes 2 and 3, read as a RADIUS length, were not its size, as
+    in every DTLS record.
+    """
+
+    LISTEN = {"dtls": "protocol = UDP tls = yes"}
+    BODY = TLS_REALM + DEVICES + RADSEC
+
+    def dtls(self, client="certnas", daemon=None, **kw):
+        d = daemon or self.daemon
+        sock = tls.DtlsSocket((d.address, d.ports["dtls"]), self.certs[client], self.ca.cert, **kw)
+        return self.radius("radius/dtls", daemon=d, sock=sock, timeout=10.0)
+
+    def test_access_accept(self):
+        r = self.dtls().access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
+        self.assertTrue(r.message_authenticator, "no valid Message-Authenticator in the reply")
+
+    def test_access_reject(self):
+        self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
+
+    def test_largest_radius_packet(self):
+        """A RADIUS packet of 4096 bytes (RFC 2865 3) needs a DTLS record of more than 4096 bytes; spawnd cut it there."""
+        c = self.dtls()
+        req = c.pap_request("alice", "alicepw")
+        remaining = 4096 - len(req.encode(c.secret))
+        while remaining:
+            size = min(255, remaining)
+            if remaining - size == 1:
+                size -= 2
+            req.attributes.append((CLASS, b"x" * (size - 2)))
+            remaining -= size
+        self.assertEqual(len(req.encode(c.secret)), 4096)
+        self.assertEqual(c.exchange(req).code_name, "Access-Accept")
+
+    def replies(self, d, datagram, wait=1.5):
+        """Send datagram to the DTLS listener from a new port; the datagrams that come back within wait seconds."""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((d.address, d.ports["dtls"]))
+            s.send(datagram)
+            out, deadline = [], time.monotonic() + wait
+            while select.select([s], [], [], max(0.0, deadline - time.monotonic()))[0]:
+                out.append(s.recv(65535))
+            return out
+
+    def assertNoUser(self, d):
+        deadline = time.monotonic() + 3.0
+        while d.users() and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(d.users(), 0, "users of spawnd")
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_hello_without_the_cookie_gets_one_small_reply(self):
+        """RFC 6347 4.2.1: a ClientHello without the cookie gets a HelloVerifyRequest, and nothing stays.
+
+        The worker made a context and sent its first flight (the certificate too) to a source
+        that it did not know to be real, and the context used a user slot until it timed out.
+        """
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.settimeout(5.0)
+            client = tls.DtlsSocket(s.getsockname(), self.certs["certnas"], self.ca.cert)
+            try:
+                hello = s.recv(65535)  # the first ClientHello of s_client, which never gets an answer
+            finally:
+                client.close()
+        self.assertEqual(hello[:1], b"\x16")
+        out = self.replies(d, hello)
+        self.assertEqual([(len(r), r[13]) for r in out], [(60, 3)], "a HelloVerifyRequest of 60 bytes, the ClientHello had %d" % len(hello))
+        self.assertNoUser(d)
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_application_data_of_a_new_client_gets_nothing(self):
+        """A new DTLS client starts with a ClientHello: a record of application data gets no context and no reply."""
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        record = bytes([23, 0xfe, 0xfd, 0, 1]) + bytes(6) + (48).to_bytes(2, "big") + os.urandom(48)
+        self.assertEqual([len(r) for r in self.replies(d, record)], [])
+        self.assertNoUser(d)
+
+    def test_requests_during_the_host_lookup(self):
+        """Requests that come while MAVIS looks up the device after the handshake all get a reply.
+
+        They wait in the read BIO, as the context does not read during the lookup. After it, the
+        worker stopped when the read BIO was empty, but OpenSSL had read both datagrams of the
+        client and held the second record. The requests go in two datagrams through a relay.
+        """
+        body = (self.BODY % self.paths).replace('welcome banner = "certnas\\n"', 'welcome banner = "certnas\\n"\n\t\tmavis backend = yes')
+        self.assertIn("mavis backend", body)
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + body, listen=self.LISTEN)
+        Stub(d).set(result={"HOST": "ACK"}, delay={"HOST": 0.5})
+        relay = DatagramRelay((d.address, d.ports["dtls"]))
+        self.addCleanup(relay.close)
+        c = self.radius("radius/dtls", daemon=d, sock=tls.DtlsSocket(relay.addr, self.certs["certnas"], self.ca.cert), timeout=5.0)
+        first, second = c.pap_request("alice", "alicepw"), c.pap_request("alice", "alicepw")
+        second.identifier = (first.identifier + 1) % 256
+        c.send_raw(first.encode(c.secret))  # s_client sends it after the handshake, while the lookup waits
+        self.assertTrue(relay.sent.wait(5.0), "no application data from the client")
+        c.send_raw(second.encode(c.secret))  # a datagram of its own: s_client read the first request alone
+        for n, r in enumerate((first, second), 1):
+            try:
+                reply = c.reply(r)
+            except TimeoutError:
+                self.fail("no reply to request %d of 2 (%d datagrams of application data)" % (n, relay.application_data))
+            self.assertEqual((reply.code_name, reply.get(radius.REPLY_MESSAGE)), ("Access-Accept", [b"certnas"]))
+        self.assertEqual(relay.application_data, 2)
+        self.assertEqual(Stub(d).count("HOST"), 1)
+
+    def test_several_requests_in_one_session(self):
+        """Each request after the first is DTLS application data: only the context with the session can read it."""
+        c = self.dtls()
+        for password, code in (("alicepw", "Access-Accept"), ("wrong", "Access-Reject"), ("alicepw", "Access-Accept")):
+            self.assertEqual(c.access_request("alice", password).code_name, code)
+
+    def assertSessionWorks(self, c, rounds=3):
+        for _ in range(rounds):
+            self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+
+    def test_session_after_the_retire_limit(self):
+        """A worker that retires (SCM_DYING) keeps the DTLS sessions it has, as it keeps its TCP connections.
+
+        spawnd forgot the clients of the worker at once, and their next records went to a new worker,
+        which has no session for them.
+        """
+        d = self.start_daemon("\tretire limit = 1\n" + self.BODY % self.paths, listen=self.LISTEN)
+        self.assertSessionWorks(self.dtls(daemon=d))
+
+    def test_session_after_the_retire_timeout(self):
+        """At "retire timeout" the worker closed its socket to spawnd itself; it keeps it while it has UDP contexts."""
+        d = self.start_daemon("\tretire timeout = 1\n" + self.BODY % self.paths, listen=self.LISTEN)
+        c = self.dtls(daemon=d)
+        self.assertSessionWorks(c, 1)
+        time.sleep(4)  # the worker checks the timeout every 2 s
+        self.assertSessionWorks(c)
+
+    def test_session_ends_at_sighup(self):
+        """SIGHUP ends a DTLS session: no request runs with the policy before the reload, and a new session gets the new one.
+
+        The old worker gets SCM_MAY_DIE, ends its UDP contexts with a DTLS close, and exits when idle.
+        """
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        c = self.dtls(daemon=d)
+        self.assertEqual(c.access_request("alice", "alicepw").get(radius.REPLY_MESSAGE), [b"certnas"])
+        for pid in d.workers():
+            d.baseline.forget(pid)  # it exits after the reload
+        d.reload((self.BODY % self.paths).replace('"certnas"', '"certnas again"'))
+        c.timeout = 2.0
+        c.sock.settimeout(2.0)
+        with self.assertRaises((TimeoutError, ConnectionError, OSError), msg="the session went on after the reload"):
+            c.access_request("alice", "alicepw")
+        r = self.dtls(daemon=d).access_request("alice", "alicepw")
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas again"], r)
+
+    def assertSessionEnds(self, d, c, since, deadline=4.0):
+        """A request every 0.5 s, each with 1 s to answer: answered until shortly before the deadline, not long after it.
+
+        The answers before the deadline set the lower bound, so a session that ends without a word
+        right after the retirement does not pass on the receive timeout.
+        """
+        c.timeout = 1.0
+        c.sock.settimeout(1.0)
+        answered, ended = None, None
+        while ended is None and time.monotonic() < since + 15.0:
+            try:
+                self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+                answered = time.monotonic() - since
+            except (TimeoutError, ConnectionError, OSError):
+                ended = time.monotonic() - since
+            time.sleep(0.5)
+        self.assertIsNotNone(ended, "the session on the old worker did not end")
+        self.assertIsNotNone(answered, "the session on the old worker got no answer after the retirement")
+        self.assertGreater(answered, deadline - 2.0, "the session ended %.1f s before the deadline" % (deadline - answered))
+        self.assertLess(ended, deadline + 3.0, "the session ended %.1f s after the deadline" % (ended - deadline))
+        self.assertSessionWorks(self.dtls(daemon=d))
+
+    def test_session_ends_at_the_deadline_after_the_retire_limit(self):
+        d = self.start_daemon("\tretire limit = 1\n\tstateless timeout = 4\n" + self.BODY % self.paths, listen=self.LISTEN)
+        for pid in d.workers():
+            d.baseline.forget(pid)
+        since = time.monotonic()
+        c = self.dtls(daemon=d)
+        self.assertSessionWorks(c, 1)
+        self.assertSessionEnds(d, c, since)
+
+    @unittest.skipUnless(LINUX, "processes and descriptors through /proc")
+    def test_dead_retired_worker_is_forgotten(self):
+        """spawnd finds a retired worker that exited with waitpid(), as it finds the others.
+
+        A socket pair of datagrams tells nothing when its other end closes, and the waitpid()
+        loop looked only at the workers that were not retired: without a datagram of a client
+        spawnd kept the socket, the context and the clients of a retired worker that was gone.
+        """
+        d = self.start_daemon("\tretire limit = 1\n" + self.BODY % self.paths, listen=self.LISTEN)
+        (old,) = d.workers()
+        d.baseline.forget(old)
+        self.assertSessionWorks(self.dtls(daemon=d), 1)
+        fds = lambda: len(os.listdir("/proc/%d/fd" % d.pid))
+        before = fds()
+        os.kill(old, signal.SIGKILL)
+        deadline = time.monotonic() + 5.0
+        while fds() >= before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(fds(), before - 1, "spawnd keeps the socket to the dead worker")
+
+    def test_two_workers(self):
+        """Several clients over DTLS and over plain UDP to two workers: each datagram goes to the worker of its client."""
+        d = self.start_daemon(self.BODY.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") % self.paths,
+                              listen=self.LISTEN, udp=True, spawnd="\tspawn { instances min = 2 instances max = 2 }\n")
+        if LINUX:
+            self.assertEqual(len(d.workers()), 2)
+        sessions = [self.dtls(daemon=d) for _ in range(4)]
+        plain = [self.radius("radsecret", daemon=d, source="127.0.0.9") for _ in range(4)]
+        for _ in range(3):
+            for c in sessions:
+                self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+            for c in plain:
+                self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name,
+                                 "Access-Accept")
+
 
 
 @unittest.skipUnless(LINUX, "CPU time from /proc")
