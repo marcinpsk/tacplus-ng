@@ -6730,6 +6730,10 @@ static SSL_CTX *ssl_init(struct realm *r, int dtls, int use_tls_psk)
 	    SSL_CTX_set_tlsext_servername_callback(ctx, sni_cb);
     }
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+#ifndef OPENSSL_IS_BORINGSSL
+    if (dtls)
+	dtls_cookie_callbacks(ctx);
+#endif
 
     char *sslkeylogfile = getenv("SSLKEYLOGFILE");
     if (sslkeylogfile) {

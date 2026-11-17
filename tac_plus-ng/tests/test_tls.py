@@ -34,13 +34,15 @@ openssl command or in a build without OpenSSL.
 """
 
 import os
+import select
 import socket
 import ssl
 import struct
+import threading
 import time
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, cpu_seconds, features, radius, tacacs, tls
+from tactest import LINUX, SOURCE, DaemonTestCase, Stub, cpu_seconds, features, radius, tacacs, tls
 
 TLS_REALM = """
 	tls cert-file = "%(server_crt)s"
@@ -643,8 +645,56 @@ class ListenerAaaProtocol(TlsTestCase):
         self.assertRefused(lambda: self.connect_tls(listener="radius-tls"))
 
 
+CLASS = 25     # RADIUS attribute "Class"; the daemon ignores it in a request
+
+
+class DatagramRelay(threading.Thread):
+    """Forwards the datagrams between one client and addr, and counts those of the client with DTLS application data."""
+
+    def __init__(self, addr):
+        super().__init__(daemon=True)
+        self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.front.bind(("127.0.0.1", 0))
+        self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.back.connect(addr)
+        self.addr, self.client, self.application_data = self.front.getsockname(), None, 0
+        self.sent = threading.Event()  # a datagram with application data went to addr
+        self.stopping = False
+        self.start()
+
+    def run(self):
+        while not self.stopping:
+            for s in select.select([self.front, self.back], [], [], 0.05)[0]:
+                try:
+                    data, peer = s.recvfrom(65535)
+                    if s is self.back:
+                        if self.client:
+                            self.front.sendto(data, self.client)
+                        continue
+                    self.client = peer
+                    self.back.send(data)
+                except OSError:
+                    continue
+                if data[:1] == b"\x17":  # the first record of the datagram is application data
+                    self.application_data += 1
+                    self.sent.set()
+
+    def close(self):
+        self.stopping = True
+        self.join()
+        self.front.close()
+        self.back.close()
+
+
 class RadiusOverDtls(TlsTestCase):
-    """RADIUS over DTLS (RFC 7360) on a "protocol = UDP tls = yes" listener, through "openssl s_client -dtls1_2"."""
+    """RADIUS over DTLS (RFC 7360) on a UDP listener with "tls = yes", through "openssl s_client -dtls1_2".
+
+    The DTLS session lives in the context of the worker: every datagram of
+    the client must reach that context, and every reply must leave from the
+    listener address. The worker dropped the first datagram of a client
+    when its bytes 2 and 3, read as a RADIUS length, were not its size, as
+    in every DTLS record.
+    """
 
     UDP = True
     LISTEN = {"dtls": "protocol = UDP tls = yes"}
@@ -656,24 +706,222 @@ class RadiusOverDtls(TlsTestCase):
             raise unittest.SkipTest("openssl s_client has no DTLS")
         super().setUpClass()
 
-    def dtls(self, client="certnas"):
-        sock = tls.DtlsSocket((self.daemon.address, self.daemon.ports["dtls"]), self.ca.cert, self.certs[client],
-                              timeout=10.0)
-        return self.radius("radius/dtls", listener="dtls", sock=sock, timeout=10.0)
+    def dtls(self, client="certnas", daemon=None, **kw):
+        d = daemon or self.daemon
+        kw.setdefault("timeout", 10.0)
+        sock = tls.DtlsSocket((d.address, d.ports["dtls"]), self.certs[client], self.ca.cert, **kw)
+        return self.radius("radius/dtls", daemon=d, sock=sock, timeout=10.0)
 
     def test_access_accept(self):
         r = self.dtls().access_request("alice", "alicepw")
         self.assertEqual(r.code_name, "Access-Accept", r)
         self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
+        self.assertTrue(r.message_authenticator, "no valid Message-Authenticator in the reply")
 
     def test_access_reject(self):
         self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
 
+    def test_largest_radius_packet(self):
+        """A RADIUS packet of 4096 bytes (RFC 2865 3) needs a DTLS record of more than 4096 bytes; spawnd cut it there."""
+        c = self.dtls()
+        req = c.pap_request("alice", "alicepw")
+        remaining = 4096 - len(req.encode(c.secret))
+        while remaining:
+            size = min(255, remaining)
+            if remaining - size == 1:
+                size -= 2
+            req.attributes.append((CLASS, b"x" * (size - 2)))
+            remaining -= size
+        self.assertEqual(len(req.encode(c.secret)), 4096)
+        self.assertEqual(c.exchange(req).code_name, "Access-Accept")
+
+    def replies(self, d, datagram, wait=1.5):
+        """Send datagram to the DTLS listener from a new port; the datagrams that come back within wait seconds."""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((d.address, d.ports["dtls"]))
+            s.send(datagram)
+            out, deadline = [], time.monotonic() + wait
+            while select.select([s], [], [], max(0.0, deadline - time.monotonic()))[0]:
+                out.append(s.recv(65535))
+            return out
+
+    def assertNoUser(self, d):
+        deadline = time.monotonic() + 3.0
+        while d.users() and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(d.users(), 0, "users of spawnd")
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_hello_without_the_cookie_gets_one_small_reply(self):
+        """RFC 6347 4.2.1: a ClientHello without the cookie gets a HelloVerifyRequest, and nothing stays.
+
+        The worker made a context and sent its first flight (the certificate too) to a source
+        that it did not know to be real, and the context used a user slot until it timed out.
+        """
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.settimeout(5.0)
+            client = tls.DtlsSocket(s.getsockname(), self.certs["certnas"], self.ca.cert)
+            try:
+                hello = s.recv(65535)  # the first ClientHello of s_client, which never gets an answer
+            finally:
+                client.close()
+        self.assertEqual(hello[:1], b"\x16")
+        out = self.replies(d, hello)
+        self.assertEqual([(len(r), r[13]) for r in out], [(60, 3)], "a HelloVerifyRequest of 60 bytes, the ClientHello had %d" % len(hello))
+        self.assertNoUser(d)
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_application_data_of_a_new_client_gets_nothing(self):
+        """A new DTLS client starts with a ClientHello: a record of application data gets no context and no reply."""
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        record = bytes([23, 0xfe, 0xfd, 0, 1]) + bytes(6) + (48).to_bytes(2, "big") + os.urandom(48)
+        self.assertEqual([len(r) for r in self.replies(d, record)], [])
+        self.assertNoUser(d)
+
+    def test_plain_radius_keeps_the_least_recently_used_connection(self):
+        """A DTLS listener takes no plain RADIUS: users_inc() at "last-recently-used limit" must not run for it.
+
+        users_inc() at the limit ends the oldest context, so a plain datagram without a cookie ended a connection.
+        """
+        d = self.start_daemon(self.BODY % self.paths + "\tlast-recently-used limit = 1\n", listen=self.LISTEN)
+        c = self.connect(daemon=d)
+        c.pap("alice", "alicepw")   # the answer shows that the worker has the connection
+        self.radius("radsecret", daemon=d, listener="dtls", source="127.0.0.9").send_raw(b"\x01\x00\x00\x14" + bytes(16))
+        self.assertFalse(c.closed(timeout=2.0), "the datagram evicted the TACACS+ connection")
+
+    AUTO_REALM = """
+	realm auto {
+		tls auto-detect = yes
+		device plainnas {
+			address = 127.0.0.10
+			radius.key = plainsecret
+		}
+		user alice {
+			password login = clear alicepw
+			password pap = login
+		}
+		ruleset {
+			rule { script { permit } }
+		}
+	}
+	device redirected {
+		address = 127.0.0.10
+		target-realm = auto
+	}
+"""
+
+    def test_plain_radius_of_a_device_with_auto_detection_in_its_target_realm(self):
+        """The early check of the first datagram takes the realm of the device ("target-realm"), as the context does.
+
+        It took the realm of the listener, without auto-detection, and dropped the plain request.
+        """
+        d = self.start_daemon(self.BODY % self.paths + self.AUTO_REALM, listen=self.LISTEN)
+        c = self.radius("plainsecret", daemon=d, listener="dtls", source="127.0.0.10", timeout=2.0)
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+
+    def client_hello(self):
+        """The first ClientHello of s_client, which never gets an answer."""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.settimeout(5.0)
+            client = tls.DtlsSocket(s.getsockname(), self.certs["certnas"], self.ca.cert)
+            try:
+                return s.recv(65535)
+            finally:
+                client.close()
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_plain_listener_answers_no_client_hello(self):
+        """A UDP listener without DTLS and without auto-detection sends no HelloVerifyRequest and makes no context."""
+        d = self.start_daemon(self.BODY % self.paths, udp=True)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((d.address, d.udp_port))
+            s.send(self.client_hello())
+            self.assertEqual(select.select([s], [], [], 1.5)[0], [], "a reply to the ClientHello")
+        self.assertNoUser(d)
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_realm_without_dtls_answers_no_client_hello(self):
+        """A DTLS listener in a realm with neither a certificate nor "tls psk" sends no HelloVerifyRequest."""
+        d = self.start_daemon(DEVICES + RADSEC, listen=self.LISTEN)
+        self.assertEqual(self.replies(d, self.client_hello()), [])
+        self.assertNoUser(d)
+
+    def test_requests_during_the_host_lookup(self):
+        """Requests that come while MAVIS looks up the device after the handshake all get a reply.
+
+        They wait in the read BIO, as the context does not read during the lookup. After it, the
+        worker stopped when the read BIO was empty, but OpenSSL had read both datagrams of the
+        client and held the second record. The requests go in two datagrams through a relay.
+        """
+        body = (self.BODY % self.paths).replace('welcome banner = "certnas\\n"', 'welcome banner = "certnas\\n"\n\t\tmavis backend = yes')
+        self.assertIn("mavis backend", body)
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + body, listen=self.LISTEN)
+        Stub(d).set(result={"HOST": "ACK"}, delay={"HOST": 0.5})
+        relay = DatagramRelay((d.address, d.ports["dtls"]))
+        self.addCleanup(relay.close)
+        c = self.radius("radius/dtls", daemon=d, sock=tls.DtlsSocket(relay.addr, self.certs["certnas"], self.ca.cert), timeout=5.0)
+        first, second = c.pap_request("alice", "alicepw"), c.pap_request("alice", "alicepw")
+        second.identifier = (first.identifier + 1) % 256
+        c.send_raw(first.encode(c.secret))  # s_client sends it after the handshake, while the lookup waits
+        self.assertTrue(relay.sent.wait(5.0), "no application data from the client")
+        c.send_raw(second.encode(c.secret))  # a datagram of its own: s_client read the first request alone
+        for n, r in enumerate((first, second), 1):
+            try:
+                reply = c.reply(r)
+            except TimeoutError:
+                self.fail("no reply to request %d of 2 (%d datagrams of application data)" % (n, relay.application_data))
+            self.assertEqual((reply.code_name, reply.get(radius.REPLY_MESSAGE)), ("Access-Accept", [b"certnas"]))
+        self.assertEqual(relay.application_data, 2)
+        self.assertEqual(Stub(d).count("HOST"), 1)
+
+    def test_more_than_64_requests_during_the_host_lookup(self):
+        """Main's limit of 64 queued replies does not end a UDP context, whose queue goes out at the next turn.
+
+        The requests wait in the read BIO during the lookup; after it, the worker answers all of them in one turn.
+        """
+        body = (self.BODY % self.paths).replace('welcome banner = "certnas\\n"', 'welcome banner = "certnas\\n"\n\t\tmavis backend = yes')
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + body, listen=self.LISTEN)
+        Stub(d).set(result={"HOST": "ACK"}, delay={"HOST": 3.0})
+        relay = DatagramRelay((d.address, d.ports["dtls"]))
+        self.addCleanup(relay.close)
+        c = self.radius("radius/dtls", daemon=d, sock=tls.DtlsSocket(relay.addr, self.certs["certnas"], self.ca.cert), timeout=10.0)
+        requests = []
+        for i in range(70):
+            r = c.pap_request("alice", "alicepw")
+            r.identifier = i
+            requests.append(r)
+            c.send_raw(r.encode(c.secret))
+            deadline = time.monotonic() + 5.0     # one record per datagram: s_client sends what one read gets
+            while relay.application_data <= i and time.monotonic() < deadline:
+                select.select([], [], [], 0.005)
+        for r in requests:
+            try:
+                self.assertEqual(c.reply(r).code_name, "Access-Accept")
+            except TimeoutError:
+                self.fail("no reply to request %d of 70" % (r.identifier + 1))
+
     def test_several_requests_in_one_session(self):
+        """Each request after the first is DTLS application data: only the context with the session can read it."""
         c = self.dtls()
         for password, code in (("alicepw", "Access-Accept"), ("wrong", "Access-Reject"), ("alicepw", "Access-Accept")):
-            with self.subTest(password=password):
-                self.assertEqual(c.access_request("alice", password).code_name, code)
+            self.assertEqual(c.access_request("alice", password).code_name, code)
+
+    def test_two_workers(self):
+        """Several clients over DTLS and over plain UDP to two workers: each datagram goes to the worker of its client."""
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN, udp=True, spawnd="\tspawn { instances min = 2 instances max = 2 }\n")
+        if LINUX:
+            self.assertEqual(len(d.workers()), 2)
+        sessions = [self.dtls(daemon=d) for _ in range(4)]
+        plain = [self.radius("radsecret", daemon=d, source="127.0.0.9") for _ in range(4)]
+        for _ in range(3):
+            for c in sessions:
+                self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+            for c in plain:
+                self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name,
+                                 "Access-Accept")
 
     def test_unknown_certificate_name_falls_back_to_the_address(self):
         r = self.dtls("nobody").access_request("alice", "alicepw")
@@ -701,6 +949,16 @@ class RadiusDtlsAutoDetect(RadiusOverDtls):
     LISTEN = {"dtls": "protocol = UDP tls = auto"}
 
     test_plain_radius_on_the_dtls_listener_gets_no_answer = None    # the port takes plain RADIUS too
+    test_plain_radius_keeps_the_least_recently_used_connection = None
+
+    @unittest.skipUnless(LINUX, "the user count of spawnd from its process title")
+    def test_client_hello_of_no_dtls_version_gets_nothing(self):
+        """Auto-detection takes only a handshake record of its DTLS versions: no HelloVerifyRequest for another one."""
+        d = self.start_daemon(self.BODY % self.paths, listen=self.LISTEN)
+        hello = bytearray(self.client_hello())
+        hello[2] = 0x01     # record version {fe, 01}: no DTLS version
+        self.assertEqual(self.replies(d, bytes(hello)), [])
+        self.assertNoUser(d)
 
     def test_plain_radius_on_the_same_port(self):
         c = self.radius("radsecret", listener="dtls", source="127.0.0.9")
@@ -719,6 +977,7 @@ class RadiusDtlsRealmAutoDetect(RadiusDtlsAutoDetect):
 
     LISTEN = {"dtls": "protocol = UDP"}
     BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
+    test_plain_listener_answers_no_client_hello = None    # auto-detection in the realm takes DTLS on any UDP listener
 
 
 class RadiusDtlsListenerRealmAutoDetect(RadiusDtlsAutoDetect):
@@ -726,6 +985,7 @@ class RadiusDtlsListenerRealmAutoDetect(RadiusDtlsAutoDetect):
 
     LISTEN = {"dtls": "protocol = UDP tls = yes"}
     BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
+    test_plain_listener_answers_no_client_hello = None    # auto-detection in the realm takes DTLS on any UDP listener
 
 
 class RadiusDtlsRealmAutoDetectOff(RadiusOverDtls):

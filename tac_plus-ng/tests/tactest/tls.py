@@ -34,11 +34,10 @@ scratch directory, the way tac_plus-ng/sample/democa does it with make
 (root CA -> server and client certificates). EC P-256 keys, because RSA key
 generation is slow on a loaded host.
 
-The standard library ssl module has no TLS-PSK client before Python 3.13,
-so PskSocket runs "openssl s_client -psk" and talks through its pipes; it
-has the few socket methods tacacs.Connection uses. The ssl module has no
-DTLS at all, so DtlsSocket does the same with "openssl s_client -dtls"
-for radius.Client.
+The standard library ssl module has no TLS-PSK client before Python 3.13
+and no DTLS, so PskSocket and DtlsSocket run "openssl s_client" and talk
+through its pipes; they have the few socket methods that
+tacacs.Connection and radius.Client use.
 
 openssl_available() and dtls_client_available() let a test skip when the
 command or its DTLS client is missing.
@@ -179,6 +178,10 @@ def self_signed(directory, name, subject):
     return crt, key
 
 
+def _hostport(host, port):
+    return "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
+
+
 class SClientSocket:
     """A connection through "openssl s_client", for a client that takes a socket-like object.
 
@@ -189,12 +192,10 @@ class SClientSocket:
     """
 
     def __init__(self, addr, options, timeout=5.0):
-        host, port = addr[0], addr[1]
-        target = "[%s]:%d" % (host, port) if ":" in host else "%s:%d" % (host, port)
         self.timeout = timeout
         self.peeked = b""
         self.err = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(["openssl", "s_client", "-connect", target] + list(options)
+        self.proc = subprocess.Popen(["openssl", "s_client", "-connect", _hostport(addr[0], addr[1])] + list(options)
                                      + ["-quiet", "-nocommands"],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
                                      start_new_session=True)
@@ -254,15 +255,18 @@ class PskSocket(SClientSocket):
 class DtlsSocket(SClientSocket):
     """DTLS 1.2 with a client certificate, for radius.Client(sock=...).
 
-    s_client sends what one read of its stdin returns as one DTLS record,
-    and writes each record it receives to stdout: one RADIUS packet per
-    record (RFC 7360 2.2), as long as the test sends one packet at a time.
-    -timeout lets s_client send a lost handshake message again.
+    cert = (certificate, key) to present, ca the file of the CA to trust,
+    source the local address to send from. s_client sends what one read of
+    its stdin returns as one DTLS record, so sendall() must get one RADIUS
+    packet at a time (RFC 7360 2.2). -timeout lets s_client send a lost
+    handshake message again.
     """
 
-    def __init__(self, addr, ca, cert, timeout=5.0):
-        super().__init__(addr, ["-dtls1_2", "-timeout", "-CAfile", ca, "-verify_return_error",
-                                "-cert", cert[0], "-key", cert[1]], timeout)
+    def __init__(self, addr, cert, ca, source=None, timeout=5.0):
+        options = ["-dtls1_2", "-timeout", "-CAfile", ca, "-verify_return_error", "-cert", cert[0], "-key", cert[1]]
+        if source:
+            options += ["-bind", _hostport(source, 0)]
+        super().__init__(addr, options, timeout)
 
     def recv(self, n, flags=0):
         data = super().recv(n, flags)

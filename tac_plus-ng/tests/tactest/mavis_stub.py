@@ -57,6 +57,8 @@ State, all keys optional:
   dacls         {name: profile (AV_A_TACPROFILE)}: a DACL request for name
                 is ACK with that profile
   message       the user response (AV_A_USER_RESPONSE) of every answer
+  delay         {TYPE: seconds}: wait that long before the answer to a
+                request of that type, as a slow backend does
   exit          exit without an answer on the n-th request of a child
   quit          exit after answering the n-th request of a child, once the
                 test released that request (see release)
@@ -246,6 +248,9 @@ def serve(libdir):
             if "expiry" in known:
                 d.set_expiry(known["expiry"])
         verdict, code = answers[result]
+        delay = (state.get("delay") or {}).get(tactype)
+        if delay:
+            time.sleep(delay)
         d.write(verdict, code, state.get("message"))
         if state.get("double_write"):
             _wait_release(state_path, n)

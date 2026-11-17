@@ -429,7 +429,8 @@ static int rad_send_reply(tac_session *session, u_char status)
 	    session->ctx->out = pak;
 	    session->ctx->out_tail = &pak->next;
 	}
-	if (session->ctx->out_count++ >= MAXIMUM_QUEUED_PACKETS)
+	// a UDP context has no slow reader: the next turn of the event loop sends the queue
+	if (session->ctx->out_count++ >= MAXIMUM_QUEUED_PACKETS && !session->ctx->udp)
 	    return -1;
 
 	want_write(session->ctx);
@@ -656,7 +657,6 @@ void tac_read(struct context *ctx, int cur)
     if (ctx->hdroff != TAC_PLUS_HDR_SIZE) {
 	enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-	update_bio(ctx);
 	if (ctx->tls)
 	    len = io_SSL_read_ex(ctx->tls, &ctx->hdr.uchar + ctx->hdroff, TAC_PLUS_HDR_SIZE - ctx->hdroff, ctx->io, cur, (void *) tac_read, &status);
 	else
@@ -807,7 +807,6 @@ void tac_read(struct context *ctx, int cur)
     }
     enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-    update_bio(ctx);
     if (ctx->tls)
 	len = io_SSL_read_ex(ctx->tls, &ctx->in->pak.uchar + ctx->in->offset, ctx->in->length - ctx->in->offset, ctx->io, cur, (void *) tac_read, &status);
     else
@@ -1142,7 +1141,6 @@ void rad_read(struct context *ctx, int cur)
     if (ctx->hdroff != RADIUS_HDR_SIZE) {
 	enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-	update_bio(ctx);
 	if (ctx->tls)
 	    len = io_SSL_read_ex(ctx->tls, &ctx->hdr.uchar + ctx->hdroff, RADIUS_HDR_SIZE - ctx->hdroff, ctx->io, cur, (void *) rad_read, &status);
 	else
@@ -1187,7 +1185,6 @@ void rad_read(struct context *ctx, int cur)
     }
     enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-    update_bio(ctx);
     if (ctx->tls)
 	len = io_SSL_read_ex(ctx->tls, &ctx->in->pak.uchar + ctx->in->offset, ctx->in->length - ctx->in->offset, ctx->io, cur, (void *) rad_read, &status);
     else

@@ -63,6 +63,12 @@ struct scm_data_udp {
     u_char data[] __attribute__((aligned(8)));
 };
 
+// A first datagram that is a DTLS handshake record: a new DTLS client starts with a ClientHello.
+int scm_udp_dtls(const u_char *, size_t);
+
+#define SCM_SECRET "SPAWND_SECRET"	// environment of a worker: the random secret of its spawnd, in hex
+#define SCM_SECRET_LEN 32
+
 // To spawnd: the worker has no context for this client.
 struct scm_data_udpdone {
     enum scm_token type;
