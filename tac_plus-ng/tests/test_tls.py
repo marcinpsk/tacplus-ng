@@ -952,6 +952,14 @@ class AkiWithoutKeyIdentifier(TlsTestCase):
     def test_key_identifier_still_works(self):
         self.assertEqual(self.selected("keyid"), {"tactest-device": "certnas", "tactest-transport": "tls"})
 
+    def test_certificates_have_the_aki_they_claim(self):
+        """The openssl command (OpenSSL or LibreSSL) made the AKI forms that the tests above name."""
+        aki = {name: tls.cert_text(self.certs[name][0]) for name in self.CLIENTS}
+        self.assertRegex(aki["keyid"], r"Authority Key Identifier:\s*\n\s*(keyid:)?[0-9A-F]{2}:")
+        self.assertIn("Authority Key Identifier", aki["issuer_serial"])
+        self.assertNotRegex(aki["issuer_serial"], r"Authority Key Identifier:\s*\n\s*(keyid:)?[0-9A-F]{2}:")
+        self.assertNotIn("Authority Key Identifier", aki["no_aki"])
+
 
 class CrlDirPathBuffer(TlsTestCase):
     """With "tls crl-dir" the <crl-dir>/<AKI>/<serial> path is built per handshake; its buffers are too small on OpenSSL >= 4.1.

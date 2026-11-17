@@ -44,6 +44,7 @@ openssl_available() and dtls_client_available() let a test skip when the
 command or its DTLS client is missing.
 """
 
+import functools
 import os
 import select
 import shutil
@@ -75,6 +76,17 @@ def _openssl(*args, cwd=None):
     if p.returncode:
         raise RuntimeError("openssl %s failed:\n%s" % (" ".join(args), p.stdout.decode("utf-8", "replace")))
     return p.stdout
+
+
+@functools.cache
+def _libressl_command():
+    """LibreSSL "x509 -req" adds no AKI and rejects "authorityKeyIdentifier = none"; OpenSSL 3 adds one unless told "none"."""
+    return _openssl("version").startswith(b"LibreSSL")
+
+
+def cert_text(path):
+    """The "openssl x509 -text" dump of a certificate file."""
+    return _openssl("x509", "-in", path, "-noout", "-text").decode("utf-8", "replace")
 
 
 class CA:
@@ -132,7 +144,10 @@ class CA:
         _openssl("req", "-batch", "-new", "-key", key, "-subj", subject, "-config", self._config(), "-out", csr)
         ext = "basicConstraints = CA:false\nkeyUsage = critical, digitalSignature\n"
         ext += "extendedKeyUsage = %s\n" % ("serverAuth" if server else "clientAuth")
-        ext += "authorityKeyIdentifier = %s\n" % (aki if aki else "none")
+        if aki:
+            ext += "authorityKeyIdentifier = %s\n" % aki
+        elif not _libressl_command():
+            ext += "authorityKeyIdentifier = none\n"
         if san:
             ext += "subjectAltName = %s\n" % san
         ext = self._ext(name + ".ext", ext)
