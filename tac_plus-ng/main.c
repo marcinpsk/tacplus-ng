@@ -1928,7 +1928,7 @@ static void get_tls13_hello_identifier(u_char *buf, size_t buf_len, char **ident
     u_char *buf_end = buf + buf_len;
 
     int next_len = 1;
-    for (int step = 0; buf + next_len <= buf_end; step++) {
+    for (int step = 0; next_len <= buf_end - buf; step++) {
 	switch (step) {
 	case 0:		// handshake
 	    if (*buf++ != 0x16)	// handshake
@@ -1946,8 +1946,9 @@ static void get_tls13_hello_identifier(u_char *buf, size_t buf_len, char **ident
 		size_t len = *buf++;
 		len <<= 8;
 		len |= *buf++;
-		if (len != (size_t) (buf_end - buf))
+		if (len > (size_t) (buf_end - buf))
 		    return;
+		buf_end = buf + len;
 		next_len = 1;
 		continue;
 	    }
@@ -2008,23 +2009,30 @@ static void get_tls13_hello_identifier(u_char *buf, size_t buf_len, char **ident
 	    next_len |= *buf++;
 	    continue;
 	case 14:		// extensions
-	    while (buf + 4 <= buf_end) {
+	    buf_end = buf + next_len;
+	    while (buf_end - buf >= 4) {
 		size_t len = (buf[2] << 8) | buf[3];
+		if (len > (size_t) (buf_end - buf - 4))
+		    return;
 		if (buf[0] == 0x00 && buf[1] == 41) {
 		    buf += 4;
-		    if (buf + len > buf_end)
-			return;
+		    buf_end = buf + len;
 		    // identities length
-		    len = *buf++;
-		    len <<= 8;
-		    len |= *buf++;
-		    if (buf + len > buf_end)
+		    if (buf_end - buf < 2)
 			return;
 		    len = *buf++;
-		    // identity length
 		    len <<= 8;
 		    len |= *buf++;
-		    if (buf + len > buf_end)
+		    if (len > (size_t) (buf_end - buf))
+			return;
+		    buf_end = buf + len;
+		    // identity length
+		    if (buf_end - buf < 2)
+			return;
+		    len = *buf++;
+		    len <<= 8;
+		    len |= *buf++;
+		    if (len > (size_t) (buf_end - buf))
 			return;
 		    *identity = (char *) buf;
 		    *identity_len = len;
@@ -2035,6 +2043,24 @@ static void get_tls13_hello_identifier(u_char *buf, size_t buf_len, char **ident
 	    return;
 	}
     }
+}
+
+// Wait in poll() for the rest of the first TLS record, but only while more of it arrives.
+static int tls_hello_wait(struct context *ctx, u_char *buf, ssize_t buf_len)
+{
+    size_t need = 0;
+    if (buf_len > 0 && buf[0] == 0x16)
+	need = SSL3_RT_HEADER_LENGTH + ((buf_len < SSL3_RT_HEADER_LENGTH) ? 0 : ((buf[3] << 8) | buf[4]));
+    int wait = (size_t) buf_len < need && need <= SSL3_RT_HEADER_LENGTH + SSL3_RT_MAX_PLAIN_LENGTH && buf_len > ctx->tls_hello_peeked;
+    if (wait || ctx->tls_hello_peeked) {
+	int lowat = wait ? (int) need : 1;
+	if (setsockopt(ctx->sock, SOL_SOCKET, SO_RCVLOWAT, &lowat, (socklen_t) sizeof(lowat))) {
+	    report(NULL, LOG_ERR, ~0, "setsockopt(SO_RCVLOWAT, %d): %s", lowat, strerror(errno));
+	    wait = 0;
+	}
+    }
+    ctx->tls_hello_peeked = wait ? buf_len : 0;
+    return wait;
 }
 #endif
 
@@ -2061,12 +2087,16 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
     }
 #ifndef OPENSSL_NO_PSK
     if (ctx->realm->use_tls_psk) {
-	u_char buf[1024];
-	size_t buf_len = recv_inject(ctx, buf, sizeof(buf), MSG_PEEK, NULL);
+	u_char buf[SSL3_RT_HEADER_LENGTH + SSL3_RT_MAX_PLAIN_LENGTH];
+	ssize_t buf_len = recv_inject(ctx, buf, sizeof(buf), MSG_PEEK, NULL);
+	if (!ctx->udp && tls_hello_wait(ctx, buf, buf_len)) {
+	    ctx->last_io = io_now.tv_sec;	// the timeout of the device counts from here, as for SSL_accept()
+	    return;
+	}
 	if (buf_len > 0) {
 	    char *identity = NULL;
 	    size_t identity_len = 0;
-	    get_tls13_hello_identifier(buf, buf_len, &identity, &identity_len);
+	    get_tls13_hello_identifier(buf, (size_t) buf_len, &identity, &identity_len);
 	    for (size_t i = 0; i < identity_len; i++)
 		if (!isprint(identity[i]))
 		    identity_len = 0;

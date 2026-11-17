@@ -746,6 +746,7 @@ struct context {
     str_t tls_peer_cn;
     str_t tls_peer_serial;
     str_t tls_psk_identity;
+    ssize_t tls_hello_peeked;	// > 0 while the daemon waits for the rest of the first TLS record
     str_t tls_sni;
     str_t tls_conn_error;
     str_t tls_conn_error_code;

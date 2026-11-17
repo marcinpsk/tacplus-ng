@@ -139,10 +139,10 @@ class TlsTestCase(DaemonTestCase):
         kw.setdefault("timeout", 10.0)
         return self.connect(listener=listener, tls=self.context(client), **kw)
 
-    def relay(self, version, listener=None):
+    def relay(self, version, listener=None, split=()):
         """A tls.RecordVersionRelay to the first listener, or to ports[listener]."""
         d = self.daemon
-        r = tls.RecordVersionRelay(d.addr if listener is None else (d.address, d.ports[listener]), version)
+        r = tls.RecordVersionRelay(d.addr if listener is None else (d.address, d.ports[listener]), version, split=split)
         self.addCleanup(r.close)
         return r
 
@@ -600,9 +600,8 @@ class PskBesideCertificates(TlsTestCase):
     LISTEN = {"tls": "tls = yes"}
     BODY = TLS_REALM + PSK + DEVICES + policy(("certnas.tactest", "psknas", "localhost"))
 
-    def connect_psk(self, addr):
-        # X25519 only: the daemon looks for the identity in the first 1024 bytes, and an ML-KEM key share is longer
-        return self.connect(sock=tls.PskSocket(addr, "psknas", PSK_KEY, timeout=10.0, groups="X25519"), timeout=10.0)
+    def connect_psk(self, addr, groups=None):
+        return self.connect(sock=tls.PskSocket(addr, "psknas", PSK_KEY, timeout=10.0, groups=groups), timeout=10.0)
 
     def test_psk(self):
         self.assertEqual(self.device_and_transport(self.connect_psk((self.daemon.address, self.daemon.ports["tls"]))),
@@ -613,9 +612,77 @@ class PskBesideCertificates(TlsTestCase):
         self.assertEqual(self.device_and_transport(self.connect_psk(self.relay(0x0303, listener="tls").addr)),
                          {"tactest-device": "psknas", "tactest-transport": "tls"})
 
+    def test_psk_with_a_small_key_share(self):
+        """X25519 only: a ClientHello of about 270 bytes, not 1500 as with the default ML-KEM key share."""
+        self.assertEqual(self.device_and_transport(self.connect_psk((self.daemon.address, self.daemon.ports["tls"]),
+                                                                    groups="X25519")),
+                         {"tactest-device": "psknas", "tactest-transport": "tls"})
+
+    def test_psk_in_three_segments(self):
+        """The daemon waits for the rest of the ClientHello record: the header and the identity come later."""
+        relay = self.relay(0x0301, listener="tls", split=(3, 200))
+        self.assertEqual(self.device_and_transport(self.connect_psk(relay.addr, groups="X25519")),
+                         {"tactest-device": "psknas", "tactest-transport": "tls"})
+
     def test_certificate(self):
         self.assertEqual(self.device_and_transport(self.connect_tls()),
                          {"tactest-device": "certnas", "tactest-transport": "tls"})
+
+
+@unittest.skipUnless(LINUX, "CPU time from /proc")
+class PskHelloWait(TlsTestCase):
+    """The worker waits for the rest of a ClientHello in poll() (SO_RCVLOWAT), not in a loop, also after EOF."""
+
+    LISTEN = PskBesideCertificates.LISTEN
+    BODY = PskBesideCertificates.BODY
+    # the beginning of a TLS record with a ClientHello
+    HELLO_START = bytes([0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03])
+
+    def assertIdle(self, worker):
+        time.sleep(0.2)
+        before = cpu_seconds(worker)
+        time.sleep(1.5)
+        self.assertLess(cpu_seconds(worker) - before, 0.5, "the worker is busy")
+
+    def send_hello_start(self):
+        s = socket.create_connection((self.daemon.address, self.daemon.ports["tls"]), timeout=5)
+        self.addCleanup(s.close)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        s.sendall(self.HELLO_START[:3])
+        time.sleep(0.3)
+        s.sendall(self.HELLO_START[3:])
+        return s
+
+    def test_idle_while_the_hello_is_incomplete(self):
+        self.send_hello_start()
+        (worker,) = self.daemon.workers()
+        self.assertIdle(worker)
+
+    def test_idle_after_the_peer_closes_in_the_hello(self):
+        s = self.send_hello_start()
+        (worker,) = self.daemon.workers()
+        s.close()
+        self.assertIdle(worker)
+
+
+class PskHelloTimer(TlsTestCase):
+    """periodics_ctx() runs 60 s after the start of a connection, also while the worker waits for the ClientHello.
+
+    A known device waits up to its "timeout" (600 s): the start of the wait set no last_io, and the check
+    at 60 s closed it. This test takes 62 s.
+    """
+
+    LISTEN = PskBesideCertificates.LISTEN
+    BODY = PskBesideCertificates.BODY
+
+    def test_incomplete_hello_at_the_check_after_60_s(self):
+        s = socket.create_connection((self.daemon.address, self.daemon.ports["tls"]), timeout=5)
+        self.addCleanup(s.close)
+        s.sendall(PskHelloWait.HELLO_START)
+        time.sleep(62)
+        s.settimeout(0.5)
+        with self.assertRaises(socket.timeout, msg="the daemon closed the connection of the device"):
+            s.recv(1)
 
 
 RADSEC = """
