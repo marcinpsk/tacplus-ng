@@ -139,9 +139,9 @@ static int verify_mac(const uint8_t *data, size_t data_len, const char *master_k
     uint8_t ka[16];
     aes_ecb_encrypt(md5_digest, ka_input, ka);
 
+    uint8_t digest[EVP_MAX_MD_SIZE];
     unsigned int hmac_len;
-    uint8_t *digest = HMAC(EVP_sha1(), ka, 16, encrypted, enc_len, NULL, &hmac_len);
-    if (!digest)
+    if (!HMAC(EVP_sha1(), ka, 16, encrypted, enc_len, digest, &hmac_len))
 	return -1;
 
     return memcmp(digest, mac, TYPE6_MAC_LEN);
@@ -228,17 +228,14 @@ char *encrypt_type6(const char *cleartext, const char *master_key)
     uint8_t ka[16];
     aes_ecb_encrypt(md5_digest, ka_input, ka);
 
+    uint8_t digest[EVP_MAX_MD_SIZE];
     unsigned int hmac_len;
-    uint8_t *digest = HMAC(EVP_sha1(), ka, 16, enc, len, NULL, &hmac_len);
-    if (digest) {
-	uint8_t mac[TYPE6_MAC_LEN];
-	memcpy(mac, digest, TYPE6_MAC_LEN);
-
+    if (HMAC(EVP_sha1(), ka, 16, enc, len, digest, &hmac_len)) {
 	size_t pad = ~len & 1;
 	uint8_t final[TYPE6_SALT_LEN + len + TYPE6_MAC_LEN + 1 + pad];
 	memcpy(final, salt, TYPE6_SALT_LEN);
 	memcpy(final + TYPE6_SALT_LEN, enc, len);
-	memcpy(final + TYPE6_SALT_LEN + len, mac, TYPE6_MAC_LEN);
+	memcpy(final + TYPE6_SALT_LEN + len, digest, TYPE6_MAC_LEN);
 	final[TYPE6_SALT_LEN + len + TYPE6_MAC_LEN] = 0;
 	if (pad)
 	    final[TYPE6_SALT_LEN + len + TYPE6_MAC_LEN + 1] = 1;
