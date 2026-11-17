@@ -41,11 +41,13 @@ import select
 import shutil
 import signal
 import socket
+import tempfile
 import time
 import unittest
+from unittest import mock
 
 from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, sanitizers
-from tactest.daemon import proc_stat
+from tactest.daemon import features, proc_stat
 
 POLICY = """
 	device single {
@@ -291,6 +293,31 @@ class Harness(DaemonTestCase):
                               "drop %s:%s from ubsan.supp, it no longer fires" % (check, function))
                 if "#0 " in reports:        # some reports come without a stack trace
                     self.assertIn(" in %s " % function, reports)
+
+
+class Features(unittest.TestCase):
+    """features() reads the libraries of the build from "tac_plus-ng -v"; the texts are of real builds."""
+
+    def features(self, version):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.mkdir(os.path.join(tmp, "sbin"))
+            path = os.path.join(tmp, "sbin", "tac_plus-ng")
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\necho '%s' >&2\n" % version)
+            os.chmod(path, 0o755)
+            with mock.patch.dict(os.environ, {"TACTEST_PREFIX": tmp}):
+                return features()
+
+    def test_openssl(self):
+        self.assertEqual(self.features("tac_plus-ng version 1/PCRE2/ARES 1.34.5/CURL 8.14.1/OpenSSL 3.5.7 9 Jun 2026"),
+                         {"pcre2", "ares", "openssl", "psk"})
+
+    def test_libressl_has_no_psk(self):
+        self.assertEqual(self.features("tac_plus-ng version 1/PCRE2/ARES 1.34.9/CURL 8.23.0/LibreSSL 4.4.0"),
+                         {"pcre2", "ares", "openssl"})
+
+    def test_minimum(self):
+        self.assertEqual(self.features("tac_plus-ng version 1"), set())
 
 
 class TestFiles(unittest.TestCase):
