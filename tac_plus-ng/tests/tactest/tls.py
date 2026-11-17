@@ -53,6 +53,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 
 from .daemon import scratch_dir
 
@@ -186,27 +187,33 @@ class RecordVersionRelay:
 
     The record header is not part of the handshake transcript, so the
     handshake still completes. The relay forwards the first record in one
-    piece, as the daemon peeks at it before the handshake. Connect to addr.
+    piece, or in TCP segments that end at the offsets in split, with a
+    pause after each segment. Connect to addr.
     """
 
-    def __init__(self, target, version, timeout=10.0):
+    def __init__(self, target, version, timeout=10.0, split=()):
         family = socket.AF_INET6 if ":" in target[0] else socket.AF_INET
         self.listener = socket.socket(family, socket.SOCK_STREAM)
         self.listener.bind((target[0], 0))
         self.listener.listen(1)
         self.listener.settimeout(timeout)
         self.addr = self.listener.getsockname()[:2]
-        self.thread = threading.Thread(target=self._run, args=(target, version.to_bytes(2, "big"), timeout),
+        self.thread = threading.Thread(target=self._run, args=(target, version.to_bytes(2, "big"), timeout, split),
                                        daemon=True)
         self.thread.start()
 
-    def _run(self, target, version, timeout):
+    def _run(self, target, version, timeout, split):
         with self.listener, self.listener.accept()[0] as client, \
                 socket.create_connection(target, timeout=timeout) as server:
             header = _recv_exact(client, 5)
             if header[0] != 0x16:
                 raise ValueError("the first record is no TLS handshake: %r" % header)
-            server.sendall(header[:1] + version + header[3:] + _recv_exact(client, int.from_bytes(header[3:], "big")))
+            record = header[:1] + version + header[3:] + _recv_exact(client, int.from_bytes(header[3:], "big"))
+            server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            for start, end in zip((0,) + tuple(split), tuple(split)):
+                server.sendall(record[start:end])
+                time.sleep(0.3)
+            server.sendall(record[split[-1] if split else 0:])
             peer = {client: server, server: client}
             try:
                 while True:
