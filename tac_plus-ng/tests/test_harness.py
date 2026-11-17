@@ -50,7 +50,7 @@ from unittest import mock
 
 from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, sanitizers
 from tactest import daemon
-from tactest.daemon import proc_stat
+from tactest.daemon import endpoint, fstat_bound, proc_stat, sockstat_listening
 
 POLICY = """
 	device single {
@@ -446,6 +446,38 @@ class TestFiles(unittest.TestCase):
                               ("from __future__ import annotations\nx: int | None = None", [])):
             with self.subTest(source=source):
                 self.assertEqual(py38_annotation_errors(source), lines)
+
+# the formats of FreeBSD sockstat.c formataddr() and OpenBSD fstat.c print_inet6_details()
+SOCKSTAT = """root     tac_plus-n 1234  5  tcp4   127.0.0.1:49000       *:*
+root     tac_plus-n 1234  6  tcp6   ::1:49000             *:*
+root     sshd       99    3  tcp6   *:22                  *:*
+"""
+FSTAT = """USER     CMD          PID   FD MOUNT        INUM  MODE         R/W    SZ|DV
+root     tac_plus-ng  1234    5* internet stream tcp 0x0 127.0.0.1:49000
+root     tac_plus-ng  1234    6* internet6 stream tcp 0x0 [::1]:49000
+root     tac_plus-ng  1234    7* internet stream tcp 0x0 127.0.0.1:49000 <-- 127.0.0.1:5555
+root     tac_plus-ng  1234    8* internet dgram udp 127.0.0.1:1812
+"""
+
+
+class BsdListeners(unittest.TestCase):
+    """Off Linux, Daemon._listening() reads the TCP sockets of spawnd from sockstat (FreeBSD) or fstat (OpenBSD)."""
+
+    @staticmethod
+    def rows(text):
+        return [line.split() for line in text.splitlines()]
+
+    def test_endpoint(self):
+        self.assertEqual(endpoint("127.0.0.1:49"), ("127.0.0.1", 49))
+        self.assertEqual(endpoint("::1:49"), ("::1", 49))
+        self.assertEqual(endpoint("[::1]:49"), ("::1", 49))
+
+    def test_sockstat_ipv6_without_brackets(self):
+        self.assertEqual(sockstat_listening(self.rows(SOCKSTAT), 1234), {("127.0.0.1", 49000), ("::1", 49000)})
+
+    def test_fstat_without_connected_sockets(self):
+        self.assertEqual(fstat_bound(self.rows(FSTAT)), {("127.0.0.1", 49000), ("::1", 49000)})
+
 
 class ScratchFiles(unittest.TestCase):
     """A failed test keeps its scratch files, also when run() makes its own result."""
