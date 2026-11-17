@@ -327,7 +327,7 @@ REJECT_LOG_FIELDS = ("version", "error_code", "error", "verify_code", "verify", 
 REJECT_LOG = """
 	log connection {
 		destination = "$tmp/connection.log"
-		connection format = "$${msgid}$${FS}$${tls.conn.version}$${FS}$${tls.conn.error.code}$${FS}$${tls.conn.error}$${FS}$${tls.peer.cert.verify.code}$${FS}$${tls.peer.cert.verify}$${FS}$${hint}"
+		connection format = "$${msgid}$${FS}$${server.port}$${FS}$${tls.conn.version}$${FS}$${tls.conn.error.code}$${FS}$${tls.conn.error}$${FS}$${tls.peer.cert.verify.code}$${FS}$${tls.peer.cert.verify}$${FS}$${hint}"
 	}
 	connection log = connection
 """
@@ -419,16 +419,18 @@ class TlsRejectReason(TlsTestCase):
                 cls.other.remove()
 
     def record(self, client, msgid="CONN-REJECT"):
-        """Run client(daemon) against a daemon of this test; the fields of the first msgid record."""
+        """Run client(daemon) against a daemon of this test; the fields of the first msgid record of the TLS listener."""
         d = self.start_daemon(TLS_REALM % self.paths + REJECT_LOG + POLICY, listen={"tls": "tls = yes"})
         try:
             client(d)
         except (OSError, ssl.SSLError, tacacs.Closed):
             pass
-        for line in d.wait_log("connection", msgid + "\t").splitlines():
+        # off Linux, the start-up probe connects to the plain listener, and its CONN-START comes first
+        port = str(d.ports["tls"])
+        for line in d.wait_log("connection", "%s\t%s\t" % (msgid, port)).splitlines():
             fields = line.split("\t")
-            if fields[0].endswith(" " + msgid):
-                return dict(zip(REJECT_LOG_FIELDS, fields[1:]))
+            if fields[0].endswith(" " + msgid) and fields[1] == port:
+                return dict(zip(REJECT_LOG_FIELDS, fields[2:]))
 
     def tls_client(self, ctx):
         def client(d):
