@@ -79,6 +79,7 @@ use Mavis;
 use Fcntl ':flock';
 
 my $hashid = ''; # DES
+my $saltlen = 16;
 my $have_crypt_passwd_xs;
 
 my $flag_pwpolicy	= undef;
@@ -101,6 +102,9 @@ undef $mkpasswd unless -x $mkpasswd;
 
 if (crypt('test', '$1$q5/vUEsR$') eq '$1$q5/vUEsR$jVwHmEw8zAmgkjMShLBg/.') {
 	$hashid = '$1$'; # MD5
+} elsif (crypt('test', '$2b$04$q5/vUEsRq5/vUEsRq5/vUE') eq '$2b$04$q5/vUEsRq5/vUEsRq5/vU.50sJwvHMw78uSuxnGgbsWKccYKZMs6y') {
+	$hashid = '$2b$10$'; # bcrypt, the only hash of OpenBSD
+	$saltlen = 22;
 } elsif (eval "require Crypt::Passwd::XS") {
 	import Crypt::Passwd::XS;
 	$hashid = '$1$';	# MD5
@@ -152,7 +156,7 @@ sub new_password_hash ($) {
 		}
 	}
 	my $salt = "";
-	for (my $i = 0; $i < 16; $i++) {
+	for (my $i = 0; $i < $saltlen; $i++) {
 		$salt .= ('.', '/', 0..9, 'A'..'Z', 'a'..'z')[rand 64];
 	}
 
