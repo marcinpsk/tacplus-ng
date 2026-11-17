@@ -2342,7 +2342,11 @@ void parse_decls_real(struct sym *sym, tac_realm *r)
 		continue;
 	    default:
 		parse_error_expect(sym, S_cert_file, S_key_file, S_cafile, S_passphrase, S_ciphers, S_cipher_suites, S_peer,
-				   S_accept, S_verify_depth, S_alpn, S_autodetect, S_psk, S_sni, S_unknown);
+				   S_accept, S_verify_depth, S_alpn, S_autodetect,
+#if !defined(OPENSSL_NO_PSK)
+				   S_psk,
+#endif
+				   S_sni, S_unknown);
 	    }
 	    continue;
 #endif
