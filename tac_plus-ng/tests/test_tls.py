@@ -33,9 +33,11 @@ the openssl command); nothing is kept in the tree. Skipped without the
 openssl command or in a build without OpenSSL.
 """
 
+import errno
 import os
 import socket
 import ssl
+import struct
 import time
 import unittest
 
@@ -449,6 +451,15 @@ class TlsRejectReason(TlsTestCase):
                         pass
         return client
 
+    def reset_client(self, data):
+        """Send data, then reset the connection (SO_LINGER 0) while the daemon waits for the rest."""
+        def client(d):
+            with socket.create_connection((d.address, d.ports["tls"]), timeout=5) as s:
+                s.sendall(data)
+                time.sleep(0.3)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        return client
+
     def assertRejected(self, r, code, error, verify_code="", verify=""):
         self.assertIsNotNone(r, "no CONN-REJECT record")
         self.assertEqual((r["error_code"], r["error"], r["verify_code"], r["verify"]), (code, error, verify_code, verify))
@@ -474,7 +485,18 @@ class TlsRejectReason(TlsTestCase):
         self.assertEqual(r, dict(version="TLSv1.3", error_code="", error="", verify_code="", verify="", hint="no cert"))
 
     def test_tcp_close_without_handshake(self):
-        self.assertRejected(self.record(self.raw_client(b"")), "0A000126", "unexpected eof while reading")
+        r = self.record(self.raw_client(b""))
+        self.assertIsNotNone(r, "no CONN-REJECT record")
+        if r["error_code"]:
+            self.assertRejected(r, "0A000126", "unexpected eof while reading")
+        else:   # LibreSSL puts nothing on the error queue at EOF
+            self.assertEqual((r["error"], r["verify_code"], r["verify"], r["hint"]), ("", "", "", "unexpected eof while reading"))
+
+    def test_tcp_reset_during_handshake(self):
+        """OpenSSL 3 puts nothing on the error queue at ECONNRESET: the hint was "error:00000000:lib(0)::reason(0)"."""
+        r = self.record(self.reset_client(b"\x16\x03\x01\x00"))
+        self.assertIsNotNone(r, "no CONN-REJECT record")
+        self.assertEqual(r["hint"].rpartition(":")[2], os.strerror(errno.ECONNRESET))
 
     def test_not_tls(self):
         self.assertRejected(self.record(self.raw_client(b"GET / HTTP/1.0\r\n\r\n")), "0A00009C", "http request")
