@@ -387,7 +387,6 @@ def tls11_client_hello():
 
 # OpenSSL 3 error code -> LibreSSL (code, reason, function); LibreSSL packs lib << 24 | function << 12 | reason
 LIBRESSL_ERRORS = {
-    "0A000418": ("14039418", "tlsv1 alert unknown ca", "ACCEPT_SR_CERT_VRFY"),
     "0A000086": ("14FFF086", "certificate verify failed", "(UNKNOWN)SSL_internal"),
     "0A00009C": ("1402542E", "tlsv1 alert protocol version", "ACCEPT_SR_CLNT_HELLO"),  # TLS 1.3 record version check
     "0A000102": ("1402610B", "wrong version number", "ACCEPT_SR_CLNT_HELLO"),
@@ -472,7 +471,11 @@ class TlsRejectReason(TlsTestCase):
     def test_client_does_not_trust_the_server(self):
         """The case from the field: the device has the wrong CA and aborts with an alert."""
         r = self.record(self.tls_client(self.other.context(self.certs["certnas"])))
-        self.assertRejected(r, "0A000418", "tlsv1 alert unknown ca")
+        if "libressl" in features():    # LibreSSL drops the plaintext alert of the client: no reason to log
+            self.assertIsNotNone(r, "no CONN-REJECT record")
+            self.assertTrue(r["error"] or r["hint"], r)
+        else:
+            self.assertRejected(r, "0A000418", "tlsv1 alert unknown ca")
         self.assertEqual(r["version"], "TLSv1.3")
 
     def test_client_certificate_from_an_unknown_ca(self):
