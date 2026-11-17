@@ -774,6 +774,7 @@ class TlsCertificateConditions(FlagTestCase):
 PSK_KEY = "0123456789abcdef0123456789abcdef"
 
 
+@unittest.skipUnless("psk" in features(), "TLS PSK needs a build with OpenSSL; LibreSSL has none")
 class TlsPskConditions(FlagTestCase):
     """tls.psk.identity and the cipher of a TLS 1.3 PSK connection ("openssl s_client -psk")."""
 

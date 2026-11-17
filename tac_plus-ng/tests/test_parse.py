@@ -91,6 +91,9 @@ SAMPLE_EXCLUDED = {
 NEEDS_OPENSSL = ("sample/tac_plus-ng-tls.cfg", "sample/tac_plus-ng-radsec.cfg",
                  "sample/tls-fingerprint-demo/tac_plus-ng-fingerprint.cfg")
 WITHOUT_OPENSSL = "but got 'tls'"
+# without TLS PSK (LibreSSL) this stops at "tls psk = yes"; the list of keywords names no 'psk' then
+NEEDS_PSK = ("sample/tac_plus-ng-tls.cfg",)
+WITHOUT_PSK = "'peer', 'sni' or 'verify-depth', but got 'psk'"
 
 SANITIZER_TEXT = ("Sanitizer", "runtime error")
 
@@ -133,6 +136,8 @@ class Samples(unittest.TestCase):
                 self.assertEqual(sanitizer_findings(out), [], out)
                 if name in NEEDS_OPENSSL and "openssl" not in features():
                     reason, expected = "built without OpenSSL", WITHOUT_OPENSSL
+                elif name in NEEDS_PSK and "psk" not in features():
+                    reason, expected = "built without TLS PSK", WITHOUT_PSK
                 if expected is None:
                     self.assertEqual(out.strip(), "", "%s prints a message now: put it into SAMPLE_EXCLUDED" % name)
                 else:

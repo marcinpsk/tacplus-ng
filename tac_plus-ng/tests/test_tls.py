@@ -521,6 +521,7 @@ PSK = """
 """ % PSK_KEY
 
 
+@unittest.skipUnless("psk" in features(), "TLS PSK needs a build with OpenSSL; LibreSSL has none")
 class Psk(TlsTestCase):
     """TLS 1.3 with a pre-shared key, through "openssl s_client -psk".
 
