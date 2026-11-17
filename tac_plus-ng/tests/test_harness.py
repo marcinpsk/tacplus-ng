@@ -46,7 +46,7 @@ import time
 import unittest
 from unittest import mock
 
-from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, sanitizers
+from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, sanitizers, tls
 from tactest.daemon import features, proc_stat
 
 POLICY = """
@@ -314,10 +314,22 @@ class Features(unittest.TestCase):
 
     def test_libressl_has_no_psk(self):
         self.assertEqual(self.features("tac_plus-ng version 1/PCRE2/ARES 1.34.9/CURL 8.23.0/LibreSSL 4.4.0"),
-                         {"pcre2", "ares", "openssl"})
+                         {"pcre2", "ares", "openssl", "libressl"})
 
     def test_minimum(self):
         self.assertEqual(self.features("tac_plus-ng version 1"), set())
+
+
+@unittest.skipUnless(tls.openssl_available(), "no openssl command to make certificates")
+class Ca(unittest.TestCase):
+    """LibreSSL finds the trust anchor by subject: two CAs with one subject turn "unknown ca" into "decrypt error"."""
+
+    def test_each_ca_has_its_own_subject(self):
+        cas = [tls.CA("one-ca"), tls.CA("other-ca")]
+        for ca in cas:
+            self.addCleanup(ca.remove)
+        subjects = [tls._openssl("x509", "-in", ca.cert, "-noout", "-subject") for ca in cas]
+        self.assertNotEqual(subjects[0], subjects[1])
 
 
 class TestFiles(unittest.TestCase):

@@ -671,7 +671,7 @@ class RadsecSample(TlsSampleCase):
             r = self.connect_tls(self.client).author(user, ["service=shell", "cmd="])
             self.assertEqual((r.status_name, r.args), ("PASS_ADD", ["priv-lvl=15"]), user)
         self.assertEqual(self.connect_tls(self.client).author("demo2", ["service=ppp"]).status_name, "FAIL")
-        self.wait_log("conn", "\tTLSv1.3\t/O=tactest/CN=tactest root\t/CN=nas.demo.local")
+        self.wait_log("conn", "\tTLSv1.3\t%s\t/CN=nas.demo.local" % self.ca.subject)
 
     def test_tacacs_on_the_radsec_port(self):
         """The daemon tells TACACS+ from RADIUS by the first bytes."""

@@ -74,13 +74,14 @@ class CA:
 
     def __init__(self, name="ca"):
         self.dir = scratch_dir(name)
+        self.subject = "/O=tactest/CN=%s root" % name     # unique: LibreSSL finds the trust anchor by subject
         self.cert = self.path("root.crt")
         self.key = self.path("root.key")
         self._newkey(self.key)
         self._ext("root.ext", "basicConstraints = critical, CA:true\n"
                               "keyUsage = critical, keyCertSign, cRLSign\n"
                               "subjectKeyIdentifier = hash\n")
-        _openssl("req", "-batch", "-new", "-x509", "-key", self.key, "-subj", "/O=tactest/CN=tactest root",
+        _openssl("req", "-batch", "-new", "-x509", "-key", self.key, "-subj", self.subject,
                  "-days", "2", "-sha256", "-config", self._config(), "-extensions", "v3", "-out", self.cert)
         self.server = self.issue("server", "/O=tactest/CN=localhost", server=True,
                                  san="IP:127.0.0.1, IP:::1, DNS:localhost")
