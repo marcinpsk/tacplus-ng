@@ -17,11 +17,12 @@ import os
 import shutil
 import ssl
 import struct
+import tempfile
 import time
 import unittest
 
-from tactest import (LOOPBACK_NET, SOURCE, Closed, DaemonTestCase, ProtocolError, Stub, features, prefix, radius,
-                     sample, tacacs, tls)
+from tactest import (LOOPBACK_NET, SOURCE, Closed, DaemonTestCase, ProtocolError, Stub, crypto, features, prefix,
+                     radius, sample, tacacs, tls)
 
 STUB_EXEC = Stub.module().split("\n")[1:-2]     # the exec and setenv lines, without the "mavis module" block
 LISTENER = "listen { address = $address port = $port }\n$spawnd"
@@ -452,15 +453,17 @@ class ShadowSample(DaemonTestCase):
     """extra/tac_plus-ng.cfg-shadow: login passwords from mavis_tacplus_shadow.pl and a shadow file.
 
     The shadow line is the one of the comment in the sample: demo, "demopass", salt "demosalt".
+    A crypt(3) without MD5 (OpenBSD) gets a bcrypt hash of "demopass" instead.
     """
 
     KEY = "demo"
-    TEMPLATE = sample.template("extra/tac_plus-ng.cfg-shadow", [
+    TEMPLATE_EDITS = [
         ("listen = { port = 49 }", LISTENER.replace("listen {", "listen = {")),
         ('setenv SHADOWFILE = "/whereever/shadow"', 'setenv SHADOWFILE = "$tmp/shadow"'),
         ("exec = /usr/local/lib/mavis/mavis_tacplus_shadow.pl",
-         'exec = "%s"' % os.path.join(MAVIS_LIB, "mavis_tacplus_shadow.pl"))])
-    HASH = "$1$demosalt$utu9PObWiZWGFDLz4hWJe0"
+         'exec = "%s"' % os.path.join(MAVIS_LIB, "mavis_tacplus_shadow.pl"))]
+    TEMPLATE = sample.template("extra/tac_plus-ng.cfg-shadow", TEMPLATE_EDITS)
+    HASH = crypto.crypt("demopass", "$1$demosalt$", "$2b$04$demosaltdemosaltdemosu")
 
     @classmethod
     def setUpClass(cls):
@@ -508,6 +511,66 @@ class ShadowSample(DaemonTestCase):
         with open(os.path.join(self.daemon.tmp, "shadow")) as f:
             self.assertNotIn(self.HASH, f.read())
         self.assertEqual(self.connect().ascii_login("demo", "Newpass2").status_name, "PASS")
+
+
+# crypt(3) of OpenBSD: bcrypt only; Crypt::Passwd::XS (CPAN) has MD5
+OPENBSD_CRYPT = """package openbsd_crypt;
+BEGIN { *CORE::GLOBAL::crypt = sub { $_[1] =~ /^\\$2b\\$/ ? CORE::crypt($_[0], $_[1]) : "*0" } }
+1;
+"""
+CRYPT_PASSWD_XS = """package Crypt::Passwd::XS;
+sub crypt { $_[1] =~ /^\\$2b\\$/ ? "*0" : CORE::crypt($_[0], $_[1]) }
+1;
+"""
+
+
+@unittest.skipUnless(HAVE_PERL, "needs perl and the installed Mavis.pm")
+class ShadowSampleOpenBsdWithCryptPasswdXs(DaemonTestCase):
+    """extra/tac_plus-ng.cfg-shadow where crypt(3) has bcrypt only, with Crypt::Passwd::XS installed.
+
+    The script took bcrypt for new hashes, and then did not load Crypt::Passwd::XS: crypt(3) checked
+    the existing MD5 hashes, and no user with one could log in. Fakes of both stand in (PERL5OPT).
+    """
+
+    KEY = "demo"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.perl = tempfile.mkdtemp(prefix="tactest-perl-")
+        for name, text in (("openbsd_crypt.pm", OPENBSD_CRYPT), ("Crypt/Passwd/XS.pm", CRYPT_PASSWD_XS)):
+            os.makedirs(os.path.dirname(os.path.join(cls.perl, name)), exist_ok=True)
+            with open(os.path.join(cls.perl, name), "w") as f:
+                f.write(text)
+        shadowfile = 'setenv SHADOWFILE = "/whereever/shadow"'
+        edits = [e for e in ShadowSample.TEMPLATE_EDITS if e[0] != shadowfile]
+        cls.TEMPLATE = sample.template("extra/tac_plus-ng.cfg-shadow", edits + [
+            (shadowfile, 'setenv SHADOWFILE = "$tmp/shadow"\n\t\tsetenv PERL5LIB = "%s"\n'
+                         '\t\tsetenv PERL5OPT = "-Mopenbsd_crypt"' % cls.perl)])
+        try:
+            super().setUpClass()
+        except Exception:
+            shutil.rmtree(cls.perl, True)
+            raise
+        with open(os.path.join(cls.daemon.tmp, "shadow"), "w") as f:
+            f.write("demo:%s:%d:0:99999:7:::\n" % (crypto.crypt("demopass", "$1$demosalt$"), time.time() // 86400))
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            super().tearDownClass()
+        finally:
+            shutil.rmtree(cls.perl, True)
+
+    def test_login_with_an_md5_hash(self):
+        self.assertEqual(self.connect().ascii_login("demo", "demopass").status_name, "PASS")
+        self.assertEqual(self.connect().ascii_login("demo", "wrong").status_name, "FAIL")
+
+    def test_new_hash_is_bcrypt(self):
+        r = self.connect().ascii_login("demo", "", data=["demopass", "Newpass3", "Newpass3"])
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "Password change was successful.\n"))
+        with open(os.path.join(self.daemon.tmp, "shadow")) as f:
+            self.assertRegex(f.read(), r"^demo:\$2b\$10\$")
+        self.assertEqual(self.connect().ascii_login("demo", "Newpass3").status_name, "PASS")
 
 
 class TlsSampleCase(DaemonTestCase):
