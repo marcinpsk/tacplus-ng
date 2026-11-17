@@ -562,6 +562,7 @@ def democa_edits(ca, chain):
 
 
 @unittest.skipUnless(HAVE_TLS, "needs the openssl command and a build with OpenSSL")
+@unittest.skipUnless("psk" in features(), "TLS PSK needs a build with OpenSSL; LibreSSL has none")
 class TlsSample(TlsSampleCase):
     """sample/tac_plus-ng-tls.cfg: TACACS+ over TLS and TLS-PSK, RADIUS over UDP and TLS, a device by certificate.
 
