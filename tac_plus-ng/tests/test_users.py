@@ -99,7 +99,9 @@ class PasswordTypes(DaemonTestCase):
     def test_right_password_passes(self):
         for user, password in self.LOGINS:
             with self.subTest(user=user):
-                self.assertEqual(self.login(user, password), "PASS")
+                # without scrypt (LibreSSL) the daemon refuses type 9 (doc: "Password Hashes")
+                expected = "FAIL" if user == "type9" and "scrypt" not in features() else "PASS"
+                self.assertEqual(self.login(user, password), expected)
 
     def test_wrong_password_fails(self):
         results = parallel(lambda user, password: self.login(user, password + "x"), self.LOGINS)

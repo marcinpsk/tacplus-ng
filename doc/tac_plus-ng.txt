@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: e8bb53b768ec2733ce4e06298d4b6c6ef64ca445 $
+   $Id: 472eb3977289e1f98cd8007b3bc7db9487a5ebaa $
      __________________________________________________________
 
    Table of Contents
@@ -769,8 +769,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -1755,7 +1755,8 @@ key = ""
    password hashes.
    The pbkdf2 and asa hashes can be copied from a Cisco ASA plain
    text configuration. Likewise, the 4, 5, 7, 8 and 9 type
-   password hashes can be copied from IOS.
+   password hashes can be copied from IOS. Type 9 (scrypt) needs
+   OpenSSL: a build with LibreSSL rejects type 9 passwords.
 
        Note Password Encryption
 

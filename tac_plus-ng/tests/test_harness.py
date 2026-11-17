@@ -383,11 +383,14 @@ class Features(unittest.TestCase):
 
     def test_openssl(self):
         self.assertEqual(self.features("tac_plus-ng version 1/PCRE2/ARES 1.34.5/CURL 8.14.1/OpenSSL 3.5.7 9 Jun 2026"),
-                         {"pcre2", "ares", "openssl", "psk"})
+                         {"pcre2", "ares", "openssl", "psk", "scrypt"})
 
     def test_libressl_has_no_psk(self):
         self.assertEqual(self.features("tac_plus-ng version 1/PCRE2/ARES 1.34.9/CURL 8.23.0/LibreSSL 4.4.0"),
                          {"pcre2", "ares", "openssl"})
+
+    def test_libressl_has_no_scrypt(self):
+        self.assertNotIn("scrypt", self.features("tac_plus-ng version 1/LibreSSL 4.4.0"))
 
     def test_minimum(self):
         self.assertEqual(self.features("tac_plus-ng version 1"), set())

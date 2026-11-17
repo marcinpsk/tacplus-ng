@@ -2593,7 +2593,7 @@ tacacs-server host 192.168.0.1 single-connection key your key here</screen>
               <title>Password Hashes</title>
               <para>You can use the <literal>openssl passwd</literal>
                   utility to compute <literal>crypt</literal> type password hashes.</para>
-              <para>The <literal>pbkdf2</literal> and <literal>asa</literal> hashes can be copied from a Cisco ASA plain text configuration. Likewise, the <literal>4</literal>, <literal>5</literal>, <literal>7</literal>, <literal>8</literal> and <literal>9</literal> type password hashes can be copied from IOS.</para>
+              <para>The <literal>pbkdf2</literal> and <literal>asa</literal> hashes can be copied from a Cisco ASA plain text configuration. Likewise, the <literal>4</literal>, <literal>5</literal>, <literal>7</literal>, <literal>8</literal> and <literal>9</literal> type password hashes can be copied from IOS. Type <literal>9</literal> (scrypt) needs OpenSSL: a build with LibreSSL rejects type <literal>9</literal> passwords.</para>
             </note>
             <note>
               <title>Password Encryption</title>
