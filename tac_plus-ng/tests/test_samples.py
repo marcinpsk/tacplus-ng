@@ -20,8 +20,8 @@ import struct
 import time
 import unittest
 
-from tactest import (LINUX, SOURCE, Closed, DaemonTestCase, ProtocolError, Stub, features, prefix, radius, sample,
-                     tacacs, tls)
+from tactest import (LINUX, SOURCE, Closed, DaemonTestCase, ProtocolError, Stub, crypto, features, prefix, radius,
+                     sample, tacacs, tls)
 
 STUB_EXEC = Stub.module().split("\n")[1:-2]     # the exec and setenv lines, without the "mavis module" block
 LISTENER = "listen { address = $address port = $port }\n$spawnd"
@@ -452,6 +452,7 @@ class ShadowSample(DaemonTestCase):
     """extra/tac_plus-ng.cfg-shadow: login passwords from mavis_tacplus_shadow.pl and a shadow file.
 
     The shadow line is the one of the comment in the sample: demo, "demopass", salt "demosalt".
+    A crypt(3) without MD5 (OpenBSD) gets a bcrypt hash of "demopass" instead.
     """
 
     KEY = "demo"
@@ -460,7 +461,7 @@ class ShadowSample(DaemonTestCase):
         ('setenv SHADOWFILE = "/whereever/shadow"', 'setenv SHADOWFILE = "$tmp/shadow"'),
         ("exec = /usr/local/lib/mavis/mavis_tacplus_shadow.pl",
          'exec = "%s"' % os.path.join(MAVIS_LIB, "mavis_tacplus_shadow.pl"))])
-    HASH = "$1$demosalt$utu9PObWiZWGFDLz4hWJe0"
+    HASH = crypto.crypt("demopass", "$1$demosalt$", "$2b$04$demosaltdemosaltdemosu")
 
     @classmethod
     def setUpClass(cls):
