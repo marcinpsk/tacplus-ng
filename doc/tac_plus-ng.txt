@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 773cfc3e0d5b8522d5334d67fe9cdbc49119f2e5 $
+   $Id: 5f2049baf99831e43f981039971904cee84c7166 $
      __________________________________________________________
 
    Table of Contents
@@ -1755,7 +1755,8 @@ key = ""
    password hashes.
    The pbkdf2 and asa hashes can be copied from a Cisco ASA plain
    text configuration. Likewise, the 4, 5, 7, 8 and 9 type
-   password hashes can be copied from IOS.
+   password hashes can be copied from IOS. Type 9 (scrypt) needs
+   OpenSSL: a build with LibreSSL rejects type 9 passwords.
 
        Note Password Encryption
 
