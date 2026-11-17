@@ -718,8 +718,8 @@ class TlsCertificateConditions(FlagTestCase):
 	device certnas.tactest {
 	}
 """ + USER + shell_profile(TLS_CONDITIONS + [
-        ("issuer", 'tls.peer.cert.issuer == "/O=tactest/CN=tactest root"'),
-        ("issuer-regex", "tls.peer.cert.issuer =~ /CN=tactest root$$/"),
+        ("issuer", 'tls.peer.cert.issuer == "%(issuer)s"'),
+        ("issuer-regex", "tls.peer.cert.issuer =~ /CN=%(issuer_cn)s$$/"),
         ("subject", 'tls.peer.cert.subject == "/O=tactest/CN=certnas.tactest"'),
         ("subject-regex", "tls.peer.cert.subject =~ /O=tactest/"),
         ("cn", "tls.peer.cn == certnas.tactest"),
@@ -732,7 +732,8 @@ class TlsCertificateConditions(FlagTestCase):
         cls.ca = tls.CA(cls.__name__ + "-ca")
         cls.certs = {"certnas": cls.ca.issue("certnas", "/O=tactest/CN=certnas.tactest"),
                      "other": cls.ca.issue("other", "/O=tactest/CN=other.tactest")}
-        cls.CONFIG = cls.BODY % dict(ca=cls.ca.cert, server_crt=cls.ca.server[0], server_key=cls.ca.server[1])
+        cls.CONFIG = cls.BODY % dict(ca=cls.ca.cert, server_crt=cls.ca.server[0], server_key=cls.ca.server[1],
+                                     issuer=cls.ca.subject, issuer_cn=cls.ca.subject.rsplit("=", 1)[1])
         try:
             super().setUpClass()
         except Exception:

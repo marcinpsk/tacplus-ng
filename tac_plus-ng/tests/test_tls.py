@@ -396,6 +396,15 @@ def tls11_client_hello():
     return b"\x16\x03\x01" + len(handshake).to_bytes(2, "big") + handshake
 
 
+# OpenSSL 3 error code -> LibreSSL (code, reason, function); LibreSSL packs lib << 24 | function << 12 | reason
+LIBRESSL_ERRORS = {
+    "0A000418": ("14039418", "tlsv1 alert unknown ca", "ACCEPT_SR_CERT_VRFY"),
+    "0A000086": ("14FFF086", "certificate verify failed", "(UNKNOWN)SSL_internal"),
+    "0A00009C": ("1402542E", "tlsv1 alert protocol version", "ACCEPT_SR_CLNT_HELLO"),  # TLS 1.3 record version check
+    "0A000102": ("1402610B", "wrong version number", "ACCEPT_SR_CLNT_HELLO"),
+}
+
+
 class TlsRejectReason(TlsTestCase):
     """A failed TLS handshake: the connection log says why.
 
@@ -461,9 +470,15 @@ class TlsRejectReason(TlsTestCase):
         return client
 
     def assertRejected(self, r, code, error, verify_code="", verify=""):
+        """code and error are the OpenSSL 3 values; LIBRESSL_ERRORS gives those of a LibreSSL build."""
+        function = ""
+        if "libressl" in features():
+            if code not in LIBRESSL_ERRORS:
+                self.fail("no LibreSSL value for OpenSSL error %s (%s) in LIBRESSL_ERRORS" % (code, error))
+            code, error, function = LIBRESSL_ERRORS[code]
         self.assertIsNotNone(r, "no CONN-REJECT record")
         self.assertEqual((r["error_code"], r["error"], r["verify_code"], r["verify"]), (code, error, verify_code, verify))
-        self.assertEqual(r["hint"], "error:%s:SSL routines::%s" % (code, error))
+        self.assertEqual(r["hint"], "error:%s:SSL routines:%s:%s" % (code, function, error))
 
     def test_client_does_not_trust_the_server(self):
         """The case from the field: the device has the wrong CA and aborts with an alert."""
