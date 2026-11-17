@@ -139,6 +139,23 @@ class TlsTestCase(DaemonTestCase):
         kw.setdefault("timeout", 10.0)
         return self.connect(listener=listener, tls=self.context(client), **kw)
 
+    def relay(self, version, listener=None):
+        """A tls.RecordVersionRelay to the first listener, or to ports[listener]."""
+        d = self.daemon
+        r = tls.RecordVersionRelay(d.addr if listener is None else (d.address, d.ports[listener]), version)
+        self.addCleanup(r.close)
+        return r
+
+    def connect_tls_in_record(self, version, listener=None, client="certnas"):
+        """connect_tls() with the ClientHello in a record of that version (RFC 8446 5.1 allows 0x0301 and 0x0303)."""
+        sock = socket.create_connection(self.relay(version, listener).addr, timeout=10.0)
+        try:
+            sock = self.context(client).wrap_socket(sock, server_hostname="localhost")
+        except Exception:
+            sock.close()
+            raise
+        return self.connect(sock=sock, timeout=10.0)
+
     def assertRefused(self, connect, login=lambda c: c.pap("alice", "alicepw")):
         """The handshake or the first request fails; how depends on when the daemon gives up.
 
@@ -314,6 +331,11 @@ class AutoDetect(TlsTestCase):
         self.assertEqual(self.device_and_transport(self.connect(listener="tls")),
                          {"tactest-device": "localhost", "tactest-transport": "tcp"})
 
+    def test_tls12_record_version_on_a_listener_without_tls(self):
+        """RFC 8446 5.1: the record of the first ClientHello may say 0x0303 (LibreSSL clients with TLS 1.2 minimum)."""
+        self.assertEqual(self.device_and_transport(self.connect_tls_in_record(0x0303)),
+                         {"tactest-device": "certnas", "tactest-transport": "tls"})
+
 
 class ListenerTlsAuto(TlsTestCase):
     """#236, second part: "tls = auto" on a spawnd listener (0a1e650) auto-detects on that listener only."""
@@ -328,6 +350,13 @@ class ListenerTlsAuto(TlsTestCase):
     def test_issue236_tls_auto_listener_takes_plain(self):
         self.assertEqual(self.device_and_transport(self.connect(listener="auto")),
                          {"tactest-device": "localhost", "tactest-transport": "tcp"})
+
+    def test_tls_auto_listener_takes_any_record_version(self):
+        """RFC 5246 E.1: accept any {03,XX} as the record version of a ClientHello; RFC 8446 5.1: ignore it."""
+        for version in (0x0300, 0x0302, 0x0303, 0x0304):
+            with self.subTest(version="%04x" % version):
+                self.assertEqual(self.device_and_transport(self.connect_tls_in_record(version, listener="auto")),
+                                 {"tactest-device": "certnas", "tactest-transport": "tls"})
 
     def test_plain_listener_does_not_auto_detect(self):
         self.assertRefused(lambda: self.connect_tls(listener=None))
@@ -564,6 +593,29 @@ class Psk(TlsTestCase):
     def test_unknown_identity_is_refused(self):
         self.assertRefused(lambda: self.connect_psk(identity="nosuchnas"))
 
+
+class PskBesideCertificates(TlsTestCase):
+    """TLS 1.3 PSK and certificates on one listener without "tls psk = yes": the ClientHello names the PSK identity."""
+
+    LISTEN = {"tls": "tls = yes"}
+    BODY = TLS_REALM + PSK + DEVICES + policy(("certnas.tactest", "psknas", "localhost"))
+
+    def connect_psk(self, addr):
+        # X25519 only: the daemon looks for the identity in the first 1024 bytes, and an ML-KEM key share is longer
+        return self.connect(sock=tls.PskSocket(addr, "psknas", PSK_KEY, timeout=10.0, groups="X25519"), timeout=10.0)
+
+    def test_psk(self):
+        self.assertEqual(self.device_and_transport(self.connect_psk((self.daemon.address, self.daemon.ports["tls"]))),
+                         {"tactest-device": "psknas", "tactest-transport": "tls"})
+
+    def test_psk_in_a_tls12_record(self):
+        """RFC 8446 5.1: the record of the first ClientHello may say 0x0303 instead of 0x0301."""
+        self.assertEqual(self.device_and_transport(self.connect_psk(self.relay(0x0303, listener="tls").addr)),
+                         {"tactest-device": "psknas", "tactest-transport": "tls"})
+
+    def test_certificate(self):
+        self.assertEqual(self.device_and_transport(self.connect_tls()),
+                         {"tactest-device": "certnas", "tactest-transport": "tls"})
 
 
 RADSEC = """

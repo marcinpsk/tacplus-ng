@@ -40,6 +40,9 @@ has the few socket methods tacacs.Connection uses. The ssl module has no
 DTLS at all, so DtlsSocket does the same with "openssl s_client -dtls"
 for radius.Client.
 
+RecordVersionRelay changes the record version of a ClientHello on its way
+to the daemon.
+
 openssl_available() and dtls_client_available() let a test skip when the
 command or its DTLS client is missing.
 """
@@ -52,6 +55,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 
 from .daemon import scratch_dir
 
@@ -179,6 +183,60 @@ def self_signed(directory, name, subject):
     return crt, key
 
 
+def _recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("peer closed after %d of %d bytes" % (len(data), n))
+        data += chunk
+    return data
+
+
+class RecordVersionRelay:
+    """A TCP relay for one connection that sets the record version of the first TLS record the client sends.
+
+    The record header is not part of the handshake transcript, so the
+    handshake still completes. The relay forwards the first record in one
+    piece, as the daemon peeks at it before the handshake. Connect to addr.
+    """
+
+    def __init__(self, target, version, timeout=10.0):
+        family = socket.AF_INET6 if ":" in target[0] else socket.AF_INET
+        self.listener = socket.socket(family, socket.SOCK_STREAM)
+        self.listener.bind((target[0], 0))
+        self.listener.listen(1)
+        self.listener.settimeout(timeout)
+        self.addr = self.listener.getsockname()[:2]
+        self.thread = threading.Thread(target=self._run, args=(target, version.to_bytes(2, "big"), timeout),
+                                       daemon=True)
+        self.thread.start()
+
+    def _run(self, target, version, timeout):
+        with self.listener, self.listener.accept()[0] as client, \
+                socket.create_connection(target, timeout=timeout) as server:
+            header = _recv_exact(client, 5)
+            if header[0] != 0x16:
+                raise ValueError("the first record is no TLS handshake: %r" % header)
+            server.sendall(header[:1] + version + header[3:] + _recv_exact(client, int.from_bytes(header[3:], "big")))
+            peer = {client: server, server: client}
+            try:
+                while True:
+                    readable, _, _ = select.select(list(peer), [], [], timeout)
+                    if not readable:
+                        return
+                    for s in readable:
+                        data = s.recv(65536)
+                        if not data:
+                            return
+                        peer[s].sendall(data)
+            except ConnectionResetError:
+                pass    # the client sees the relay close the connection
+
+    def close(self):
+        self.thread.join(15)
+
+
 class SClientSocket:
     """A connection through "openssl s_client", for a client that takes a socket-like object.
 
@@ -244,11 +302,11 @@ class SClientSocket:
 
 
 class PskSocket(SClientSocket):
-    """TLS 1.3 with a pre-shared key, for tacacs.Connection(sock=...)."""
+    """TLS 1.3 with a pre-shared key, for tacacs.Connection(sock=...). groups: the key exchange groups ("-groups")."""
 
-    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256"):
-        super().__init__(addr, ["-tls1_3", "-ciphersuites", cipher, "-psk_identity", identity, "-psk", key_hex],
-                         timeout)
+    def __init__(self, addr, identity, key_hex, timeout=5.0, cipher="TLS_AES_128_GCM_SHA256", groups=None):
+        super().__init__(addr, ["-tls1_3", "-ciphersuites", cipher, "-psk_identity", identity, "-psk", key_hex]
+                         + (["-groups", groups] if groups else []), timeout)
 
 
 class DtlsSocket(SClientSocket):
