@@ -31,8 +31,13 @@
 hashlib offers MD4 only where OpenSSL still has its legacy provider, and
 the standard library has no DES at all. Both are needed for the NT
 response only, so speed doesn't matter.
+
+crypt() calls the crypt(3) of the system, as the daemon and the Perl
+backends do, to make hashes that the local crypt(3) supports.
 """
 
+import ctypes
+import ctypes.util
 import hashlib
 import struct
 
@@ -159,3 +164,18 @@ def challenge_response(challenge, password_hash):
 def mschapv2_challenge_hash(peer_challenge, authenticator_challenge, username):
     """RFC 2759 ChallengeHash()."""
     return hashlib.sha1(peer_challenge + authenticator_challenge + username).digest()[:8]
+
+
+def crypt(password, *settings):
+    """crypt(3) of password with the first setting that the local crypt(3) supports.
+
+    OpenBSD has only bcrypt; glibc's libxcrypt and musl return a "*" failure token instead of NULL.
+    """
+    libc = ctypes.CDLL(ctypes.util.find_library("crypt"))     # None: crypt(3) is in libc (OpenBSD)
+    libc.crypt.restype = ctypes.c_char_p
+    libc.crypt.argtypes = (ctypes.c_char_p, ctypes.c_char_p)
+    for setting in settings:
+        result = libc.crypt(password.encode(), setting.encode())
+        if result and not result.startswith(b"*"):
+            return result.decode()
+    raise RuntimeError("crypt(3) of this system supports none of %s" % (settings,))
