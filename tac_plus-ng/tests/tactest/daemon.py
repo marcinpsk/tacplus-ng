@@ -41,6 +41,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -292,6 +293,25 @@ def tcp_fds(pid):
 TCP_LISTEN = "0A"
 
 
+def command_rows(argv):
+    """The output lines of a command, split into fields."""
+    out = subprocess.run(argv, stdout=subprocess.PIPE, check=True).stdout.decode("utf-8", "replace")
+    return [line.split() for line in out.splitlines()]
+
+
+def listen_addresses(pid):
+    """{"127.0.0.1:49", "[::1]:49", ...}: local addresses of the listening TCP sockets of pid, off Linux."""
+    if sys.platform.startswith("freebsd"):
+        # USER COMMAND PID FD PROTO LOCAL FOREIGN
+        rows = command_rows(["sockstat", "-46", "-l", "-q", "-P", "tcp"])
+        return {f[5] for f in rows if len(f) > 5 and f[2] == str(pid)}
+    if sys.platform.startswith("openbsd"):
+        # USER CMD PID FD internet[6] stream tcp PCB LOCAL; a connected socket has more fields
+        rows = command_rows(["fstat", "-p", str(pid)])
+        return {f[8] for f in rows if len(f) == 9 and f[5:7] == ["stream", "tcp"]}
+    raise DaemonError("no way to find the listening sockets of a process on %s" % sys.platform)
+
+
 def cpu_seconds(pid):
     """utime + stime of a process (Linux)."""
     with open("/proc/%d/stat" % pid) as f:
@@ -405,13 +425,12 @@ class Daemon:
 
     def _wait_ready(self):
         deadline = time.monotonic() + READY_TIMEOUT
-        family = socket.AF_INET6 if ":" in self.address else socket.AF_INET
         while time.monotonic() < deadline:
             code = self.proc.poll()
             if code is not None:
                 return code
             # spawnd binds before it forks the first worker
-            if self._listening(family) and (not LINUX or self.workers()):
+            if self._listening() and (not LINUX or self.workers()):
                 self.snapshot()
                 return None
             select.select([], [], [], 0.02)
@@ -420,13 +439,12 @@ class Daemon:
         raise DaemonError("%s did not accept connections within %.0f s\n%s"
                           % (self.program, READY_TIMEOUT, self.stderr_tail()))
 
-    def _listening(self, family):
+    def _listening(self):
+        # not just "something accepts on the port": the port may belong to someone else
         if LINUX:
-            # not just "something accepts on the port": the port may belong to someone else
             return (self.port, TCP_LISTEN) in tcp_fds(self.pid)
-        with socket.socket(family, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            return s.connect_ex(self.addr) == 0
+        local = ("[%s]:%d" if ":" in self.address else "%s:%d") % self.addr
+        return local in listen_addresses(self.pid)
 
     def stderr_tail(self, lines=30):
         try:
