@@ -59,6 +59,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/err.h>
+#include <openssl/hmac.h>
 #include "type6.h"
 #endif
 
@@ -403,6 +404,9 @@ static void periodics_ctx(struct context *ctx, int cur __attribute__((unused)))
 
 static void accept_control(struct context *, int __attribute__((unused)));
 static void accept_control_final(struct context *);
+#ifdef WITH_SSL
+static void dtls_secret_init(void);
+#endif
 static void accept_control_common(int, struct scm_data_accept_ext *, sockaddr_union *, struct scm_data_udp *);
 static void accept_control_singleprocess(int, struct scm_data_accept *);
 static void accept_control_udp(int, struct scm_data_udp *);
@@ -417,6 +421,9 @@ static void setup_signals(void);
 int main(int argc, char **argv, char **envp)
 {
     scm_main(argc, argv, envp);
+#ifdef WITH_SSL
+    dtls_secret_init();
+#endif
 
     cfg_init();
 
@@ -476,23 +483,10 @@ int main(int argc, char **argv, char **envp)
     io_main(common_data.io);
 }
 
-#ifdef WITH_SSL
-void update_bio(struct context *ctx)
-{
-    if (ctx->rbio) {
-	char buf[8192];
-	ssize_t len = Read(ctx->sock, buf, sizeof(buf));
-	if (len > 0)
-	    BIO_write(ctx->rbio, buf, len);
-    }
-}
-#endif
-
 void cleanup(struct context *ctx, int cur __attribute__((unused)))
 {
 #ifdef WITH_SSL
     if (ctx->tls) {
-	update_bio(ctx);
 	SSL_shutdown(ctx->tls);
 	SSL_free(ctx->tls);
 	ctx->tls = NULL;
@@ -935,16 +929,17 @@ static void accept_control_tls(struct context *ctx, int cur)
     const char *hint = "";
     io_clr_i(ctx->io, cur);
     io_clr_o(ctx->io, cur);
+    ctx->udp_read = NULL;
 
     ctx->last_io = io_now.tv_sec;
 
-    update_bio(ctx);
     int r = SSL_accept(ctx->tls);
     switch (r) {
     default:
 	switch (SSL_get_error(ctx->tls, r)) {
 	case SSL_ERROR_WANT_READ:
 	    io_set_i(ctx->io, cur);
+	    ctx->udp_read = accept_control_tls;
 	    return;
 	case SSL_ERROR_WANT_WRITE:
 	    io_set_o(ctx->io, cur);
@@ -1841,7 +1836,8 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
     io_register(ctx->io, ctx->sock, ctx);
     if (udp) {
 	ctx->udp = BISTATE_YES;
-	ctx->inject_buf = mem_alloc(ctx->mem, INJECT_BUF_SIZE);
+	// a first DTLS datagram can be larger than a RADIUS packet
+	ctx->inject_buf = mem_alloc(ctx->mem, (udp->data_len > INJECT_BUF_SIZE) ? udp->data_len : INJECT_BUF_SIZE);
 	memcpy(ctx->inject_buf, udp->data, udp->data_len);
 	ctx->inject_len = udp->data_len;
 	ctx->udp_client = udp->client;
@@ -2119,14 +2115,6 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 {
     u_char tmp[6];
     if (recv_inject(ctx, tmp, sizeof(tmp), MSG_PEEK, NULL) == (ssize_t) sizeof(tmp)) {
-	if (ctx->udp && tmp[0] == 0x17 && tmp[1] == 0xfe && dtls_ver_ok(ctx->tls_versions, tmp[2])) {
-	    // DTLS Application Data, but we haven't seen the handshake, possibly due to a daemon
-	    // restart. Just return some junk data back , the peer is likely to retry with a new handshake.
-	    char junk[128] = { 0 };
-	    udp_send(ctx, junk, sizeof(junk));
-	    cleanup(ctx, ctx->sock);
-	    return;
-	}
 	if (ctx->tls_autodetect == TRISTATE_YES && tmp[0] == 0x16) {
 	    if (ctx->udp)
 		ctx->use_dtls = (tmp[1] == 0xfe && dtls_ver_ok(ctx->tls_versions, tmp[2])) ? BISTATE_YES : BISTATE_NO;
@@ -2159,6 +2147,47 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
     } else
 #endif
 	accept_control_check_tls_final(ctx);
+}
+
+static int dtls_listen(SSL *ssl)
+{
+#if defined(OPENSSL_IS_BORINGSSL)
+    return -1;			// no DTLSv1_listen()
+#elif defined(LIBRESSL_VERSION_NUMBER)
+    struct sockaddr_storage peer;
+    return DTLSv1_listen(ssl, &peer);
+#else
+    BIO_ADDR *peer = BIO_ADDR_new();
+    int r = peer ? DTLSv1_listen(ssl, peer) : -1;
+    BIO_ADDR_free(peer);
+    return r;
+#endif
+}
+
+// The write BIO of a DTLS context: each write is one datagram from the listener.
+static int udp_bio_write(BIO *b, const char *buf, int len)
+{
+    BIO_clear_retry_flags(b);
+    return (int) udp_send(BIO_get_data(b), buf, (size_t) len);
+}
+
+static long udp_bio_ctrl(BIO *b __attribute__((unused)), int cmd, long num __attribute__((unused)), void *ptr __attribute__((unused)))
+{
+    return cmd == BIO_CTRL_FLUSH;
+}
+
+static BIO *udp_bio_new(struct context *ctx)
+{
+    static BIO_METHOD *meth = NULL;
+    if (!meth) {
+	meth = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK, "spawnd UDP listener");
+	BIO_meth_set_write(meth, udp_bio_write);
+	BIO_meth_set_ctrl(meth, udp_bio_ctrl);
+    }
+    BIO *b = BIO_new(meth);
+    BIO_set_data(b, ctx);
+    BIO_set_init(b, 1);
+    return b;
 }
 
 static void accept_control_check_tls_final(struct context *ctx)
@@ -2218,7 +2247,14 @@ static void accept_control_check_tls_final(struct context *ctx)
 		ver |= 0x0300;
 	    }
 	    SSL_set_min_proto_version(ctx->tls, ver);
-	    SSL_set_fd(ctx->tls, ctx->sock);
+	    if (ctx->udp) {
+		// the datagrams from spawnd go to the read BIO
+		ctx->rbio = BIO_new(BIO_s_mem());
+		BIO_write(ctx->rbio, ctx->inject_buf, ctx->inject_len);
+		mem_free(ctx->mem, &ctx->inject_buf);
+		SSL_set_bio(ctx->tls, ctx->rbio, udp_bio_new(ctx));
+	    } else
+		SSL_set_fd(ctx->tls, ctx->sock);
 	    SSL_set_session_id_context(ctx->tls, (const unsigned char *) &ctx, sizeof(ctx));
 #ifndef OPENSSL_IS_BORINGSSL
 	    SSL_set_num_tickets(ctx->tls, 0);
@@ -2232,12 +2268,10 @@ static void accept_control_check_tls_final(struct context *ctx)
 		    SSL_set1_server_cert_type(ctx->tls, ctx->host->tls_server_cert_type, ctx->host->tls_server_cert_type_len);
 #endif
 	    }
-
-	    if (ctx->udp) {
-		ctx->rbio = BIO_new(BIO_s_mem());
-		SSL_set0_rbio(ctx->tls, ctx->rbio);
-		BIO_write(ctx->rbio, ctx->inject_buf, ctx->inject_len);
-		mem_free(ctx->mem, &ctx->inject_buf);
+	    // the first datagram is a ClientHello with the cookie (udp_first()): it is the second message of the handshake
+	    if (ctx->udp && dtls_listen(ctx->tls) != 1) {
+		reject_conn(ctx, "DTLS cookie", __func__, __LINE__);
+		return;
 	    }
 	}
 	accept_control_tls(ctx, ctx->sock);
@@ -2246,6 +2280,44 @@ static void accept_control_check_tls_final(struct context *ctx)
     accept_control_final(ctx);
 }
 #endif
+
+static struct context *udp_context(struct scm_udp_client *client)
+{
+    if (!udp_contexts)
+	return NULL;
+    struct context key;
+    key.udp_client = *client;
+    return RB_lookup(udp_contexts, &key);
+}
+
+// A read takes one packet, and records wait while the context has no reader: read while the reader takes data.
+static void udp_read_all(struct context *ctx)
+{
+    struct scm_udp_client client = ctx->udp_client;
+    size_t unread = ctx->inject_len - ctx->inject_off;
+#ifdef WITH_SSL
+    int dtls = ctx->tls != NULL;
+#else
+    int dtls = 0;
+#endif
+    while (ctx->udp_read && (dtls || unread)) {
+	ctx->udp_read(ctx, -1);
+	if (udp_context(&client) != ctx)
+	    return;		// the read ended the context
+#ifdef WITH_SSL
+	// OpenSSL can hold records that it read from the BIO and did not process yet; each DTLS reader reads through it
+	if (dtls) {
+	    if (SSL_want_read(ctx->tls))
+		return;		// no data in the BIO, and no record
+	    continue;
+	}
+#endif
+	size_t left = ctx->inject_len - ctx->inject_off;
+	if (left >= unread)
+	    return;
+	unread = left;
+    }
+}
 
 static void accept_control_final(struct context *ctx)
 {
@@ -2301,7 +2373,10 @@ static void accept_control_final(struct context *ctx)
     log_exec(NULL, ctx, S_connection, io_now.tv_sec);
     ctx->msgid = NULL;
     ctx->udp_read = tac_read;
-    tac_read(ctx, ctx->sock);
+    if (ctx->udp)
+	udp_read_all(ctx);	// also what came during the host lookup
+    else
+	tac_read(ctx, ctx->sock);
 }
 
 static struct udp_listener *udp_listener(int listener)
@@ -2340,14 +2415,14 @@ static void udp_listener_set(int listener, int fd)
 }
 
 // Send from the listener to the client, from the address the client sent to. A datagram the system does not take is lost, as on the network.
-ssize_t udp_send(struct context *ctx, const void *buf, size_t len)
+static ssize_t udp_send_to(struct scm_udp_client *client, const void *buf, size_t len)
 {
-    struct udp_listener *l = udp_listener(ctx->udp_client.listener);
+    struct udp_listener *l = udp_listener(client->listener);
     if (!l)
 	return (ssize_t) len;
-    sockaddr_union *local = &ctx->udp_client.local;
+    sockaddr_union *local = &client->local;
     struct iovec iov = {.iov_base = (void *) buf,.iov_len = len };
-    struct msghdr msg = {.msg_name = &ctx->udp_client.peer,.msg_namelen = su_len(&ctx->udp_client.peer),.msg_iov = &iov,.msg_iovlen = 1 };
+    struct msghdr msg = {.msg_name = &client->peer,.msg_namelen = su_len(&client->peer),.msg_iov = &iov,.msg_iovlen = 1 };
     union {
 	char buf[CMSG_SPACE(sizeof(struct in6_pktinfo))];
 	struct cmsghdr align;
@@ -2397,10 +2472,146 @@ ssize_t udp_send(struct context *ctx, const void *buf, size_t len)
 	    msg.msg_control = NULL;
     }
 
-    if (sendmsg(l->fd, &msg, 0) < 0)
-	report(NULL, LOG_DEBUG, DEBUG_NET_FLAG, "sendmsg to %s: %s", ctx->peer_addr_ascii.txt, strerror(errno));
+    if (sendmsg(l->fd, &msg, 0) < 0) {
+	char buf[INET6_ADDRSTRLEN];
+	report(NULL, LOG_DEBUG, DEBUG_NET_FLAG, "sendmsg to %s: %s", su_ntoa(&client->peer, buf, (socklen_t) sizeof(buf)), strerror(errno));
+    }
     return (ssize_t) len;
 }
+
+ssize_t udp_send(struct context *ctx, const void *buf, size_t len)
+{
+    return udp_send_to(&ctx->udp_client, buf, len);
+}
+
+#ifdef WITH_SSL
+#define DTLS_COOKIE_LEN 32	// HMAC-SHA256
+#define DTLS_HVR_LEN (DTLS1_RT_HEADER_LENGTH + DTLS1_HM_HEADER_LENGTH + 3 + DTLS_COOKIE_LEN)
+
+static u_char dtls_secret[SCM_SECRET_LEN];
+static int dtls_secret_ok = 0;
+
+// All workers of one spawnd make the same cookies: spawnd sends a client to any worker.
+static void dtls_secret_init(void)
+{
+    char *e = getenv(SCM_SECRET);
+    if (e && strlen(e) == 2 * SCM_SECRET_LEN) {
+	dtls_secret_ok = 1;
+	for (int i = 0; i < SCM_SECRET_LEN; i++) {
+	    unsigned int b = 0;
+	    if (sscanf(e + 2 * i, "%2x", &b) != 1)
+		dtls_secret_ok = 0;
+	    dtls_secret[i] = (u_char) b;
+	}
+    }
+    unsetenv(SCM_SECRET);	// MAVIS backends and other children do not get it
+}
+
+static size_t dtls_cookie_address(const sockaddr_union *su, u_char *p)
+{
+    switch (su->sa.sa_family) {
+    case AF_INET:
+	memcpy(p, &su->sin.sin_addr, 4);
+	memcpy(p + 4, &su->sin.sin_port, 2);
+	return 6;
+    case AF_INET6:
+	memcpy(p, &su->sin6.sin6_addr, 16);
+	memcpy(p + 16, &su->sin6.sin6_port, 2);
+	memcpy(p + 18, &su->sin6.sin6_scope_id, 4);
+	return 22;
+    }
+    return 0;
+}
+
+// The cookie of a client: HMAC of the peer address and port and the local address with the secret of spawnd.
+static int dtls_cookie(const struct scm_udp_client *client, u_char *cookie)
+{
+    static int reported = 0;
+    if (!dtls_secret_ok) {
+	if (!reported++)
+	    report(NULL, LOG_ERR, ~0, "no secret from spawnd for DTLS cookies: RADIUS/DTLS clients are dropped");
+	return 0;
+    }
+    u_char data[44];
+    size_t len = dtls_cookie_address(&client->peer, data);
+    len += dtls_cookie_address(&client->local, data + len);
+    unsigned int cookie_len = 0;
+    return HMAC(EVP_sha256(), dtls_secret, (int) sizeof(dtls_secret), data, len, cookie, &cookie_len) && cookie_len == DTLS_COOKIE_LEN;
+}
+
+// RFC 6347 4.2.1: a new DTLS client gets a context only with the cookie of a HelloVerifyRequest.
+// So a spoofed source gets no handshake flight, and uses no user slot. Nothing is kept for the HelloVerifyRequest.
+// 1: the cookie is valid; -1: hvr is the HelloVerifyRequest to send; 0: drop
+static int dtls_hello_verified(struct scm_udp_client *client, const u_char *data, size_t len, u_char *hvr)
+{
+    // a ClientHello in one record of epoch 0, not fragmented
+    const u_char *h = data + DTLS1_RT_HEADER_LENGTH;
+    if (len < DTLS1_RT_HEADER_LENGTH + DTLS1_HM_HEADER_LENGTH || data[3] || data[4] || h[0] != SSL3_MT_CLIENT_HELLO)
+	return 0;
+    size_t record_len = ((size_t) data[11] << 8) | data[12];
+    size_t msg_len = ((size_t) h[1] << 16) | ((size_t) h[2] << 8) | h[3];
+    size_t frag_off = ((size_t) h[6] << 16) | ((size_t) h[7] << 8) | h[8];
+    size_t frag_len = ((size_t) h[9] << 16) | ((size_t) h[10] << 8) | h[11];
+    if (DTLS1_RT_HEADER_LENGTH + record_len > len || frag_off || frag_len != msg_len || DTLS1_HM_HEADER_LENGTH + msg_len > record_len)
+	return 0;
+    // version, random, session id, cookie
+    const u_char *p = h + DTLS1_HM_HEADER_LENGTH + 2 + SSL3_RANDOM_SIZE, *end = h + DTLS1_HM_HEADER_LENGTH + msg_len;
+    if (p >= end || p + 1 + *p >= end)
+	return 0;
+    p += 1 + *p;
+    if (p + 1 + *p > end)
+	return 0;
+
+    u_char cookie[DTLS_COOKIE_LEN];
+    if (!dtls_cookie(client, cookie))
+	return 0;
+    if (*p == DTLS_COOKIE_LEN && !CRYPTO_memcmp(p + 1, cookie, DTLS_COOKIE_LEN))
+	return 1;
+
+    // DTLS 1.0 in the record and the message; the epoch, record sequence and message sequence of the ClientHello
+    memset(hvr, 0, DTLS_HVR_LEN);
+    hvr[0] = SSL3_RT_HANDSHAKE;
+    hvr[1] = DTLS1_VERSION >> 8;
+    hvr[2] = DTLS1_VERSION & 0xff;
+    memcpy(hvr + 3, data + 3, 8);
+    hvr[12] = DTLS1_HM_HEADER_LENGTH + 3 + DTLS_COOKIE_LEN;
+    u_char *m = hvr + DTLS1_RT_HEADER_LENGTH;
+    m[0] = DTLS1_MT_HELLO_VERIFY_REQUEST;
+    m[3] = m[11] = 3 + DTLS_COOKIE_LEN;	// length and fragment length
+    m[4] = h[4];
+    m[5] = h[5];
+    m[12] = DTLS1_VERSION >> 8;
+    m[13] = DTLS1_VERSION & 0xff;
+    m[14] = DTLS_COOKIE_LEN;
+    memcpy(m + 15, cookie, DTLS_COOKIE_LEN);
+    return -1;
+}
+
+#ifndef OPENSSL_IS_BORINGSSL
+// DTLSv1_listen() in accept_control_check_tls_final() checks the cookie again, with the context.
+static int dtls_cookie_generate(SSL *ssl, unsigned char *cookie, unsigned int *cookie_len)
+{
+    struct context *ctx = SSL_get_app_data(ssl);
+    if (!ctx || !dtls_cookie(&ctx->udp_client, cookie))
+	return 0;
+    *cookie_len = DTLS_COOKIE_LEN;
+    return 1;
+}
+
+static int dtls_cookie_verify(SSL *ssl, const unsigned char *cookie, unsigned int cookie_len)
+{
+    u_char c[DTLS_COOKIE_LEN];
+    struct context *ctx = SSL_get_app_data(ssl);
+    return ctx && cookie_len == DTLS_COOKIE_LEN && dtls_cookie(&ctx->udp_client, c) && !CRYPTO_memcmp(c, cookie, DTLS_COOKIE_LEN);
+}
+
+void dtls_cookie_callbacks(SSL_CTX *ctx)
+{
+    SSL_CTX_set_cookie_generate_cb(ctx, dtls_cookie_generate);
+    SSL_CTX_set_cookie_verify_cb(ctx, dtls_cookie_verify);
+}
+#endif
+#endif
 
 // One RADIUS packet, as rad_read() reads it.
 static int udp_radius(u_char *data, size_t len)
@@ -2411,35 +2622,60 @@ static int udp_radius(u_char *data, size_t len)
 // spawnd passes each datagram of a client to the context of the client, as the system passed them to a socket of its own.
 static void udp_input(struct context *ctx, u_char *data, size_t len)
 {
-    // a datagram that comes before the context has read the last one is lost, as on a full socket
-    if (ctx->inject_off < ctx->inject_len || !udp_radius(data, len))
-	return;
-    memcpy(ctx->inject_buf, data, len);
-    ctx->inject_len = len;
-    ctx->inject_off = 0;
-    if (ctx->udp_read)
-	ctx->udp_read(ctx, -1);
+#ifdef WITH_SSL
+    if (ctx->rbio) {
+	// keep at most what one DTLS read takes, so that a read never splits a record; the rest is lost, as on a full socket
+	if (BIO_ctrl_pending(ctx->rbio) + len > SSL3_RT_MAX_PLAIN_LENGTH)
+	    return;
+	BIO_write(ctx->rbio, data, (int) len);
+    } else
+#endif
+    {
+	// a datagram that comes before the context has read the last one is lost, as on a full socket
+	if (ctx->inject_off < ctx->inject_len || !udp_radius(data, len))
+	    return;
+	memcpy(ctx->inject_buf, data, len);
+	ctx->inject_len = len;
+	ctx->inject_off = 0;
+    }
+    udp_read_all(ctx);
+}
+
+// The first datagram of a new client: one RADIUS packet, or a DTLS ClientHello with its cookie. -1: reply is to send.
+static int udp_first(struct scm_data_udp *sd, u_char *reply __attribute__((unused)))
+{
+    if (udp_radius(sd->data, (size_t) sd->data_len))
+	return 1;
+#ifdef WITH_SSL
+    if (scm_udp_dtls(sd->data, (size_t) sd->data_len))
+	return dtls_hello_verified(&sd->client, sd->data, (size_t) sd->data_len, reply);
+#endif
+    return 0;
 }
 
 static void accept_control_udp(int s, struct scm_data_udp *sd)
 {
     udp_listener_set(sd->client.listener, s);
 
-    struct context *ctx = NULL;
-    if (udp_contexts) {
-	struct context key;
-	key.udp_client = sd->client;
-	ctx = RB_lookup(udp_contexts, &key);
-    }
+    struct context *ctx = udp_context(&sd->client);
     if (ctx) {
 	udp_input(ctx, sd->data, (size_t) sd->data_len);
 	return;
     }
 
     struct udp_listener *l = udp_listener(sd->client.listener);
-    if (!(sd->flags & SCM_FLAG_UDPNEW) || !l || !rad_dict_initialized() || !udp_radius(sd->data, (size_t) sd->data_len)) {
+#ifdef WITH_SSL
+    u_char reply[DTLS_HVR_LEN];
+#else
+    u_char reply[1];
+#endif
+    int first = ((sd->flags & SCM_FLAG_UDPNEW) && l && rad_dict_initialized())? udp_first(sd, reply) : 0;
+    if (first < 1) {
 	// not users_inc(): at "last-recently-used limit" it would end another context
 	udp_done(&sd->client, sd->id);
+	// after udp_done(): spawnd forgets the client before the next datagram of the client can come
+	if (first < 0)
+	    udp_send_to(&sd->client, reply, sizeof(reply));
 	return;
     }
 

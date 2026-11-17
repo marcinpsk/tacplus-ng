@@ -915,6 +915,9 @@ int rad_get_password(tac_session * session, char **val, size_t *val_len);
 
 ssize_t recv_inject(struct context *ctx, void *buf, size_t len, int flags, enum io_status *status);
 ssize_t udp_send(struct context *, const void *, size_t);
+#if defined(WITH_SSL) && !defined(OPENSSL_IS_BORINGSSL)
+void dtls_cookie_callbacks(SSL_CTX *);
+#endif
 
 void cleanup_session(tac_session *);
 struct log_item *parse_log_format(struct sym *, mem_t *);
@@ -975,8 +978,6 @@ void init_host(tac_host *, tac_host *, tac_realm *, int);
 void context_lru_append(struct context *);
 
 void users_dec(void);
-
-void update_bio(struct context *);
 
 ssize_t sendto_spoof(sockaddr_union * from_addr, sockaddr_union * dest_addr, void *buf, size_t len);
 void dump_hex(u_char * data, size_t data_len, char **buf);

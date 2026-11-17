@@ -92,6 +92,12 @@ static int su_cmp_scope(const sockaddr_union *a, const sockaddr_union *b)
     return r;
 }
 
+int scm_udp_dtls(const u_char *data, size_t len)
+{
+    // 13: the length of a DTLS record header; 22: handshake; 0xfe: DTLS version
+    return len >= 13 && data[0] == 22 && data[1] == 0xfe;
+}
+
 int scm_udp_client_cmp(const struct scm_udp_client *a, const struct scm_udp_client *b)
 {
     if (a->listener != b->listener)

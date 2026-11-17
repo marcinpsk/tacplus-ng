@@ -30,13 +30,15 @@
 
   Packet      code, identifier, authenticator and attributes as fields;
               encode() can override the length and the Message-Authenticator
-  Client      UDP, TCP or TLS over TCP: send_raw(), recv_raw() with a
+  Client      UDP, TCP, TLS over TCP or a stream socket of the caller
+              (DTLS through tls.DtlsSocket): send_raw(), recv_raw() with a
               timeout, exchange() checks the Response Authenticator,
               access_request() with a PAP User-Password of arbitrary bytes
 
 Message-Authenticator (RFC 3579 3.2) is added on request;
 reply_message_authenticator() checks the one in a reply. Over TLS the
-shared secret is "radsec" (RFC 6614 2.3).
+shared secret is "radsec" (RFC 6614 2.3), over DTLS "radius/dtls"
+(RFC 7360 2.1).
 """
 
 import hashlib
@@ -167,15 +169,21 @@ class Client:
     """One UDP socket (or TCP connection with tcp=True) to the daemon. Usable as a context manager.
 
     tls: an ssl.SSLContext for RADIUS over TLS (implies tcp); the secret
-    should then be "radsec".
+    should then be "radsec". sock: a connected socket-like object that
+    carries the packets as a stream, e.g. tls.DtlsSocket (addr is then not
+    used).
     """
 
-    def __init__(self, addr, secret, timeout=5.0, source=None, tcp=False, tls=None):
+    def __init__(self, addr, secret, timeout=5.0, source=None, tcp=False, tls=None, sock=None):
         host, port = addr[0], addr[1]
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self.secret = _b(secret)
         self.timeout = timeout
-        self.tcp = tcp or tls is not None
+        self.tcp = tcp or tls is not None or sock is not None
+        if sock is not None:
+            self.sock = sock
+            self.sock.settimeout(timeout)
+            return
         self.sock = socket.socket(family, socket.SOCK_STREAM if self.tcp else socket.SOCK_DGRAM)
         self.sock.settimeout(timeout)
         try:

@@ -195,6 +195,24 @@ struct spawnd_context *spawnd_new_context(struct io_context *io)
     return c;
 }
 
+// A random secret for all workers of this image, in the environment that they get (DTLS cookies of tac_plus-ng).
+static void spawnd_secret(void)
+{
+    u_char r[SCM_SECRET_LEN];
+    char hex[2 * SCM_SECRET_LEN + 1];
+    int fd = open("/dev/urandom", O_RDONLY);
+    ssize_t len = (fd < 0) ? -1 : read(fd, r, sizeof(r));
+    if (fd > -1)
+	close(fd);
+    if (len != (ssize_t) sizeof(r)) {
+	logerr("/dev/urandom: no secret for the workers (%s:%d)", __FILE__, __LINE__);
+	return;
+    }
+    for (size_t i = 0; i < sizeof(r); i++)
+	snprintf(hex + 2 * i, 3, "%02x", r[i]);
+    setenv(SCM_SECRET, hex, 1);
+}
+
 int spawnd_note_listener(sockaddr_union *sa __attribute__((unused)), void *data)
 {
     spawnd_data.listener_arr = Xrealloc(spawnd_data.listener_arr, (spawnd_data.listeners_max + 1) * sizeof(struct spawnd_context *));
@@ -706,6 +724,8 @@ int spawnd_main(int argc, char **argv, char **envp, char *id)
 	spawnd_data.listener_arr[i]->io = common_data.io;
 	spawnd_bind_listener(spawnd_data.listener_arr[i], spawnd_data.listener_arr[i]->fn);
     }
+
+    spawnd_secret();
 
 #ifdef BROKEN_FD_PASSING
     common_data.singleprocess = 1;
