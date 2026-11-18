@@ -994,6 +994,21 @@ member: cn=xylophone,ou=groups,$base
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
 
+    def test_tacmember_with_groups(self):
+        """The LDAP_TACMEMBER values are groups of the user also if the user has other groups.
+
+        ivan has memberOf staff and the tacMember netadmins; judy has only the tacMember netadmins.
+        """
+        schema = ("attributetype ( 1.3.6.1.4.1.32473.1 NAME 'tacMember' EQUALITY caseIgnoreMatch "
+                  "SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )")
+        users = "".join(person(uid, f"objectClass: extensibleObject\n{more}tacMember: netadmins\n")
+                        for uid, more in (("ivan", f"memberOf: {STAFF}\n"), ("judy", "")))
+        _, d = self.start(access=ACCESS + "\n" + schema, ldif=users)
+        for user, motd in (("ivan", "netadmins in staff\n"), ("judy", "netadmins only\n")):
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")

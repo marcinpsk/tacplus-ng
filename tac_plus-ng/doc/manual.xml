@@ -4850,7 +4850,7 @@ int async 1
                 <literal>LDAP_TACMEMBER</literal>
               </entry>
               <entry>
-                <para>LDAP attribute to use for group membership (fallback only).</para>
+                <para>LDAP attribute with more group names of the user. The back-ends add its values to <literal>TACMEMBER</literal>, also if the user has groups from memberOf, groupOfNames or posixGroup.</para>
                 <para>Default: <literal>"tacMember"</literal></para>
               </entry>
             </row>
