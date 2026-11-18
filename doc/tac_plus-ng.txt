@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 0bd900e9757694ccc2bdbfab33a7fdf674f2b4cf $
+   $Id: e1ef35e19a0bcd10a94935f23b9389c62a2ae0cd $
      __________________________________________________________
 
    Table of Contents
@@ -3058,11 +3058,6 @@ int async 1
 
    If set, the server is required to support start_tls. Do not set
    this flag for LDAPS connections.
-
-   Default: unset
-   FLAG_AUTHORIZE_ONLY
-
-   Don't attempt to authenticate users.
 
    Default: unset
    TLS_OPTIONS

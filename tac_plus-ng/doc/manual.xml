@@ -4868,15 +4868,6 @@ int async 1
             </row>
             <row>
               <entry>
-                <literal>FLAG_AUTHORIZE_ONLY</literal>
-              </entry>
-              <entry>
-                <para>Don't attempt to authenticate users.</para>
-                <para>Default: unset</para>
-              </entry>
-            </row>
-            <row>
-              <entry>
                 <literal>TLS_OPTIONS</literal>
               </entry>
               <entry>

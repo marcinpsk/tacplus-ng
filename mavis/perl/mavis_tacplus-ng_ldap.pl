@@ -104,9 +104,6 @@ FLAG_FALLTHROUGH
 	If LDAP search fails, try next module (if any). Deprecated.
 	Default: unset
 
-FLAG_AUTHORIZE_ONLY
-	Don't attempt to authenticate users.
-
 TLS_OPTIONS
 	Extra options for use with LDAPS or start_tls, in Perl hash syntax.
 	See https://metacpan.org/pod/Net::LDAP for details.
