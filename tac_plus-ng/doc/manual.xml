@@ -4861,21 +4861,9 @@ int async 1
               </entry>
               <entry>
                 <para>If set, the server is required to support
-                <literal>start_tls</literal>.</para>
+                <literal>start_tls</literal>. Do not set this flag for LDAPS connections.</para>
                 <para>Default:
                 unset</para>
-              </entry>
-              <entry>
-                <para>Do not set this flag for LDAPS connections.</para>
-              </entry>
-            </row>
-            <row>
-              <entry>
-                <literal>FLAG_AUTHORIZE_ONLY</literal>
-              </entry>
-              <entry>
-                <para>Don't attempt to authenticate users.</para>
-                <para>Default: unset</para>
               </entry>
             </row>
             <row>
@@ -4883,19 +4871,10 @@ int async 1
                 <literal>TLS_OPTIONS</literal>
               </entry>
               <entry>
-                <para>Extra options for use with LDAPS or start_tls, in Perl hash syntax. See <ulink url="https://metacpan.org/pod/Net::LDAP">the Net::LDLAP documentation</ulink> for details.</para>
+                <para>Extra options for use with LDAPS or start_tls, in Perl hash syntax. See <ulink url="https://metacpan.org/pod/Net::LDAP">the Net::LDAP documentation</ulink> for details.</para>
                 <para>The back-end checks the certificate of the server (<literal>verify =&gt; 'require'</literal>), unless <literal>TLS_OPTIONS</literal> sets <literal>verify</literal>. Name the CA of the server with <literal>cafile</literal>. <literal>verify =&gt; 'none'</literal> turns the check off.</para>
                 <para>Default: unset (the certificate of the server is checked)</para>
                 <para>Example: <literal>"sslversion =&gt; 'tlsv1_3'"</literal>, <literal>"cafile =&gt; '/path/to/ca.pem'"</literal></para>
-              </entry>
-            </row>
-            <row>
-              <entry>
-                <literal>FLAG_AUTHORIZE_ONLY</literal>
-              </entry>
-              <entry>
-                <para>Don't attempt to authenticate users.</para>
-                <para>Default: unset</para>
               </entry>
             </row>
             <row>
