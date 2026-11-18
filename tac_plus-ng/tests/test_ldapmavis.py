@@ -303,7 +303,7 @@ class LdapTests:
                       starttls)
         self.addCleanup(slapd.stop)
         slapd.start()
-        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
+        extra = "".join(f"\t\tsetenv {name} = {slapd_arg(value)}\n" for name, value in env.items())
         body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF)
         return slapd, self.start_daemon(body, check=check)
 
@@ -414,7 +414,7 @@ class LdapPython(LdapTests, DaemonTestCase):
     @staticmethod
     def trust(ca):
         # ldap3 compares only the DNS names of the certificate with the host
-        return {"TLS_OPTIONS": f"ca_certs_file='{ca.cert}', valid_names=['localhost']"}
+        return {"TLS_OPTIONS": f"ca_certs_file={ca.cert!r}, valid_names=['localhost']"}
 
     @staticmethod
     def ldaps(ca, more=""):
@@ -493,6 +493,14 @@ class LdapPython(LdapTests, DaemonTestCase):
             slapd, d = self.start(USE_STARTTLS="1")
             self.assert_login(d, "FAIL")
             self.assertEqual(slapd.binds(), [])
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_ca_path_with_quotes(self):
+        """ca_certs_file keeps a CA path with quotes and a backslash: TLS_OPTIONS is Python source."""
+        ca = tls.CA("it's \"a\" \\t")
+        self.addCleanup(ca.remove)
+        _, d = self.start(tls=self.ldaps(ca), **self.trust(ca))
+        self.assert_login(d, "PASS")
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_clear_text_warning(self):
