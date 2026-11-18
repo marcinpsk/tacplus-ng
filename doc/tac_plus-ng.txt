@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 05a49b6a7450b81627d8ee276aecf4caf1d27b2b $
+   $Id: 45de77b36a9cc981fb3663a46b14af57283ea7c5 $
      __________________________________________________________
 
    Table of Contents
@@ -3047,7 +3047,9 @@ int async 1
    Default: "^cn=([^,]+),.*"
    LDAP_TACMEMBER
 
-   LDAP attribute to use for group membership (fallback only).
+   LDAP attribute with more group names of the user. The back-ends
+   add its values to TACMEMBER, also if the user has groups from
+   memberOf, groupOfNames or posixGroup.
 
    Default: "tacMember"
    LDAP_TACMEMBER_MAP_OU

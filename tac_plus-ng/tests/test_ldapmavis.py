@@ -210,10 +210,10 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS, entries=""):
         """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
 
-        access: the access lines, and other global lines, of slapd.conf.
+        access: the access lines, and other global lines, of slapd.conf. entries: LDIF entries after LDIF.
         """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
@@ -235,7 +235,7 @@ class Slapd:
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
-            f.write(LDIF)
+            f.write(LDIF + entries)
         p = subprocess.run([SLAPD, "-T", "add", "-f", self.conf, "-l", ldif], stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, check=False)
         if p.returncode:
@@ -334,14 +334,14 @@ class LdapTests:
     # the LDAP_SCOPE values of the back-end for subtree, one level and base
     SCOPES = ("sub", "one", "base")
 
-    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", entries="", **env):
+        """Start slapd and the daemon; tls, starttls, access, entries: see Slapd, settings: tac_plus-ng lines.
 
         env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
         """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls, access)
+                      starttls, access, entries)
         self.addCleanup(slapd.stop)
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
@@ -412,6 +412,24 @@ class LdapTests:
             self.assertEqual(c.pap("alice", "alicepw").status_name, "FAIL")
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+
+    def test_tacmember_with_groups(self):
+        """The LDAP_TACMEMBER values are groups of the user also if the user has other groups.
+
+        ivan has memberOf staff and the tacMember netadmins; judy has only the tacMember netadmins.
+        """
+        schema = ("attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' EQUALITY distinguishedNameMatch "
+                  "SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 )\n"
+                  "attributetype ( 1.3.6.1.4.1.32473.1 NAME 'tacMember' EQUALITY caseIgnoreMatch "
+                  "SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )")
+        users = "".join(f"\ndn: uid={uid},ou=people,{BASE}\nobjectClass: inetOrgPerson\nobjectClass: extensibleObject\n"
+                        f"uid: {uid}\ncn: {uid}\nsn: {uid}\nuserPassword: {uid}pw\n{more}tacMember: netadmins\n"
+                        for uid, more in (("ivan", f"memberOf: {STAFF}\n"), ("judy", "")))
+        _, d = self.start(access=ACCESS + "\n" + schema, entries=users)
+        for user, motd in (("ivan", "netadmins in staff\n"), ("judy", "netadmins only\n")):
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")

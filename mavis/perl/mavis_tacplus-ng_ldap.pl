@@ -89,7 +89,7 @@ LDAP_MEMBEROF_FILTER
 	Default: unset
 
 LDAP_TACMEMBER
-	LDAP attribute to use for group membership (fallback only).
+	LDAP attribute with more group names of the user, for TACMEMBER.
 	Default: "tacMember"
 
 LDAP_TACMEMBER_MAP_OU
