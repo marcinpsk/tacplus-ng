@@ -160,6 +160,7 @@ def eval_env(var, dflt):
 # Environment variable evaluation ############################################
 eval_env('LDAP_BASE', 'dc=example,dc=local')
 eval_env('LDAP_BASE_GROUP', LDAP_BASE)
+eval_env('LDAP_BASE_POSIXGROUP', LDAP_BASE)
 eval_env('LDAP_USER', None)
 eval_env('LDAP_PASSWD', None)
 eval_env('LDAP_FILTER', None)
@@ -510,12 +511,12 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		if len(entry.gidNumber) > 0:
 			D.set_gid(entry.gidNumber[0])
 		if len(entry.gidNumber) > 0 and (LDAP_SKIP_POSIXGROUP is None or LDAP_SKIP_POSIXGROUP == "0"):
-			ldap_search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
+			ldap_search(search_base=LDAP_BASE_POSIXGROUP, search_scope=LDAP_SCOPE_POSIXGROUP,
 				search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(entry.gidNumber[0]),
 				attributes=["cn"])
 			if len(conn.entries) == 1:
 				TACMEMBER.extend(conn.entries[0].cn)
-			ldap_search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
+			ldap_search(search_base=LDAP_BASE_POSIXGROUP, search_scope=LDAP_SCOPE_POSIXGROUP,
 				search_filter='(&(objectclass=posixGroup)(memberUid={}))'.format(escape_filter_chars(D.user)),
 				attributes=["cn"])
 			for e in conn.entries:
