@@ -131,8 +131,8 @@ class Domain:
 
     alice is a member of netadmins, netadmins of staff, dave of staff;
     posix has the gidNumber of the posixGroup unix. The account states
-    of the BIND_ERRORS users, of inactive (533), and of reset and renew (773)
-    and aged (532), give the bind errors of AD.
+    of the BIND_ERRORS users, of inactive (533), and of reset, renew and
+    refused (773) and aged (532), give the bind errors of AD.
     """
 
     # cn: (userAccountControl, more LDIF lines); 512: a normal account, 514: disabled
@@ -146,6 +146,7 @@ class Domain:
         "mustchange": (512, "pwdLastSet: 0\n"),
         "reset": (512, "pwdLastSet: 0\n"),
         "renew": (512, "pwdLastSet: 0\n"),
+        "refused": (512, "pwdLastSet: 0\n"),
         "disabled": (514, ""),
         "inactive": (514, ""),
         "expired": (512, "accountExpires: 1\n"),
@@ -229,11 +230,18 @@ def ber(data, i=0):
 
 
 class Relay:
-    """An LDAPS relay to the DC; it records the bind requests, bind results and modify requests of each connection."""
+    """An LDAPS relay to the DC; it records the bind requests, bind results and modify requests of each connection.
 
-    def __init__(self, ca):
+    refuse: a DN. The relay itself answers the first bind of this DN that
+    follows a failed bind on the same connection, with resultCode 49
+    (invalidCredentials); the DC does not get that bind.
+    """
+
+    def __init__(self, ca, refuse=None):
         self.events = []    # (connection, "bind" and the DN | "bound" and the result code | "modify" and the DN)
         self.count = 0
+        self.refuse = refuse
+        self.refused = False
         server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server.load_cert_chain(*ca.server)
         self.dc = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -249,37 +257,50 @@ class Relay:
         conn = self.count
         dc = urllib.parse.urlsplit(URL)
         dc_reader, dc_writer = await asyncio.open_connection(dc.hostname, dc.port or 636, ssl=self.dc)
-        copies = [asyncio.ensure_future(self.copy(conn, reader, writer))
-                  for reader, writer in ((client_reader, dc_writer), (dc_reader, client_writer))]
+        copies = [asyncio.ensure_future(self.copy(conn, reader, writer, back))
+                  for reader, writer, back in ((client_reader, dc_writer, client_writer),
+                                               (dc_reader, client_writer, dc_writer))]
         await asyncio.wait(copies, return_when=asyncio.FIRST_COMPLETED)
         for writer in (client_writer, dc_writer):
             writer.close()
 
-    async def copy(self, conn, reader, writer):
+    async def copy(self, conn, reader, writer, back):
+        """Copy each complete LDAPMessage from reader to writer, or send the answer of the relay to back."""
         data = b""
         while True:
             chunk = await reader.read(65536)
             if not chunk:
                 return
-            data = self.record(conn, data + chunk)
-            writer.write(chunk)
-            await writer.drain()
+            data += chunk
+            while (message := ber(data)) is not None:
+                end = message[2]
+                answer = self.record(conn, data[:end])
+                out = back if answer else writer
+                out.write(answer or data[:end])
+                await out.drain()
+                data = data[end:]
 
-    def record(self, conn, data):
-        """Record the complete LDAPMessages (SEQUENCE: messageID, protocolOp) of data; return the rest."""
-        while True:
-            message = ber(data)
-            if message is None:
-                return data
-            _, body, end = message
-            tag, op, _ = ber(body, ber(body)[2])
-            if tag == 0x60:     # BindRequest: version, name
-                self.events.append((conn, "bind", ber(op, ber(op)[2])[1].decode()))
-            elif tag == 0x61:   # BindResponse: resultCode
-                self.events.append((conn, "bound", int.from_bytes(ber(op)[1], "big")))
-            elif tag == 0x66:   # ModifyRequest: object
-                self.events.append((conn, "modify", ber(op)[1].decode()))
-            data = data[end:]
+    def record(self, conn, message):
+        """Record one LDAPMessage (SEQUENCE: messageID, protocolOp); return the answer of the relay, or None."""
+        _, body, _ = ber(message)
+        tag, op, _ = ber(body, ber(body)[2])
+        if tag == 0x60:     # BindRequest: version, name
+            dn = ber(op, ber(op)[2])[1].decode()
+            results = [value for c, kind, value in self.events if c == conn and kind == "bound"]
+            self.events.append((conn, "bind", dn))
+            if (self.refuse and not self.refused and dn.lower() == self.refuse.lower()
+                    and results and results[-1] != 0):
+                self.refused = True
+                self.events.append((conn, "bound", 49))
+                # BindResponse: resultCode 49, matchedDN and diagnosticMessage empty
+                op = b"\x61\x07\x0a\x01\x31\x04\x00\x04\x00"
+                msgid = body[:ber(body)[2]]
+                return bytes([0x30, len(msgid) + len(op)]) + msgid + op
+        elif tag == 0x61:   # BindResponse: resultCode
+            self.events.append((conn, "bound", int.from_bytes(ber(op)[1], "big")))
+        elif tag == 0x66:   # ModifyRequest: object
+            self.events.append((conn, "modify", ber(op)[1].decode()))
+        return None
 
     async def stop(self):
         self.server.close()
@@ -337,6 +358,8 @@ class AdTests:
 
     # the back-end checks the certificate of the DC with the CA of env()
     CHECKS_CA = True
+    # the password change of a 773 or 532 account binds as the user, then again as LDAP_USER
+    CHPW_REBIND = True
 
     @classmethod
     def setUpClass(cls):
@@ -357,6 +380,14 @@ class AdTests:
         module = MODULE.substitute(module=self.MODULE, url=url, base=d.ou, reader=d.dn("reader"),
                                    readerpw=d.password("reader"), env=lines, exec=self.EXEC)
         return self.start_daemon(POLICY.substitute(module=config + module, staff=d.dn("staff")))
+
+    def start_relay(self, refuse=None):
+        """Start a Relay (refuse: see there) and the daemon with the relay as its DC; return both."""
+        ca = CA("ad-relay")
+        self.addCleanup(ca.remove)
+        relay = Relay(ca, refuse)
+        self.addCleanup(relay.close)
+        return relay, self.start(url=relay.url, ca=ca.cert)
 
     def login(self, cn):
         return self.domain.login(cn)
@@ -499,11 +530,7 @@ class AdTests:
     def test_must_change_bound(self):
         """After a 773 bind error, the password change runs bound: a failed bind leaves no identity (RFC 4511 4.2.1)."""
         # Samba keeps the identity of the earlier bind, so only the LDAP messages show the error
-        ca = CA("ad-relay")
-        self.addCleanup(ca.remove)
-        relay = Relay(ca)
-        self.addCleanup(relay.close)
-        d = self.start(url=relay.url, ca=ca.cert)
+        relay, d = self.start_relay()
         with d.connect() as c:
             r = c.ascii_login(self.login("renew"), "renew-pw", data=["renew-new", "renew-new"])
         self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
@@ -516,6 +543,27 @@ class AdTests:
             self.assertEqual(results[-1:], [0], f"event {k}, the modify of {dn}, follows a failed bind: {events}")
         with d.connect() as c:
             self.assertEqual(c.pap(self.login("renew"), "renew-new").status_name, "PASS")
+
+    def test_must_change_rebind_fails(self):
+        """A failed LDAP_USER bind after the 773 bind error gives a backend error (ERROR), and no change."""
+        # the change dialog (empty password) sends no AUTH: only the LDAP_USER bind before the change follows a 773
+        relay, d = self.start_relay(refuse=self.domain.dn("reader"))
+        with d.connect() as c:
+            r = c.ascii_login(self.login("refused"), "", data=["refused-pw", "refused-new", "refused-new"])
+        dn = self.domain.dn("refused")
+        events = relay.events
+        modifies = [k for k, (_, op, value) in enumerate(events) if op == "modify" and value.lower() == dn.lower()]
+        self.assertEqual(relay.refused, self.CHPW_REBIND, events)
+        if self.CHPW_REBIND:
+            # the client gets FAIL also for a backend error; the log tells them apart
+            self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "FAIL"], r)
+            line = f"\t{self.login('refused')}\ttty0\t127.0.0.1\tpassword change failed (backend error)"
+            self.wait_log("authentication", line, daemon=d)
+            self.assertEqual(modifies, [], events)
+            self.assertEqual(self.domain.bind_code("refused", "refused-pw"), "773")
+        else:
+            self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+            self.assertEqual(self.domain.bind_code("refused", "refused-new"), "")
 
 
 @unittest.skipUnless(URL, SKIP_REASON)
@@ -545,6 +593,8 @@ class AdPerl(AdTests, DaemonTestCase):
     MODULE = "external"
     EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
     MESSAGE = "%s"
+    # it changes the AD password as LDAP_USER, with no user bind
+    CHPW_REBIND = False
 
     def env(self, ca):
         # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails

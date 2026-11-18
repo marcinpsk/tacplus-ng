@@ -922,6 +922,7 @@ static void *run_thread(void *arg)
 
 	dnhash_drop(hash);
 
+	int rebind_failed = 0;
 	if (is_auth) {
 	    char *cap = av_get(ac, AV_A_CALLER_CAP);
 	    int caller_cap_chpw = (cap && strstr(cap, ":chpw:"));
@@ -954,8 +955,12 @@ static void *run_thread(void *arg)
 			av_set(ac, AV_A_RESULT, AV_V_RESULT_OK);
 			av_set(ac, AV_A_PASSWORD_MUSTCHANGE, "1");
 			result = MAVIS_FINAL;
-		    } else	// the failed bind left the connection anonymous (RFC 4511 4.2.1), and AD refuses the change then
-			LDAP_bind(ldap, ldap_dn, ldap_pw);
+		    } else if ((rc = LDAP_bind(ldap, ldap_dn, ldap_pw)) != LDAP_SUCCESS) {	// the failed bind left the connection anonymous (RFC 4511 4.2.1), and AD refuses the change then
+			fprintf(stderr, "%d: %s: %s\n", __LINE__, ldap_dn, ldap_err2string(rc));
+			av_set(ac, AV_A_RESULT, AV_V_RESULT_ERROR);
+			result = MAVIS_FINAL;
+			rebind_failed = 1;
+		    }
 		} else {
 		    av_set(ac, AV_A_USER_RESPONSE, translate_ldap_error(err, diag, &out));
 		    av_set(ac, AV_A_RESULT, AV_V_RESULT_FAIL);
@@ -972,7 +977,7 @@ static void *run_thread(void *arg)
 	    av_set(ac, AV_A_RESULT, AV_V_RESULT_FAIL);
 	    result = MAVIS_FINAL;
 	}
-	if (!strcmp(tactype, AV_V_TACTYPE_CHPW)) {
+	if (!rebind_failed && !strcmp(tactype, AV_V_TACTYPE_CHPW)) {
 	    if (capabilities & CAP_AD) {
 		char *oldpw = av_get(ac, AV_A_PASSWORD);
 		size_t oldpw_len = strlen(oldpw);
