@@ -217,8 +217,9 @@ def ldap_bind(c):
 
 # A new connection, bound as LDAP_USER unless bind is False; TLS comes first:
 def ldap_connect(bind=True):
+	# no referrals: ldap3 binds to the referral host with the credentials of this connection, as ldapmavis-mt
 	# a pool for each connection: a ServerPool keeps a reference to each connection that used it
-	c = ldap3.Connection(ldap3.ServerPool(servers, ldap3.FIRST, active=True), receive_timeout=LDAP_CONNECT_TIMEOUT)
+	c = ldap3.Connection(ldap3.ServerPool(servers, ldap3.FIRST, active=True), receive_timeout=LDAP_CONNECT_TIMEOUT, auto_referrals=False)
 	try:
 		c.open(read_server_info=False)
 		if not c.server.ssl:

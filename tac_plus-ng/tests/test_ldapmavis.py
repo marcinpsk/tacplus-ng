@@ -1973,6 +1973,23 @@ class LdapPython(LdapTests, DaemonTestCase):
         with open(slapd.log, errors="replace") as f:
             self.assertNotIn("oid=1.3.6.1.4.1.4203.1.11.1", f.read())
 
+    def test_no_referrals(self):
+        """The back-end does not follow a referral: ldap3 binds to the referral host with the credentials it has."""
+        with socket.socket() as host:
+            host.bind(("127.0.0.1", 0))
+            host.listen()
+            # slapd answers a search base outside its suffix with this referral
+            referral = f"\nreferral ldap://127.0.0.1:{host.getsockname()[1]}/"
+            _, d = self.start(access=ACCESS + referral, LDAP_BASE_GROUP="dc=elsewhere,dc=org")
+            for password, status in (("wrong", "FAIL"), ("alicepw", "PASS")):
+                with self.subTest(password=password), d.connect() as c:
+                    self.assertEqual(c.pap("alice", password).status_name, status)
+            if select.select([host], [], [], 0)[0]:
+                peer, _ = host.accept()
+                with peer:
+                    peer.settimeout(1)
+                    self.fail(f"the back-end followed the referral and sent: {peer.recv(4096)!r}")
+
     def test_empty_password(self):
         """An empty password is a FAIL without a bind, not a backend error.
 
