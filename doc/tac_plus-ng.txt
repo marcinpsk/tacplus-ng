@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 8f0e9e5d52dee1e128afe1147fda9bf7cb46a2e5 $
+   $Id: 20391bcdc169ae77da560a76ae50d3540d2685e6 $
      __________________________________________________________
 
    Table of Contents
@@ -3215,12 +3215,13 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
 
    On each new connection to an ldap:// URL or to an entry without
    a URL scheme, the back-end first starts TLS. Then it binds as
-   LDAP_USER. The back-end does not read the root DSE to decide
-   about StartTLS. If the server does not support StartTLS, or
-   StartTLS fails, the back-end closes the connection and the
-   request gets a back-end error. A connection without TLS writes
-   a warning to stderr. ldaps:// URLs do not use StartTLS.
-   TLS_OPTIONS also applies to StartTLS.
+   LDAP_USER, or as the user on the connection for the user binds.
+   The back-end does not read the root DSE to decide about
+   StartTLS. If the server does not support StartTLS, or StartTLS
+   fails, the back-end closes the connection and the request gets
+   a back-end error. A connection without TLS writes a warning to
+   stderr. ldaps:// URLs do not use StartTLS. TLS_OPTIONS also
+   applies to StartTLS.
 
    USE_STARTTLS is not necessary, because StartTLS is the default.
    The back-end ignores it. Older versions started TLS only if the
@@ -3228,6 +3229,14 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    an entry without a URL scheme (e.g. "ldap01 ldap02") with a
    server without StartTLS must set LDAP_SKIP_STARTTLS=1 or use an
    ldaps:// URL.
+
+   The back-end keeps two connections to the server. It does the
+   searches on one connection, bound as LDAP_USER. It checks the
+   password of the user on the other connection, and a password
+   change after a good user bind also runs there. After AD data
+   code 532 or 773 (password expired, password must change), the
+   AD password change runs on the LDAP_USER connection. The
+   back-end does not follow referrals.
      __________________________________________________________
 
 5.2. PAM back-end
