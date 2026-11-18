@@ -390,6 +390,15 @@ class LdapTests:
             r = c.ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
 
+    def test_nested_group_depth(self):
+        """LDAP_NESTED_GROUP_DEPTH=1 gives the groups of the user, 2 also the groups of these groups."""
+        for depth, motd in (("0", ""), ("1", "netadmins only\n"), ("2", "netadmins in staff\n")):
+            with self.subTest(depth=depth):
+                _, d = self.start(LDAP_NESTED_GROUP_DEPTH=depth)
+                with d.connect() as c:
+                    r = c.ascii_login("alice", "alicepw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
         _, d = self.start()
