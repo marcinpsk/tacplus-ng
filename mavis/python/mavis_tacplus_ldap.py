@@ -413,7 +413,8 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 					if len (entry.krbPasswordExpiration) > 0:
 						r = re.compile(r'^(\d\d\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z$')
 						m = r.search(entry.krbPasswordExpiration[0])
-						if len(m.groups()) == 6:
+						# another format gives no expiry, as in the Perl back-end and ldapmavis-mt
+						if m:
 							t = (int (m.group(1)), int(m.group(2)), int(m.group(3)),
 								int(m.group(4)), int(m.group(5)), int(m.group(6)),
 								0, 0, 0)

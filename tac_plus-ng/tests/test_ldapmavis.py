@@ -2021,6 +2021,20 @@ class LdapPython(LdapTests, DaemonTestCase):
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
         self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
 
+    def test_krb_password_expiration_format(self):
+        """A krbPasswordExpiration that is not YYYYMMDDHHMMSSZ gives no expiry; the back-end continues."""
+        schema = ("attributetype ( 2.16.840.1.113719.1.301.4.6.1 NAME 'krbPasswordExpiration' "
+                  "EQUALITY generalizedTimeMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 SINGLE-VALUE )")
+        # a generalized time with a time zone offset
+        kurt = person("kurt", "objectClass: extensibleObject\nkrbPasswordExpiration: 20991231235959+0100\n")
+        _, d = self.start(access=ACCESS + "\n" + schema, ldif=kurt)
+        for password, status in (("kurtpw", "PASS"), ("wrong", "FAIL")):
+            with self.subTest(password=password), d.connect() as c:
+                self.assertEqual(c.pap("kurt", password).status_name, status)
+        # no backend error: the fallback-only user cannot log in
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
     def test_starttls_settings_invalid(self):
         """A LDAP_SKIP_STARTTLS that is not 0 or 1 stops the back-end."""
         cases = tuple(({"LDAP_SKIP_STARTTLS": value}, f"invalid LDAP_SKIP_STARTTLS: {value!r}")
