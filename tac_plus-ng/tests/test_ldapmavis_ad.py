@@ -11,16 +11,20 @@ sAMAccountName.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
 import secrets
 import shutil
+import ssl
 import string
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+import urllib.parse
 from typing import ClassVar
 from unittest import mock
 
@@ -127,8 +131,8 @@ class Domain:
 
     alice is a member of netadmins, netadmins of staff, dave of staff;
     posix has the gidNumber of the posixGroup unix. The account states
-    of the BIND_ERRORS users, of inactive (533), and of reset (773) and
-    aged (532), give the bind errors of AD.
+    of the BIND_ERRORS users, of inactive (533), and of reset and renew (773)
+    and aged (532), give the bind errors of AD.
     """
 
     # cn: (userAccountControl, more LDIF lines); 512: a normal account, 514: disabled
@@ -141,6 +145,7 @@ class Domain:
         "posix": (512, f"gidNumber: {POSIX_GID}\n"),
         "mustchange": (512, "pwdLastSet: 0\n"),
         "reset": (512, "pwdLastSet: 0\n"),
+        "renew": (512, "pwdLastSet: 0\n"),
         "disabled": (514, ""),
         "inactive": (514, ""),
         "expired": (512, "accountExpires: 1\n"),
@@ -210,6 +215,86 @@ class Domain:
         time.sleep(max(0.0, self.created + PASSWORD_MAX_AGE + 1 - time.monotonic()))
 
 
+def ber(data, i=0):
+    """(tag, value, end) of the BER element at data[i]; None while it is incomplete."""
+    if len(data) < i + 2:
+        return None
+    length, start = data[i + 1], i + 2
+    if length & 0x80:
+        start += length & 0x7F
+        length = int.from_bytes(data[i + 2:start], "big")
+    if len(data) < start + length:
+        return None
+    return data[i], data[start:start + length], start + length
+
+
+class Relay:
+    """An LDAPS relay to the DC; it records the bind requests, bind results and modify requests of each connection."""
+
+    def __init__(self, ca):
+        self.events = []    # (connection, "bind" and the DN | "bound" and the result code | "modify" and the DN)
+        self.count = 0
+        server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.load_cert_chain(*ca.server)
+        self.dc = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.dc.load_verify_locations(settings()["TACTEST_SAMBA_CA"])
+        self.loop = asyncio.new_event_loop()
+        self.server = self.loop.run_until_complete(asyncio.start_server(self.serve, "127.0.0.1", 0, ssl=server))
+        self.url = f"ldaps://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+
+    async def serve(self, client_reader, client_writer):
+        self.count += 1
+        conn = self.count
+        dc = urllib.parse.urlsplit(URL)
+        dc_reader, dc_writer = await asyncio.open_connection(dc.hostname, dc.port or 636, ssl=self.dc)
+        copies = [asyncio.ensure_future(self.copy(conn, reader, writer))
+                  for reader, writer in ((client_reader, dc_writer), (dc_reader, client_writer))]
+        await asyncio.wait(copies, return_when=asyncio.FIRST_COMPLETED)
+        for writer in (client_writer, dc_writer):
+            writer.close()
+
+    async def copy(self, conn, reader, writer):
+        data = b""
+        while True:
+            chunk = await reader.read(65536)
+            if not chunk:
+                return
+            data = self.record(conn, data + chunk)
+            writer.write(chunk)
+            await writer.drain()
+
+    def record(self, conn, data):
+        """Record the complete LDAPMessages (SEQUENCE: messageID, protocolOp) of data; return the rest."""
+        while True:
+            message = ber(data)
+            if message is None:
+                return data
+            _, body, end = message
+            tag, op, _ = ber(body, ber(body)[2])
+            if tag == 0x60:     # BindRequest: version, name
+                self.events.append((conn, "bind", ber(op, ber(op)[2])[1].decode()))
+            elif tag == 0x61:   # BindResponse: resultCode
+                self.events.append((conn, "bound", int.from_bytes(ber(op)[1], "big")))
+            elif tag == 0x66:   # ModifyRequest: object
+                self.events.append((conn, "modify", ber(op)[1].decode()))
+            data = data[end:]
+
+    async def stop(self):
+        self.server.close()
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def close(self):
+        asyncio.run_coroutine_threadsafe(self.stop(), self.loop).result(60)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join()
+        self.loop.close()
+
+
 MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
@@ -248,7 +333,7 @@ $module
 
 
 class AdTests:
-    """The tests for both back-ends; a subclass sets MODULE, EXEC, MESSAGE (its bind error text) and env() (TLS)."""
+    """The tests for both back-ends; a subclass sets MODULE, EXEC, MESSAGE (its bind error text) and env(ca) (TLS)."""
 
     # the back-end checks the certificate of the DC with the CA of env()
     CHECKS_CA = True
@@ -263,12 +348,13 @@ class AdTests:
             cls.addClassCleanup(cls.domain.remove_pso, dn)
         cls.domain.create()
 
-    def start(self, config="", **env):
+    def start(self, url=URL, ca=None, config="", **env):
         """Start the daemon; config goes in front of the MAVIS module, env into its setenv lines."""
         d = self.domain
+        tls = self.env(ca or settings()["TACTEST_SAMBA_CA"])
         # the daemon reads a quoted string as slapd.conf does
-        lines = "\n".join(f"\t\tsetenv {k} = {slapd_arg(v)}" for k, v in {**self.env(), **env}.items())
-        module = MODULE.substitute(module=self.MODULE, url=URL, base=d.ou, reader=d.dn("reader"),
+        lines = "\n".join(f"\t\tsetenv {k} = {slapd_arg(v)}" for k, v in {**tls, **env}.items())
+        module = MODULE.substitute(module=self.MODULE, url=url, base=d.ou, reader=d.dn("reader"),
                                    readerpw=d.password("reader"), env=lines, exec=self.EXEC)
         return self.start_daemon(POLICY.substitute(module=config + module, staff=d.dn("staff")))
 
@@ -410,6 +496,27 @@ class AdTests:
             with self.subTest(password=password), d.connect() as c:
                 self.assertEqual(c.pap(self.login("reset"), password).status_name, status)
 
+    def test_must_change_bound(self):
+        """After a 773 bind error, the password change runs bound: a failed bind leaves no identity (RFC 4511 4.2.1)."""
+        # Samba keeps the identity of the earlier bind, so only the LDAP messages show the error
+        ca = CA("ad-relay")
+        self.addCleanup(ca.remove)
+        relay = Relay(ca)
+        self.addCleanup(relay.close)
+        d = self.start(url=relay.url, ca=ca.cert)
+        with d.connect() as c:
+            r = c.ascii_login(self.login("renew"), "renew-pw", data=["renew-new", "renew-new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        dn = self.domain.dn("renew")
+        events = relay.events
+        modifies = [k for k, (_, op, value) in enumerate(events) if op == "modify" and value.lower() == dn.lower()]
+        self.assertTrue(modifies, f"no modify of {dn}: {events}")
+        for k in modifies:
+            results = [value for conn, op, value in events[:k] if conn == events[k][0] and op == "bound"]
+            self.assertEqual(results[-1:], [0], f"event {k}, the modify of {dn}, follows a failed bind: {events}")
+        with d.connect() as c:
+            self.assertEqual(c.pap(self.login("renew"), "renew-new").status_name, "PASS")
+
 
 @unittest.skipUnless(URL, SKIP_REASON)
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
@@ -421,8 +528,8 @@ class AdMt(AdTests, DaemonTestCase):
     # ldapmavis-mt makes its TLS context before it reads the LDAP_OPT_X_TLS_* settings
     CHECKS_CA = False
 
-    def env(self):
-        return {"LDAP_OPT_X_TLS_CACERTFILE": settings()["TACTEST_SAMBA_CA"],
+    def env(self, ca):
+        return {"LDAP_OPT_X_TLS_CACERTFILE": ca,
                 "LDAP_OPT_X_TLS_REQUIRE_CERT": "LDAP_OPT_X_TLS_DEMAND"}
 
     @unittest.expectedFailure
@@ -439,9 +546,9 @@ class AdPerl(AdTests, DaemonTestCase):
     EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
     MESSAGE = "%s"
 
-    def env(self):
+    def env(self, ca):
         # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
-        return {"TLS_OPTIONS": f"verify => 'require', cafile => {perl_string(settings()['TACTEST_SAMBA_CA'])}",
+        return {"TLS_OPTIONS": f"verify => 'require', cafile => {perl_string(ca)}",
                 "LDAP_CONNECT_TIMEOUT": "5"}
 
 
@@ -456,7 +563,7 @@ class AdPython(AdTests, DaemonTestCase):
     MESSAGE = "Permission denied: %s"
     CHECKS_CA = False
 
-    def env(self):
+    def env(self, ca):
         return {}
 
 

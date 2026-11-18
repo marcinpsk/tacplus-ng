@@ -954,7 +954,8 @@ static void *run_thread(void *arg)
 			av_set(ac, AV_A_RESULT, AV_V_RESULT_OK);
 			av_set(ac, AV_A_PASSWORD_MUSTCHANGE, "1");
 			result = MAVIS_FINAL;
-		    }
+		    } else	// the failed bind left the connection anonymous (RFC 4511 4.2.1), and AD refuses the change then
+			LDAP_bind(ldap, ldap_dn, ldap_pw);
 		} else {
 		    av_set(ac, AV_A_USER_RESPONSE, translate_ldap_error(err, diag, &out));
 		    av_set(ac, AV_A_RESULT, AV_V_RESULT_FAIL);
