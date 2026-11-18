@@ -1906,6 +1906,19 @@ class LdapPython(LdapTests, DaemonTestCase):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(count(d), before)
 
+    @unittest.skipUnless(LINUX, "the open files of the back-end are found through /proc")
+    def test_failed_server_detection_closes_the_connection(self):
+        """A failure after the first connect (no root DSE after the bind) is a backend error; the connection closes."""
+        log = self.capture_stderr("detection")
+        # the bind passes, the root DSE search of ldap3 after it does not; no StartTLS: it reads the root DSE before
+        _, d = self.start(access=ACCESS + "\nrestrict search", LDAP_SKIP_STARTTLS="1")
+        self.assert_login(d, "FAIL")
+        before = backend_fds(d, LDAP_PYTHON)
+        for _ in range(10):
+            self.assertEqual(self.login(d), "FAIL")
+        self.assertEqual(backend_fds(d, LDAP_PYTHON), before)
+        self.assertIn("supported_features", self.stderr(log, "supported_features"))
+
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_reconnect_starts_tls(self):
         """After slapd restarts, the back-end opens a new connection: StartTLS comes before its bind too."""
