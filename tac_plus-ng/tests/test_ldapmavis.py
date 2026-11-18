@@ -680,6 +680,25 @@ class LdapPython(LdapTests, DaemonTestCase):
                 self.assertEqual(c.pap(user, password).status_name, "FAIL")
         self.assertEqual([dn for dn, _ in slapd.binds()[before:]], [READER, BOB])
 
+    def test_search_result_error(self):
+        """A search that the server answers with an error is a backend error, also if it sends a part of the entries."""
+        cases = (("user search", "sizelimit size.unchecked=5", {}, "adminLimitExceeded"),
+                 # both groups: a part of the answer, without staff
+                 ("group search", "sizelimit 1", {"LDAP_FILTER_GROUP": "(objectClass=groupOfNames)"},
+                  "sizeLimitExceeded"))
+        for name, limit, env, error in cases:
+            with self.subTest(name):
+                log = self.capture_stderr(name.replace(" ", "-"))
+                _, d = self.start(access=ACCESS + "\n" + limit, **env)
+                self.assert_login(d, "FAIL")
+                self.assertIn(error, self.stderr(log, error))
+        with self.subTest("no such base"):
+            # noSuchObject has no entries: alice has no groups
+            _, d = self.start(LDAP_BASE_GROUP="ou=nothing," + BASE)
+            with d.connect() as c:
+                r = c.ascii_login("alice", "alicepw")
+            self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+
     def test_password_change_after_group_walk(self):
         """The password change comes after the group walk: if a group search fails, the password does not change."""
         slapd, d = self.start(LDAP_FILTER_GROUP="(member={}")
