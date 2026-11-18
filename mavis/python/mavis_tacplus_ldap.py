@@ -355,6 +355,9 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 				and re.search(r"DSID-.*, data (532|773)[, ]", conn.result["message"])):
 				D.password_mustchange(True)
 				user_msg = translate_ldap_error(conn)
+				if D.is_tacplus_chpw:
+					# the failed bind left the connection anonymous (RFC 4511 4.2.1), and AD refuses the change then
+					conn.rebind(user=LDAP_USER, password=LDAP_PASSWD)
 			else:
 				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
 				continue
