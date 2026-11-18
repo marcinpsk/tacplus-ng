@@ -8,6 +8,7 @@ search. alice is a member of netadmins, and netadmins is a member of
 staff; dave is a direct member of staff; bob is in no group.
 """
 
+import contextlib
 import glob
 import os
 import re
@@ -664,6 +665,16 @@ class LdapPython(LdapTests, DaemonTestCase):
         # no backend error: the fallback-only user cannot log in
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
+    def test_password_change_after_group_walk(self):
+        """The password change comes after the group walk: if a group search fails, the password does not change."""
+        # check=False: the back-end stops at the exception of the group search, and the client gets no answer
+        slapd, d = self.start(check=False, LDAP_FILTER_GROUP="(member={}")
+        with d.connect() as c, contextlib.suppress(TimeoutError):
+            c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        # slapd -d 256 logs each extended operation with its OID: this one is the password modify (RFC 3062)
+        with open(slapd.log, errors="replace") as f:
+            self.assertNotIn("oid=1.3.6.1.4.1.4203.1.11.1", f.read())
 
     def test_no_referrals(self):
         """The back-end does not follow a referral: ldap3 binds to the referral host with the credentials it has."""

@@ -461,24 +461,6 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(user_conn))
 				continue
 
-	if D.is_tacplus_chpw:
-		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
-			continue
-		if ((LDAP_SERVER_TYPE == "microsoft"
-				and not chpw_conn.extend.microsoft.modify_password(
-				entry.entry_dn, D.password_new, D.password))
-			or  (LDAP_SERVER_TYPE == "generic"
-				and not chpw_conn.extend.standard.modify_password (
-				entry.entry_dn, D.password, D.password_new))):
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(chpw_conn))
-			continue
-		user_msg = "Password change was successful."
-		D.password_mustchange(False)
-
-	if D.is_tacplus_authc:
-		D.remember_password(False)
-
 	D.set_dn(entry.entry_dn)
 
 	if len(entry.uidNumber) > 0:
@@ -532,6 +514,25 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 	if len(entry.sshPublicKey) > 0:
 		D.set_sshpubkey("\"" + "\",\"".join(entry.sshPublicKey) + "\"")
+
+	# the password change comes last: a failed group search leaves the old password
+	if D.is_tacplus_chpw:
+		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
+			continue
+		if ((LDAP_SERVER_TYPE == "microsoft"
+				and not chpw_conn.extend.microsoft.modify_password(
+				entry.entry_dn, D.password_new, D.password))
+			or  (LDAP_SERVER_TYPE == "generic"
+				and not chpw_conn.extend.standard.modify_password (
+				entry.entry_dn, D.password, D.password_new))):
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(chpw_conn))
+			continue
+		user_msg = "Password change was successful."
+		D.password_mustchange(False)
+
+	if D.is_tacplus_authc:
+		D.remember_password(False)
 
 	D.write(MAVIS_FINAL, AV_V_RESULT_OK, user_msg)
 
