@@ -249,6 +249,17 @@ def user_bind(dn, password):
 	user_conn = ldap_connect(bind=False)
 	return user_conn.rebind(user=dn, password=password)
 
+# A search; noSuchObject (no such base) and a referral (not followed) have no entries, other results are errors:
+SEARCH_EMPTY = (ldap3.core.results.RESULT_SUCCESS, ldap3.core.results.RESULT_NO_SUCH_OBJECT,
+	ldap3.core.results.RESULT_REFERRAL)
+
+def ldap_search(**kwargs):
+	conn.search(**kwargs)
+	r = conn.result
+	if r['result'] not in SEARCH_EMPTY:
+		raise ldap3.core.exceptions.LDAPOperationResult(result=r['result'], description=r['description'],
+			dn=r['dn'], message=r['message'], response_type=r['type'])
+
 # A helper function for resolving nested groupOfNames groups: ################
 def expand_groupOfNames(g):
 	H = { }
@@ -258,7 +269,7 @@ def expand_groupOfNames(g):
 		if ((not m in H) and ((m is g) or memberof_regex.match(m))):
 			if not m is g:
 				H[m] = True
-			conn.search(search_base = LDAP_BASE_GROUP,
+			ldap_search(search_base = LDAP_BASE_GROUP,
 				search_filter = LDAP_FILTER_GROUP.format(m),
 				search_scope=LDAP_SCOPE_GROUP, attributes = ['dn'])
 			for e in conn.entries:
@@ -275,7 +286,7 @@ def expand_memberof(g):
 		if not m in H and memberof_regex.match(m):
 			if memberof_filter is None or memberof_filter.match(m):
 				H[m] = True
-				conn.search(search_base = m, search_filter = '(objectclass=*)',
+				ldap_search(search_base = m, search_filter = '(objectclass=*)',
 					search_scope=ldap3.BASE, attributes = ['memberOf'])
 				for e in conn.entries:
 					for m in e.memberOf:
@@ -388,7 +399,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 	# a search or a password change that fails is a backend error, not the end of the back-end
 	try:
-		conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE,
+		ldap_search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE,
 			search_filter=LDAP_FILTER.format(escape_filter_chars(D.user)),
 			attributes=["memberOf", "shadowExpire", "uidNumber", "gidNumber",
 				"loginShell", "homeDirectory", "sshPublicKey", "krbPasswordExpiration",
@@ -480,12 +491,12 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		if len(entry.gidNumber) > 0:
 			D.set_gid(entry.gidNumber[0])
 		if len(entry.gidNumber) > 0 and (LDAP_SKIP_POSIXGROUP is None or LDAP_SKIP_POSIXGROUP == "0"):
-			conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
+			ldap_search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
 				search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(entry.gidNumber[0]),
 				attributes=["cn"])
 			if len(conn.entries) == 1:
 				TACMEMBER.extend(conn.entries[0].cn)
-			conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
+			ldap_search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
 				search_filter='(&(objectclass=posixGroup)(memberUid={}))'.format(escape_filter_chars(D.user)),
 				attributes=["cn"])
 			for e in conn.entries:
