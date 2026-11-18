@@ -232,7 +232,8 @@ def ldap_bind(c):
 	# rebind() keeps the user and password of the last bind, also of a failed one
 	c.user, c.password = LDAP_USER, LDAP_PASSWD
 	c.authentication = ldap3.SIMPLE if LDAP_USER else ldap3.ANONYMOUS
-	return c.bind()
+	# the server detection reads the root DSE once, at the start
+	return c.bind(read_server_info=False)
 
 # A new connection, bound as LDAP_USER unless bind is False; TLS comes first:
 def ldap_connect(bind=True):
@@ -260,13 +261,13 @@ def user_bind(dn, password):
 	global user_conn
 	if user_conn is not None and not user_conn.closed:
 		try:
-			return user_conn.rebind(user=dn, password=password)
+			return user_conn.rebind(user=dn, password=password, read_server_info=False)
 		except ldap3.core.exceptions.LDAPException as e:
 			# the server can have closed the connection (a restart, an idle timeout): bind on a new one
 			print(e, file=sys.stderr)
 			user_conn.strategy.close()
 	user_conn = ldap_connect(bind=False)
-	return user_conn.rebind(user=dn, password=password)
+	return user_conn.rebind(user=dn, password=password, read_server_info=False)
 
 # A helper function for resolving nested groupOfNames groups: ################
 def expand_groupOfNames(g):
@@ -360,6 +361,7 @@ while True:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
 			continue
 		try:
+			conn.refresh_server_info()
 			# Check for MS AD LDAP
 			if '1.2.840.113556.1.4.800' in map(
 				lambda x: x[0], conn.server.info.supported_features):
