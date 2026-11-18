@@ -4933,7 +4933,7 @@ int async 1
       </section>
       <section>
         <title>Python LDAP Backend</title>
-        <para><literal>mavis_tacplus_ldap.py</literal> is an LDAP back-end for the <emphasis>external</emphasis> module. It uses the Python <literal>ldap3</literal> library. This variable controls TLS:</para>
+        <para><literal>mavis_tacplus_ldap.py</literal> is an LDAP back-end for the <emphasis>external</emphasis> module. It uses the Python <literal>ldap3</literal> library. These variables control TLS:</para>
         <informaltable frame="all">
           <tgroup cols="2">
             <colspec colname="col1" colnum="1" colwidth="30*"/>
@@ -4958,9 +4958,31 @@ int async 1
                   <para>Example: <literal>"ca_certs_file='/etc/ssl/ldap-ca.pem'"</literal></para>
                 </entry>
               </row>
+              <row>
+                <entry>
+                  <literal>USE_STARTTLS</literal>
+                </entry>
+                <entry>
+                  <para>If set, StartTLS is mandatory on <literal>ldap://</literal> URLs, also if the server does not offer it. The back-end does not read the root DSE then. Each value that is not empty sets it, also <literal>0</literal>.</para>
+                  <para>Default: unset</para>
+                </entry>
+              </row>
+              <row>
+                <entry>
+                  <literal>LDAP_SKIP_STARTTLS</literal>
+                </entry>
+                <entry>
+                  <para><literal>0</literal>: StartTLS on <literal>ldap://</literal> URLs if the root DSE of the server offers it.</para>
+                  <para><literal>1</literal>: no StartTLS. The binds send the passwords in clear text.</para>
+                  <para>Other integers have the effect of <literal>1</literal>. A value that is not an integer stops the back-end with a message on stderr. The back-end also does not start if <literal>USE_STARTTLS</literal> and <literal>LDAP_SKIP_STARTTLS=1</literal> are both set.</para>
+                  <para>Default: <literal>0</literal></para>
+                </entry>
+              </row>
             </tbody>
           </tgroup>
         </informaltable>
+        <para>On each new connection to an <literal>ldap://</literal> URL, the back-end first reads the root DSE without a bind. Then it starts TLS. Then it binds as <literal>LDAP_USER</literal>. If the root DSE search or StartTLS fails, the back-end closes the connection and the request gets a back-end error. A connection without TLS writes a warning to stderr. <literal>ldaps://</literal> URLs do not use StartTLS. <literal>TLS_OPTIONS</literal> also applies to StartTLS.</para>
+        <para>The root DSE has no authentication. An attacker in the network path can remove the StartTLS offer from it. Use <literal>ldaps://</literal> or <literal>USE_STARTTLS</literal> to prevent clear-text binds.</para>
       </section>
     </section>
     <section>

@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: bf31cb348d51447002f4027a24a672a923a7af74 $
+   $Id: 1971ce1083fb6a2d0c5a54340a74400be1f9e77b $
      __________________________________________________________
 
    Table of Contents
@@ -3160,10 +3160,10 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
 5.1.2. Python LDAP Backend
 
    mavis_tacplus_ldap.py is an LDAP back-end for the external
-   module. It uses the Python ldap3 library. This variable
-   controls TLS:
+   module. It uses the Python ldap3 library. These variables
+   control TLS:
 
-     Variable  Description
+        Variable      Description
    TLS_OPTIONS
 
    Keyword arguments of ldap3.Tls for LDAPS and StartTLS, in
@@ -3202,6 +3202,38 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    Default: unset
 
    Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
+   USE_STARTTLS
+
+   If set, StartTLS is mandatory on ldap:// URLs, also if the
+   server does not offer it. The back-end does not read the root
+   DSE then. Each value that is not empty sets it, also 0.
+
+   Default: unset
+   LDAP_SKIP_STARTTLS
+
+   0: StartTLS on ldap:// URLs if the root DSE of the server
+   offers it.
+
+   1: no StartTLS. The binds send the passwords in clear text.
+
+   Other integers have the effect of 1. A value that is not an
+   integer stops the back-end with a message on stderr. The
+   back-end also does not start if USE_STARTTLS and
+   LDAP_SKIP_STARTTLS=1 are both set.
+
+   Default: 0
+
+   On each new connection to an ldap:// URL, the back-end first
+   reads the root DSE without a bind. Then it starts TLS. Then it
+   binds as LDAP_USER. If the root DSE search or StartTLS fails,
+   the back-end closes the connection and the request gets a
+   back-end error. A connection without TLS writes a warning to
+   stderr. ldaps:// URLs do not use StartTLS. TLS_OPTIONS also
+   applies to StartTLS.
+
+   The root DSE has no authentication. An attacker in the network
+   path can remove the StartTLS offer from it. Use ldaps:// or
+   USE_STARTTLS to prevent clear-text binds.
      __________________________________________________________
 
 5.2. PAM back-end
