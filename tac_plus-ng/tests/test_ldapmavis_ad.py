@@ -655,29 +655,31 @@ class AdPython(AdTests, DaemonTestCase):
 
     def test_tls_options_invalid(self):
         """An invalid TLS_OPTIONS stops the back-end with a message on stderr; the message does not show the values."""
-        unknown = "Tls.__init__() got an unexpected keyword argument 'nonsense'"
-        cases = (("nonsense=1", f"invalid TLS_OPTIONS (nonsense): {unknown}"),
+        # Python 3.8 and 3.9 do not name the class in the TypeError
+        unknown = r"(Tls\.)?__init__\(\) got an unexpected keyword argument 'nonsense'"
+        cases = (("nonsense=1", rf"invalid TLS_OPTIONS \(nonsense\): {unknown}"),
                  ("local_private_key_password='s3cret', nonsense=1",
-                  f"invalid TLS_OPTIONS (local_private_key_password, nonsense): {unknown}"),
-                 ("local_private_key_password=s3cret", "invalid TLS_OPTIONS: NameError"))
+                  rf"invalid TLS_OPTIONS \(local_private_key_password, nonsense\): {unknown}"),
+                 ("local_private_key_password=s3cret", r"invalid TLS_OPTIONS: NameError"))
         for i, (options, message) in enumerate(cases):
             with self.subTest(options=options):
                 log = self.scratch_file(f"python-{i}.log", "")
-                # MAVIS logs the stderr of the back-end to syslog only
-                script = f'#!/bin/sh\nexec "{PYTHON}" "{LDAP_PYTHON}" 2>>"{log}"\n'
+                status = self.scratch_file(f"python-{i}.status", "")
+                # MAVIS logs the stderr of the back-end to syslog only; the exit status follows the complete stderr
+                script = f'#!/bin/sh\n"{PYTHON}" "{LDAP_PYTHON}" 2>>"{log}"\necho $? >>"{status}"\n'
                 wrapper = self.scratch_file(f"python-{i}.sh", script)
                 os.chmod(wrapper, 0o755)
                 # the worker starts the back-end when it starts; check=False: the back-end exits on purpose
                 self.start(command=f'"{wrapper}" "python3"', check=False, TLS_OPTIONS=options)
                 deadline = time.monotonic() + 10
-                while time.monotonic() < deadline:
-                    with open(log) as f:
-                        text = f.read()
-                    if message in text:
-                        break
+                while os.path.getsize(status) == 0 and time.monotonic() < deadline:
                     time.sleep(0.1)
-                self.assertNotIn("s3cret", text[:2000])
-                self.assertIn(message, text)
+                with open(status) as f:
+                    self.assertEqual(f.read().split()[:1], ["1"], "the back-end did not exit with status 1")
+                with open(log) as f:
+                    text = f.read()
+                self.assertNotIn("s3cret", text)
+                self.assertRegex(text, message)
 
 
 class DomainCleanup(unittest.TestCase):
