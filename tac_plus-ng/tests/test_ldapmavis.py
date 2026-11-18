@@ -1954,6 +1954,28 @@ class LdapPython(LdapTests, DaemonTestCase):
                 r = c.ascii_login(user, user + "pw")
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
+    def test_skip_group_lookups(self):
+        """LDAP_SKIP_MEMBEROF and LDAP_SKIP_GROUPOFNAMES: 0 does the lookup, 1 skips it.
+
+        eve has memberOf staff, and is a member of a second netadmins group (groupOfNames); alice has no memberOf.
+        """
+        eve = (f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
+               + person("eve", f"objectClass: extensibleObject\nmemberOf: {STAFF}\n")
+               + f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
+               f"member: uid=eve,ou=people,{BASE}\n")
+        # a user with memberOf does not stop the groupOfNames lookups of the next users
+        cases = (({}, (("eve", "staff\n"), ("alice", "netadmins in staff\n"))),
+                 ({"LDAP_SKIP_MEMBEROF": "0"}, (("eve", "staff\n"),)),
+                 ({"LDAP_SKIP_MEMBEROF": "1"}, (("eve", "netadmins only\n"),)),
+                 ({"LDAP_SKIP_GROUPOFNAMES": "0"}, (("alice", "netadmins in staff\n"),)),
+                 ({"LDAP_SKIP_GROUPOFNAMES": "1"}, (("alice", ""),)))
+        for env, logins in cases:
+            _, d = self.start(ldif=eve, **env)
+            for user, motd in logins:
+                with self.subTest(env=env, user=user), d.connect() as c:
+                    r = c.ascii_login(user, user + "pw")
+                    self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
     def test_wrong_password_before_group_walk(self):
         """A wrong password is a FAIL before the group walk: a group search that fails does not change the answer."""
         # ldap3 refuses this filter (no closing parenthesis) with an exception, and sends no search

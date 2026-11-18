@@ -273,7 +273,7 @@ def expand_memberof(g):
 		if LDAP_NESTED_GROUP_DEPTH is not None and int(LDAP_NESTED_GROUP_DEPTH) <= depth:
 			return [ ]
 		if not m in H and memberof_regex.match(m):
-			if memberof_filter is None or memberof_filter.match(m):
+			if memberof_filter.match(m):
 				H[m] = True
 				conn.search(search_base = m, search_filter = '(objectclass=*)',
 					search_scope=ldap3.BASE, attributes = ['memberOf'])
@@ -453,14 +453,11 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 			D.set_home(entry.homeDirectory[0])
 
 		L = None
-		if len(entry.memberOf) > 0:
-			if LDAP_SKIP_MEMBEROF is None or LDAP_SKIP_MEMBEROF == "1":
-				L = expand_memberof(entry.memberOf)
-			if LDAP_SKIP_GROUPOFNAMES is None:
-				LDAP_SKIP_GROUPOFNAMES = "1"
-		else:
-			if LDAP_SKIP_GROUPOFNAMES is None or LDAP_SKIP_GROUPOFNAMES == "1":
-				L = expand_groupOfNames(entry.entry_dn)
+		# LDAP_SKIP_MEMBEROF=1: as a user without memberOf, as in the Perl back-end and ldapmavis-mt
+		if len(entry.memberOf) > 0 and (LDAP_SKIP_MEMBEROF is None or LDAP_SKIP_MEMBEROF == "0"):
+			L = expand_memberof(entry.memberOf)
+		elif LDAP_SKIP_GROUPOFNAMES is None or LDAP_SKIP_GROUPOFNAMES == "0":
+			L = expand_groupOfNames(entry.entry_dn)
 
 		TACMEMBER = [];
 
