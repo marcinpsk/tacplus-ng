@@ -440,7 +440,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 				if expiry is not None:
 					if expiry < time.time():
 						user_msg = "Password has expired."
-						if D.get_caller_cap_chpw and has_extension_password_modify is not None:
+						if D.get_caller_cap_chpw() and has_extension_password_modify is not None:
 							D.password_mustchange(True)
 						else:
 							D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, user_msg)

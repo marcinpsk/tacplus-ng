@@ -210,10 +210,10 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS, entries=""):
         """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
 
-        access: the access lines, and other global lines, of slapd.conf.
+        access: the access lines, and other global lines, of slapd.conf. entries: LDIF entries after LDIF.
         """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
@@ -235,7 +235,7 @@ class Slapd:
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
-            f.write(LDIF)
+            f.write(LDIF + entries)
         p = subprocess.run([SLAPD, "-T", "add", "-f", self.conf, "-l", ldif], stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, check=False)
         if p.returncode:
@@ -334,14 +334,14 @@ class LdapTests:
     # the LDAP_SCOPE values of the back-end for subtree, one level and base
     SCOPES = ("sub", "one", "base")
 
-    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", entries="", **env):
+        """Start slapd and the daemon; tls, starttls, access, entries: see Slapd, settings: tac_plus-ng lines.
 
         env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
         """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls, access)
+                      starttls, access, entries)
         self.addCleanup(slapd.stop)
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
@@ -412,6 +412,20 @@ class LdapTests:
             self.assertEqual(c.pap("alice", "alicepw").status_name, "FAIL")
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+
+    def test_expired_password_without_chpw(self):
+        """An expired password at a PAP login is a FAIL without a user bind: PAP cannot change the password."""
+        schema = ("attributetype ( 1.3.6.1.1.1.1.10 NAME 'shadowExpire' EQUALITY integerMatch "
+                  "SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )")
+        # shadowExpire counts days from 1970-01-01
+        grace = (f"\ndn: uid=grace,ou=people,{BASE}\nobjectClass: inetOrgPerson\nobjectClass: extensibleObject\n"
+                 "uid: grace\ncn: Grace\nsn: Grace\nuserPassword: gracepw\nshadowExpire: 1\n")
+        slapd, d = self.start(access=ACCESS + "\n" + schema, entries=grace)
+        for password in ("gracepw", "wrong"):
+            with self.subTest(password=password), d.connect() as c:
+                r = c.pap("grace", password)
+                self.assertEqual((r.status_name, r.server_msg), ("FAIL", "Password has expired.\n"), r)
+        self.assertNotIn(f"uid=grace,ou=people,{BASE}", [dn for dn, _ in slapd.binds()])
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
