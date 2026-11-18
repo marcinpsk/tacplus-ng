@@ -640,7 +640,7 @@ class AdPython(AdTests, DaemonTestCase):
     NAMES = "valid_names=['localhost']"
 
     def env(self, ca):
-        return {"TLS_OPTIONS": f"ca_certs_file='{ca}', {self.NAMES}"}
+        return {"TLS_OPTIONS": f"ca_certs_file={ca!r}, {self.NAMES}"}
 
     def test_tls_server_certificate_is_checked(self):
         """By default the back-end checks the certificate of the server: a CA it does not trust is a backend error."""
