@@ -963,6 +963,15 @@ member: cn=xylophone,ou=groups,$base
             r = c.ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
+    def test_nested_group_depth(self):
+        """LDAP_NESTED_GROUP_DEPTH=1 gives the groups of the user, 2 also the groups of these groups."""
+        for depth, motd in (("0", ""), ("1", "netadmins only\n"), ("2", "netadmins in staff\n")):
+            with self.subTest(depth=depth):
+                _, d = self.start(LDAP_NESTED_GROUP_DEPTH=depth)
+                with d.connect() as c:
+                    r = c.ascii_login("alice", "alicepw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
         _, d = self.start()
@@ -1727,10 +1736,6 @@ class LdapPython(LdapTests, DaemonTestCase):
 
     @unittest.skip("the groupOfNames walk of the Python back-end does not escape the group DN in its filter")
     def test_filter_characters_in_a_group_dn(self):
-        pass
-
-    @unittest.skip("the groupOfNames walk of the Python back-end gives no groups for LDAP_NESTED_GROUP_DEPTH=1")
-    def test_group_depth(self):
         pass
 
     @unittest.skip("without the root DSE the Python back-end does not use the generic server type")
