@@ -154,6 +154,40 @@ member: cn=netadmins,ou=groups,$base
 member: uid=dave,ou=people,$base
 """).substitute(base=BASE, reader=READER, staff=STAFF)
 
+# for Slapd(entries=...): kim is a posixAccount in the group users (1000), and in netadmins (1001) by memberUid
+POSIX_ENTRIES = string.Template("""
+dn: ou=posix,$base
+objectClass: organizationalUnit
+ou: posix
+
+dn: uid=kim,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: kim
+cn: kim
+sn: kim
+userPassword: kimpw
+uidNumber: 2000
+gidNumber: 1000
+homeDirectory: /home/kim
+
+dn: cn=users,ou=posix,$base
+objectClass: posixGroup
+cn: users
+gidNumber: 1000
+
+dn: cn=netadmins,ou=posix,$base
+objectClass: posixGroup
+cn: netadmins
+gidNumber: 1001
+memberUid: kim
+""").substitute(base=BASE)
+
+
+def nis_schema():
+    """The slapd.conf line for posixAccount and posixGroup."""
+    return "include " + slapd_arg(os.path.join(first_existing(SCHEMA_DIRS), "nis.schema"))
+
 
 def slapd_arg(value):
     """A slapd.conf argument: double quotes keep blanks, a backslash escapes a quote or a backslash."""
@@ -210,10 +244,10 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS, entries=""):
         """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
 
-        access: the access lines, and other global lines, of slapd.conf.
+        access: the access lines, and other global lines, of slapd.conf. entries: LDIF entries after LDIF.
         """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
@@ -235,7 +269,7 @@ class Slapd:
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
-            f.write(LDIF)
+            f.write(LDIF + entries)
         p = subprocess.run([SLAPD, "-T", "add", "-f", self.conf, "-l", ldif], stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, check=False)
         if p.returncode:
@@ -334,14 +368,14 @@ class LdapTests:
     # the LDAP_SCOPE values of the back-end for subtree, one level and base
     SCOPES = ("sub", "one", "base")
 
-    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", entries="", **env):
+        """Start slapd and the daemon; tls, starttls, access, entries: see Slapd, settings: tac_plus-ng lines.
 
         env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
         """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls, access)
+                      starttls, access, entries)
         self.addCleanup(slapd.stop)
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
@@ -412,6 +446,16 @@ class LdapTests:
             self.assertEqual(c.pap("alice", "alicepw").status_name, "FAIL")
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+
+    def test_posix_gids(self):
+        """GIDS: the gidNumber of the user and of the posixGroups with the user in memberUid."""
+        log = 'log gids { destination = "$tmp/gids.log" authentication format = "$${user} gids=$${gids}" }\n'
+        _, d = self.start(access=ACCESS + "\n" + nis_schema(), entries=POSIX_ENTRIES,
+                          settings=log + "authentication log = gids\n")
+        with d.connect() as c:
+            self.assertEqual(c.pap("kim", "kimpw").status_name, "PASS")
+        line = d.wait_log("gids", "kim gids=").splitlines()[0]
+        self.assertEqual(sorted(line.split("=", 1)[1].split(",")), ["1000", "1001"], line)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
