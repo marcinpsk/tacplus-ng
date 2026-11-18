@@ -68,7 +68,10 @@ LDAP_BASE_POSIXGROUP
 	Example: "dc=example,dc=com"
 
 LDAP_CONNECT_TIMEOUT
-	Timeout for initital connect to remote LDAP server. Default: 5
+	Timeout in seconds for the connect and for each answer of the LDAP
+	server. A value that is not a positive integer stops the back-end
+	with a message on stderr.
+	Default: 5
 
 LDAP_FILTER
 	LDAP search filter; {} is the user name
@@ -167,7 +170,13 @@ eval_env('LDAP_FILTER_GROUP', '(&(objectclass=groupOfNames)(member={}))')
 eval_env('LDAP_SCOPE', 'SUBTREE')
 eval_env('LDAP_SCOPE_GROUP', LDAP_SCOPE)
 eval_env('LDAP_SCOPE_POSIXGROUP', LDAP_SCOPE)
-eval_env('LDAP_CONNECT_TIMEOUT', 5)
+# ldap3 packs the receive timeout as a C integer
+try:
+	ldap_connect_timeout = int(eval_env('LDAP_CONNECT_TIMEOUT', '5'))
+except ValueError:
+	ldap_connect_timeout = 0
+if ldap_connect_timeout < 1:
+	sys.exit("invalid LDAP_CONNECT_TIMEOUT: {!r} (seconds, a positive integer)".format(LDAP_CONNECT_TIMEOUT))
 memberof_regex = re.compile('(?i)' + eval_env('LDAP_MEMBEROF_REGEX', '^cn=([^,]+),.*'))
 memberof_filter = re.compile('(?i)' + eval_env('LDAP_MEMBEROF_FILTER', '.'))
 eval_env('LDAP_TACMEMBER', 'tacMember')
@@ -198,11 +207,10 @@ if USE_STARTTLS is not None and ldap_skip_starttls:
 eval_env('LDAP_HOSTS', 'ldaps://localhost')
 servers = []
 for server in LDAP_HOSTS.split():
-	server_object = ldap3.Server(server, get_info=ldap3.DSA, tls=tls, connect_timeout=LDAP_CONNECT_TIMEOUT)
+	server_object = ldap3.Server(server, get_info=ldap3.DSA, tls=tls, connect_timeout=ldap_connect_timeout)
 	servers.append(server_object)
 
 # Default to OpenLDAP: #######################################################
-#ldap3.set_config_parameter("POOLING_LOOP_TIMEOUT", LDAP_CONNECT_TIMEOUT)
 conn = None
 
 STARTTLS_OID = '1.3.6.1.4.1.1466.20037'
@@ -238,7 +246,7 @@ def ldap_bind(c):
 def ldap_connect(bind=True):
 	# no referrals: ldap3 binds to the referral host with the credentials of this connection, as ldapmavis-mt
 	# a pool for each connection: a ServerPool keeps a reference to each connection that used it
-	c = ldap3.Connection(ldap3.ServerPool(servers, ldap3.FIRST, active=True), receive_timeout=LDAP_CONNECT_TIMEOUT, auto_referrals=False)
+	c = ldap3.Connection(ldap3.ServerPool(servers, ldap3.FIRST, active=True), receive_timeout=ldap_connect_timeout, auto_referrals=False)
 	try:
 		c.open(read_server_info=False)
 		if not c.server.ssl:

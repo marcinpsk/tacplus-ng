@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 05a49b6a7450b81627d8ee276aecf4caf1d27b2b $
+   $Id: 4f47e3e7aa8f63a94a34f273c69aef97bd2b8914 $
      __________________________________________________________
 
    Table of Contents
@@ -3168,6 +3168,11 @@ int async 1
    code 532 or 773 (password expired, password must change), the
    AD password change runs on the LDAP_USER connection. The
    back-end does not follow referrals.
+
+   LDAP_CONNECT_TIMEOUT is the timeout in seconds for the connect
+   and for each answer of the server. The default is 5. A value
+   that is not a positive integer stops the back-end with a
+   message on stderr.
      __________________________________________________________
 
 5.2. PAM back-end
