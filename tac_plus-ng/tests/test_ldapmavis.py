@@ -66,10 +66,10 @@ TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn
 ACCESS = """\
 access to attrs=userPassword by self write by anonymous auth by * none
 access to * by users read by * none"""
-# for a back-end without LDAP_USER
-ANONYMOUS_READ = """\
-access to attrs=userPassword by self write by anonymous auth by * none
-access to * by * read"""
+# for a back-end without LDAP_USER: only an anonymous client can search, the users can only bind
+ANONYMOUS_ONLY = """\
+access to attrs=userPassword by anonymous auth by * none
+access to * by anonymous read by * none"""
 # only LDAP_USER can search, the users can only bind
 READER_ONLY = f"""\
 access to attrs=userPassword by anonymous auth by * none
@@ -628,14 +628,15 @@ class LdapPython(LdapTests, DaemonTestCase):
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
 
     def test_failed_login_without_ldap_user(self):
-        """Without LDAP_USER the back-end searches anonymously; a failed login must not break the next request."""
-        _, d = self.start(access=ANONYMOUS_READ, LDAP_USER=None, LDAP_PASSWD=None)
-        with d.connect() as c:
-            self.assertEqual(c.pap("alice", "wrong").status_name, "FAIL")
-        with d.connect() as c:
-            self.assertEqual(c.pap("bob", "bobpw").status_name, "PASS")
+        """Without LDAP_USER the back-end searches anonymously; a failed or a good login must not change that."""
+        slapd, d = self.start(access=ANONYMOUS_ONLY, LDAP_USER=None, LDAP_PASSWD=None)
+        logins = (("alice", "wrong", "FAIL"), ("bob", "bobpw", "PASS"), ("dave", "davepw", "PASS"))
+        for user, password, status in logins:
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status)
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        self.assertEqual([dn for dn, _ in slapd.binds()], [ALICE, BOB, DAVE])
 
     def test_ldap_user_bind_each_request(self):
         """Each request binds as LDAP_USER once, then as the user; a wrong password goes to the server once."""
