@@ -8,7 +8,6 @@ search. alice is a member of netadmins, and netadmins is a member of
 staff; dave is a direct member of staff; bob is in no group.
 """
 
-import contextlib
 import glob
 import os
 import re
@@ -666,12 +665,30 @@ class LdapPython(LdapTests, DaemonTestCase):
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
 
+    def test_group_search_error(self):
+        """A group search that fails after a good password is a backend error; the next request gets an answer."""
+        log = self.capture_stderr("group-search")
+        # after a backend error, only fallback-only users can log in for this period
+        slapd, d = self.start(settings="authentication fallback period = 1\n", LDAP_FILTER_GROUP="(member={}")
+        self.assert_login(d, "FAIL")
+        self.assertIn("invalid filter", self.stderr(log, "invalid filter"))
+        before = len(slapd.binds())
+        select.select([], [], [], 2.5)
+        # not a backend error: the back-end binds as LDAP_USER again, finds bob and checks the password
+        for user, password in (("bob", "wrong"), ("rescue", "rescuepw")):
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, "FAIL")
+        self.assertEqual([dn for dn, _ in slapd.binds()[before:]], [READER, BOB])
+
     def test_password_change_after_group_walk(self):
         """The password change comes after the group walk: if a group search fails, the password does not change."""
-        # check=False: the back-end stops at the exception of the group search, and the client gets no answer
-        slapd, d = self.start(check=False, LDAP_FILTER_GROUP="(member={}")
-        with d.connect() as c, contextlib.suppress(TimeoutError):
-            c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        slapd, d = self.start(LDAP_FILTER_GROUP="(member={}")
+        with d.connect() as c:
+            r = c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        self.assertEqual(r.statuses[-1], "FAIL", r)
+        # a backend error: the fallback-only user can log in
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
         # slapd -d 256 logs each extended operation with its OID: this one is the password modify (RFC 3062)
         with open(slapd.log, errors="replace") as f:
             self.assertNotIn("oid=1.3.6.1.4.1.4203.1.11.1", f.read())
