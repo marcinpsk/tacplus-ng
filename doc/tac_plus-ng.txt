@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 3cbc721ec5598bcb5a96d582e6c55bfd4856fd39 $
+   $Id: 05a49b6a7450b81627d8ee276aecf4caf1d27b2b $
      __________________________________________________________
 
    Table of Contents
@@ -3150,15 +3150,24 @@ int async 1
 
    On each new connection to an ldap:// URL, the back-end first
    reads the root DSE without a bind. Then it starts TLS. Then it
-   binds as LDAP_USER. If the root DSE search or StartTLS fails,
-   the back-end closes the connection and the request gets a
-   back-end error. A connection without TLS writes a warning to
-   stderr. ldaps:// URLs do not use StartTLS. TLS_OPTIONS also
-   applies to StartTLS.
+   binds as LDAP_USER, or as the user on the connection for the
+   user binds. If the root DSE search or StartTLS fails, the
+   back-end closes the connection and the request gets a back-end
+   error. A connection without TLS writes a warning to stderr.
+   ldaps:// URLs do not use StartTLS. TLS_OPTIONS also applies to
+   StartTLS.
 
    The root DSE has no authentication. An attacker in the network
    path can remove the StartTLS offer from it. Use ldaps:// or
    USE_STARTTLS to prevent clear-text binds.
+
+   The back-end keeps two connections to the server. It does the
+   searches on one connection, bound as LDAP_USER. It checks the
+   password of the user on the other connection, and a password
+   change after a good user bind also runs there. After AD data
+   code 532 or 773 (password expired, password must change), the
+   AD password change runs on the LDAP_USER connection. The
+   back-end does not follow referrals.
      __________________________________________________________
 
 5.2. PAM back-end
