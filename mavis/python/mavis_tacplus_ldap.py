@@ -137,6 +137,8 @@ LDAP_SKIP_STARTTLS
 
 LDAP_NESTED_GROUP_DEPTH
 	Limit nested group lookups to the given value. Unlimited if unset.
+	A value that is not a non-negative integer stops the back-end with
+	a message on stderr.
 	Example: 2
 
 LDAP_SKIP_MEMBEROF
@@ -183,7 +185,14 @@ memberof_filter = re.compile('(?i)' + eval_env('LDAP_MEMBEROF_FILTER', '.'))
 eval_env('LDAP_TACMEMBER', 'tacMember')
 ou_regex = re.compile('(?i)^ou=(.+)$')
 eval_env('LDAP_TACMEMBER_MAP_OU', None)
-eval_env('LDAP_NESTED_GROUP_DEPTH', None)
+ldap_nested_group_depth = eval_env('LDAP_NESTED_GROUP_DEPTH', None)
+if ldap_nested_group_depth is not None:
+	try:
+		ldap_nested_group_depth = int(ldap_nested_group_depth)
+	except ValueError:
+		ldap_nested_group_depth = -1
+	if ldap_nested_group_depth < 0:
+		sys.exit("invalid LDAP_NESTED_GROUP_DEPTH: {!r} (a non-negative integer)".format(LDAP_NESTED_GROUP_DEPTH))
 eval_env('LDAP_SKIP_MEMBEROF', None)
 eval_env('LDAP_SKIP_POSIXGROUP', None)
 eval_env('LDAP_SKIP_GROUPOFNAMES', None)
@@ -281,7 +290,7 @@ def user_bind(dn, password):
 def expand_groupOfNames(g):
 	H = { }
 	def expand_groupOfNames_sub(m, depth):
-		if LDAP_NESTED_GROUP_DEPTH is not None and int(LDAP_NESTED_GROUP_DEPTH) <= depth:
+		if ldap_nested_group_depth is not None and ldap_nested_group_depth <= depth:
 			return [ ]
 		if ((not m in H) and ((m is g) or memberof_regex.match(m))):
 			if not m is g:
@@ -298,7 +307,7 @@ def expand_groupOfNames(g):
 def expand_memberof(g):
 	H = { }
 	def expand_memberof_sub(m, depth):
-		if LDAP_NESTED_GROUP_DEPTH is not None and int(LDAP_NESTED_GROUP_DEPTH) <= depth:
+		if ldap_nested_group_depth is not None and ldap_nested_group_depth <= depth:
 			return [ ]
 		if not m in H and memberof_regex.match(m):
 			if memberof_filter is None or memberof_filter.match(m):
