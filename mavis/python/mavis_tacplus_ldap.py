@@ -234,8 +234,8 @@ def ldap_bind(c):
 	c.authentication = ldap3.SIMPLE if LDAP_USER else ldap3.ANONYMOUS
 	return c.bind()
 
-# A new connection, bound as LDAP_USER; TLS comes before the bind: ##########
-def ldap_connect():
+# A new connection, bound as LDAP_USER unless bind is False; TLS comes first:
+def ldap_connect(bind=True):
 	# no referrals: ldap3 binds to the referral host with the credentials of this connection, as ldapmavis-mt
 	# a pool for each connection: a ServerPool keeps a reference to each connection that used it
 	c = ldap3.Connection(ldap3.ServerPool(servers, ldap3.FIRST, active=True), receive_timeout=LDAP_CONNECT_TIMEOUT, auto_referrals=False)
@@ -244,7 +244,7 @@ def ldap_connect():
 		if not c.server.ssl:
 			start_tls(c)
 		c.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-		if not ldap_bind(c):
+		if bind and not ldap_bind(c):
 			raise ldap3.core.exceptions.LDAPBindError("{}: {}".format(LDAP_USER, c.last_error))
 	except Exception as e:
 		print(e, file=sys.stderr)
@@ -252,6 +252,21 @@ def ldap_connect():
 		c.strategy.close()
 		raise
 	return c
+
+# The user binds have a connection of their own, so conn stays bound as LDAP_USER:
+user_conn = None
+
+def user_bind(dn, password):
+	global user_conn
+	if user_conn is not None and not user_conn.closed:
+		try:
+			return user_conn.rebind(user=dn, password=password)
+		except ldap3.core.exceptions.LDAPException as e:
+			# the server can have closed the connection (a restart, an idle timeout): bind on a new one
+			print(e, file=sys.stderr)
+			user_conn.strategy.close()
+	user_conn = ldap_connect(bind=False)
+	return user_conn.rebind(user=dn, password=password)
 
 # A helper function for resolving nested groupOfNames groups: ################
 def expand_groupOfNames(g):
@@ -374,7 +389,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 			continue
 
 	else:
-		# the last request can have left the connection bound as its user
+		# a bind per request: a closed connection gives ERROR here, and the next request opens a new one
 		try:
 			bound = ldap_bind(conn)
 		except ldap3.core.exceptions.LDAPException as e:
@@ -427,6 +442,42 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 						continue
 				else:
 					D.set_expiry(expiry)
+		# before the group walk: a wrong password is a FAIL also if a group search fails
+		try:
+			bound = user_bind(entry.entry_dn, D.password)
+		except (ldap3.core.exceptions.LDAPException, OSError):
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+			continue
+		chpw_conn = user_conn
+		if not bound:
+			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
+				and user_conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
+				and re.search(r"DSID-.*, data (532|773)[, ]", user_conn.result["message"])):
+				D.password_mustchange(True)
+				user_msg = translate_ldap_error(user_conn)
+				# the failed bind left user_conn anonymous (RFC 4511 4.2.1), and AD refuses the change there
+				chpw_conn = conn
+			else:
+				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(user_conn))
+				continue
+
+	if D.is_tacplus_chpw:
+		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
+			continue
+		if ((LDAP_SERVER_TYPE == "microsoft"
+				and not chpw_conn.extend.microsoft.modify_password(
+				entry.entry_dn, D.password_new, D.password))
+			or  (LDAP_SERVER_TYPE == "generic"
+				and not chpw_conn.extend.standard.modify_password (
+				entry.entry_dn, D.password, D.password_new))):
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(chpw_conn))
+			continue
+		user_msg = "Password change was successful."
+		D.password_mustchange(False)
+
+	if D.is_tacplus_authc:
+		D.remember_password(False)
 
 	D.set_dn(entry.entry_dn)
 
@@ -481,40 +532,6 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 	if len(entry.sshPublicKey) > 0:
 		D.set_sshpubkey("\"" + "\",\"".join(entry.sshPublicKey) + "\"")
-
-	# the user bind comes after the searches, so they run as LDAP_USER
-	if D.is_tacplus_authc:
-		if not conn.rebind(user=entry.entry_dn, password=D.password):
-			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
-				and conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
-				and re.search(r"DSID-.*, data (532|773)[, ]", conn.result["message"])):
-				D.password_mustchange(True)
-				user_msg = translate_ldap_error(conn)
-				# the failed bind left the connection anonymous (RFC 4511 4.2.1), and AD refuses the change then
-				if D.is_tacplus_chpw and not ldap_bind(conn):
-					D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
-					continue
-			else:
-				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
-				continue
-
-	if D.is_tacplus_chpw:
-		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
-			continue
-		if ((LDAP_SERVER_TYPE == "microsoft"
-				and not conn.extend.microsoft.modify_password(
-				entry.entry_dn, D.password_new, D.password))
-			or  (LDAP_SERVER_TYPE == "generic"
-				and not conn.extend.standard.modify_password (
-				entry.entry_dn, D.password, D.password_new))):
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
-			continue
-		user_msg = "Password change was successful."
-		D.password_mustchange(False)
-
-	if D.is_tacplus_authc:
-		D.remember_password(False)
 
 	D.write(MAVIS_FINAL, AV_V_RESULT_OK, user_msg)
 

@@ -654,6 +654,16 @@ class LdapPython(LdapTests, DaemonTestCase):
                 r = c.ascii_login(user, user + "pw")
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
+    def test_wrong_password_before_group_walk(self):
+        """A wrong password is a FAIL before the group walk: a group search that fails does not change the answer."""
+        # ldap3 refuses this filter (no closing parenthesis) with an exception, and sends no search
+        _, d = self.start(LDAP_FILTER_GROUP="(member={}")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "wrong").status_name, "FAIL")
+        # no backend error: the fallback-only user cannot log in
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
     def test_no_referrals(self):
         """The back-end does not follow a referral: ldap3 binds to the referral host with the credentials it has."""
         with socket.socket() as host:

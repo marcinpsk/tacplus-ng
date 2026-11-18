@@ -635,6 +635,8 @@ class AdPython(AdTests, DaemonTestCase):
     MESSAGE = "Permission denied: %s"
     # ldap3 cannot match an IP address in the certificate; the certificate of the DC also names localhost
     NAMES = "valid_names=['localhost']"
+    # it changes the password of a 773 or 532 account on its LDAP_USER connection, with no bind there
+    CHPW_REBIND = False
 
     def env(self, ca):
         return {"TLS_OPTIONS": f"ca_certs_file={ca!r}, {self.NAMES}"}
