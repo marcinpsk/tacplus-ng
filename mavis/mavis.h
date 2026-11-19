@@ -299,6 +299,7 @@ int av_list_attribute(int);
 void av_list_append(av_ctx *, int, char *);
 void av_list_refuse(av_ctx *, int, char *);
 void av_list_set_malformed(av_ctx *, int, char *);
+int av_wire_check(char *, size_t);
 #define av_unset(A,B) av_set(A,B, NULL)
 void av_clear(av_ctx *);
 void av_dump(av_ctx *);

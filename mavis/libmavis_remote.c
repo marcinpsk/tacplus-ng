@@ -101,7 +101,8 @@ static int udp_bind(sockaddr_union * sa)
     return s;
 }
 
-static struct remote_addr_s *av_recv(mavis_ctx * mcx, av_ctx * ac, int sock, sockaddr_union * sa)
+// *bad: the datagram is not whole attribute lines (av_char_to_array() would skip a part of it)
+static struct remote_addr_s *av_recv(mavis_ctx * mcx, av_ctx * ac, int sock, sockaddr_union * sa, int *bad)
 {
     ssize_t buflen;
     socklen_t salen = (socklen_t) sizeof(sockaddr_union);
@@ -125,6 +126,9 @@ static struct remote_addr_s *av_recv(mavis_ctx * mcx, av_ctx * ac, int sock, soc
 #pragma GCC diagnostic pop
 	    if (ra->blowfish)
 		blowfish_dec(ra->blowfish, av_buffer, buflen);
+	    // with blowfish, the text ends with a NUL and the padding of the last block
+	    size_t len = strnlen(av_buffer->s, (size_t) buflen);
+	    *bad = (!ra->blowfish && len != (size_t) buflen) || av_wire_check(av_buffer->s, len);
 	    av_char_to_array(ac, av_buffer->s, NULL);
 	}
     }
@@ -514,6 +518,7 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
 	struct pollfd ufds[1];
 	char *serial = av_get(*ac, AV_A_SERIAL);
 	av_ctx *avc = av_new(NULL, NULL);
+	int bad = 0;
 	ufds[0].fd = mcx->sock;
 	ufds[0].events = POLLIN;
 	do {
@@ -532,7 +537,7 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
 	    tries--;
 	    if ((1 != poll(ufds, 1, mcx->timeout * 1000))
 		|| (!(ufds[0].revents & POLLIN))
-		|| (ra != av_recv(mcx, avc, mcx->sock, &sa))
+		|| (ra != av_recv(mcx, avc, mcx->sock, &sa, &bad))
 		|| (!(v = av_get(avc, AV_A_SERIAL))))
 		continue;
 	    if (ra) {
@@ -543,7 +548,11 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
 	}
 	while (!v || strcmp(serial, v)
 	       || !av_get(avc, AV_A_RESULT));
-	av_move(*ac, avc);
+	if (bad) {
+	    logmsg("Alert: malformed reply for serial %s", serial);
+	    av_list_set_malformed(*ac, AV_A_MEMBEROF, mcx->identifier);
+	} else
+	    av_move(*ac, avc);
 	av_free(avc);
 	Debug((DEBUG_MAVIS, "- %s = 0 (sync)\n", __func__));
 	return MAVIS_FINAL;
@@ -555,8 +564,9 @@ static void mavis_io(mavis_ctx * mcx, int cur __attribute__((unused)))
     struct remote_addr_s *ra;
     sockaddr_union sa;
     av_ctx *ac = av_new(NULL, NULL);
+    int bad = 0;
     DebugIn(DEBUG_MAVIS);
-    if ((ra = av_recv(mcx, ac, mcx->sock, &sa))) {
+    if ((ra = av_recv(mcx, ac, mcx->sock, &sa, &bad))) {
 	struct query q;
 	char *serial;
 	if ((serial = av_get(ac, AV_A_SERIAL))) {
@@ -570,7 +580,11 @@ static void mavis_io(mavis_ctx * mcx, int cur __attribute__((unused)))
 		io_sched_pop(mcx->io, qp);
 		RB_search_and_delete(mcx->retransmit_by_app_ctx, qp);
 		RB_delete(mcx->retransmit, r);
-		av_move(qp->ac, ac);
+		if (bad) {
+		    logmsg("Alert: malformed reply for serial %s", serial);
+		    av_list_set_malformed(qp->ac, AV_A_MEMBEROF, mcx->identifier);
+		} else
+		    av_move(qp->ac, ac);
 		RB_insert(mcx->outgoing, qp);
 		if (ra->backlog > 0)
 		    ra->backlog--;

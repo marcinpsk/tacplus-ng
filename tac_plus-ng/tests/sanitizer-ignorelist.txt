@@ -41,6 +41,9 @@ src:*/misc/io_sched.c
 # callback (tac_plus-ng/mavis.c mavis_callback()) as void (*)(void *);
 # fires on every answer of an external MAVIS module.
 fun:read_from_child
+# mavis/libmavis_remote.c mavis_io() calls it the same way; fires on every
+# answer of the remote module.
+fun:mavis_io
 # misc/rb.h RB_delete() calls the free function a tree was made with, e.g.
 # tac_plus-ng/config.c free_user(tac_user *), as void (*)(const void *);
 # fires when an answer from MAVIS replaces a cached user.

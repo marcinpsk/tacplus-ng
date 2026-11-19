@@ -38,6 +38,7 @@ import re
 import resource
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -962,6 +963,224 @@ class GroupNameInNamespace(DaemonTestCase):
         self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "PASS")
         stub.set(users={"bob": {"password": "pw", "gids": "0,%d" % GROUP_GID}})
         self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+
+
+# answers ACK with TACMEMBER admins and a MEMBEROF that a deny rule matches, in a form the wire format cannot
+# carry; argv[1]: "mt" for the framing of external-mt, argv[2]: the form
+MALFORMED_BACKEND = r"""
+import os, struct, sys
+
+def exact(n):
+    buf = b""
+    while len(buf) < n:
+        part = os.read(0, n - len(buf))
+        if not part:
+            sys.exit(0)
+        buf += part
+    return buf
+
+def answer(lines):
+    av = dict(line.split(b" ", 1) for line in lines if line)
+    av[b"6"], av[b"47"] = b"ACK", b"admins"
+    if sys.argv[2] == "nul":
+        av[b"1"] = b'"cn=blocked,dc=example"\0'
+    elif sys.argv[2] == "nul-in-timestamp":
+        # the serial first: only what comes after the NUL is lost
+        av = {b"21": av.pop(b"21"), **av}
+        av[b"3"] += b"\0"
+        av[b"1"] = b'"cn=blocked,dc=example"'
+    elif sys.argv[2] == "line-break":
+        av[b"1"] = b'"cn=other,dc=example",\n"cn=blocked,dc=example"'
+    elif sys.argv[2] == "stray-equal":
+        # a line that starts with "=" in the body is not an attribute; without it the list is well-formed
+        av[b"1"] = b'"cn=other,dc=example"\n=0 "cn=blocked,dc=example"'
+    body = b"".join(b"%s %s\n" % kv for kv in av.items())
+    if sys.argv[2] == "no-final-lf":
+        body += b'1 "cn=blocked,dc=example"'
+    return body
+
+if sys.argv[1] == "mt":
+    while True:
+        magic, length, _ = struct.unpack("!III", exact(12))
+        out = answer(exact(length).split(b"\n"))
+        out = struct.pack("!III", magic, len(out), 0) + out
+        while out:
+            out = out[os.write(1, out):]
+else:
+    lines = []
+    for line in sys.stdin.buffer:
+        if line == b"=\n":
+            sys.stdout.buffer.write(answer(lines) + (b"\n" if sys.argv[2] == "no-final-lf" else b"") + b"=0\n")
+            sys.stdout.buffer.flush()
+            lines = []
+        else:
+            lines.append(line.rstrip(b"\n"))
+"""
+
+
+@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+class MalformedAnswer(DaemonTestCase):
+    """An answer that the wire format cannot carry is the request, refused: no part of it is used.
+
+    It is not a backend error, so "authentication fallback" and "permit if-authenticated" do not authorize it.
+    """
+
+    CONFIG = None
+
+    def start(self, module, mode, form):
+        backend = self.scratch_file("backend.py", MALFORMED_BACKEND)
+        return self.start_daemon("""
+	mavis module = %s {
+		exec = "%s" "%s" "-u" "%s" "%s" "%s"
+	}
+""" % (module, sys.executable, sys.executable, backend, mode, form) + BACKEND + """
+	device trusting {
+		address = 127.0.10.1
+		key = tactest
+		permit if-authenticated = yes
+		authentication fallback = yes
+	}
+	group admins { }
+	ruleset {
+		rule blocked { script { if (memberof == "cn=blocked,dc=example") { deny } } }
+		rule admins { script { if (member == admins) { permit } } }
+	}
+""")
+
+    def check(self, module, mode, forms):
+        for form in forms:
+            with self.subTest(form=form):
+                d = self.start(module, mode, form)
+                with d.connect() as c:
+                    self.assertEqual(c.pap("alice", "pw").status_name, "FAIL")
+                r = d.connect(source="127.0.10.1").author("alice", ["service=shell", "cmd="], authen_method=5)
+                self.assertEqual(r.status_name, "FAIL")
+
+    def test_external(self):
+        self.check("external", "plain", ("nul", "nul-in-timestamp", "line-break", "stray-equal"))
+
+    @unittest.skipUnless(os.path.exists(os.path.join(prefix(), "lib", "mavis", "libmavis_external-mt.so")),
+                         "configure builds external-mt only if it finds pthread")
+    def test_external_mt(self):
+        self.check("external-mt", "mt", ("nul", "nul-in-timestamp", "line-break", "stray-equal", "no-final-lf"))
+
+
+# external-mt: the first child takes a small stdin pipe, waits until requests queue up behind it, then answers
+# one without a serial; the next child answers each request; argv[1]: the marker file of the first child
+RESTART_BACKEND = r"""
+import fcntl, os, struct, sys, time
+
+def exact(n):
+    buf = b""
+    while len(buf) < n:
+        part = os.read(0, n - len(buf))
+        if not part:
+            sys.exit(0)
+        buf += part
+    return buf
+
+first = not os.path.exists(sys.argv[1])
+if first:
+    open(sys.argv[1], "w").close()
+    fcntl.fcntl(0, fcntl.F_SETPIPE_SZ, 4096)
+    time.sleep(3)
+while True:
+    magic, length, _ = struct.unpack("!III", exact(12))
+    av = dict(line.split(b" ", 1) for line in exact(length).split(b"\n") if line)
+    if first:
+        out = b"6 ACK\n"
+    else:
+        av[b"6"] = b"ACK"
+        out = b"".join(b"%s %s\n" % kv for kv in av.items())
+    out = struct.pack("!III", magic, len(out), 0) + out
+    while out:
+        out = out[os.write(1, out):]
+"""
+
+
+@unittest.skipUnless(LINUX, "F_SETPIPE_SZ is Linux only")
+@unittest.skipUnless(os.path.exists(os.path.join(prefix(), "lib", "mavis", "libmavis_external-mt.so")),
+                     "configure builds external-mt only if it finds pthread")
+class ExternalMtRestartWithQueue(DaemonTestCase):
+    """external-mt restarts a child that answers without a serial; the new child gets the requests that were queued."""
+
+    CONFIG = None
+    LOGINS = 40
+
+    def test_queued_requests(self):
+        backend = self.scratch_file("backend.py", RESTART_BACKEND)
+        # check=False: the first child of the backend is killed on purpose
+        d = self.start_daemon("""
+	mavis module = external-mt {
+		exec = "%s" "%s" "-u" "%s" "%s"
+	}
+""" % (sys.executable, sys.executable, backend, os.path.join(os.path.dirname(backend), "first")) + BACKEND + PERMIT,
+                              check=False)
+        results = []
+
+        def login(i):
+            with d.connect(timeout=30) as c:
+                results.append(c.pap("user%d" % i, "pw").status_name)
+
+        threads = [threading.Thread(target=login, args=(i,)) for i in range(self.LOGINS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(results, ["PASS"] * self.LOGINS)
+
+
+@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+class MalformedRemoteAnswer(DaemonTestCase):
+    """The remote module refuses a reply datagram that is not whole attribute lines, as external and external-mt do."""
+
+    CONFIG = None
+
+    def peer(self, last_line):
+        """A MAVIS peer on UDP that answers ACK, TACMEMBER admins and a MEMBEROF of a deny rule, as last_line."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(0.2)
+        stop = threading.Event()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    data, addr = sock.recvfrom(65536)
+                except socket.timeout:
+                    continue
+                av = dict(line.split(b" ", 1) for line in data.split(b"\n") if b" " in line)
+                av[b"6"], av[b"47"] = b"ACK", b"admins"
+                av.pop(b"1", None)
+                sock.sendto(b"".join(b"%s %s\n" % kv for kv in av.items()) + last_line, addr)
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        self.addCleanup(sock.close)
+        self.addCleanup(t.join)
+        self.addCleanup(stop.set)
+        return sock.getsockname()[1]
+
+    def test_truncated_reply(self):
+        for name, last_line, status in (("whole", b'1 "cn=other,dc=example"\n', "PASS"),
+                                        ("no final LF", b'1 "cn=blocked,dc=example"', "FAIL"),
+                                        ("NUL", b'1 "cn=blocked,dc=example"\0\n', "FAIL")):
+            with self.subTest(reply=name):
+                d = self.start_daemon("""
+	mavis module = remote {
+		server { address = 127.0.0.1 port = %d }
+		timeout = 2
+		tries = 1
+	}
+""" % self.peer(last_line) + BACKEND + """
+	group admins { }
+	ruleset {
+		rule blocked { script { if (memberof == "cn=blocked,dc=example") { deny } } }
+		rule admins { script { if (member == admins) { permit } } }
+	}
+""")
+                with d.connect() as c:
+                    self.assertEqual(c.pap("alice", "pw").status_name, status)
 
 
 class PasswordChange(DaemonTestCase):

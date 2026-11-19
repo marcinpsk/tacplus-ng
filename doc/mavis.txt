@@ -506,6 +506,13 @@ cache expire FTP = 0
    the list cannot carry. libmavis makes such an answer a failure
    too (RESULT is NAK): a script of a module does not run on it,
    and the groups module does not filter it.
+
+   Each line of an answer is an attribute number, a blank and the
+   value; a LF in a value goes as a CR. The external, external-mt
+   and remote modules take an answer with a NUL, with a line that
+   is not an attribute, or without a LF at the end as a failure of
+   the request, which tac_plus-ng refuses (it is not a backend
+   error, so no fallback applies).
      __________________________________________________________
 
 5.2.5.1. Configuration directives
