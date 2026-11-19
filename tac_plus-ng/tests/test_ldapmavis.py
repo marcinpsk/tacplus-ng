@@ -84,7 +84,7 @@ $tls
 pidfile $pidfile
 argsfile $argsfile
 
-access to dn.base="" by * read
+access to dn.base="" $root_dse
 access to dn.base="cn=Subschema" by * read
 $access
 
@@ -210,10 +210,10 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS, root_dse="by * read"):
         """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
 
-        access: the access lines, and other global lines, of slapd.conf.
+        access: the access lines, and other global lines, of slapd.conf. root_dse: the "by" clauses of the root DSE.
         """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
@@ -231,7 +231,7 @@ class Slapd:
                      db=os.path.join(directory, "db"))
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
-                                          access=access, base=BASE))
+                                          access=access, root_dse=root_dse, base=BASE))
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
@@ -334,14 +334,14 @@ class LdapTests:
     # the LDAP_SCOPE values of the back-end for subtree, one level and base
     SCOPES = ("sub", "one", "base")
 
-    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", root_dse="by * read", **env):
+        """Start slapd and the daemon; tls, starttls, access, root_dse: see Slapd, settings: tac_plus-ng lines.
 
         env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
         """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls, access)
+                      starttls, access, root_dse)
         self.addCleanup(slapd.stop)
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
@@ -609,16 +609,16 @@ class LdapPython(LdapTests, DaemonTestCase):
 
     @unittest.skipUnless(LINUX, "the open files of the back-end are found through /proc")
     def test_failed_server_detection_closes_the_connection(self):
-        """A failure after the first connect (no root DSE after the bind) is a backend error; the connection closes."""
+        """A failure after the first connect (the server closes it at the root DSE search) is a backend error."""
         log = self.capture_stderr("detection")
-        # the bind passes, the root DSE search of ldap3 after it does not; no StartTLS: it reads the root DSE before
-        _, d = self.start(access=ACCESS + "\nrestrict search", LDAP_SKIP_STARTTLS="1")
+        # slapd closes a bound connection at a larger request: the bind passes, the root DSE search does not
+        _, d = self.start(access=ACCESS + "\nsockbuf_max_incoming_auth 100", LDAP_SKIP_STARTTLS="1")
         self.assert_login(d, "FAIL")
         before = backend_fds(d, LDAP_PYTHON)
         for _ in range(10):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(backend_fds(d, LDAP_PYTHON), before)
-        self.assertIn("supported_features", self.stderr(log, "supported_features"))
+        self.assertIn("session terminated by server", self.stderr(log, "session terminated by server"))
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_reconnect_starts_tls(self):
@@ -659,6 +659,18 @@ class LdapPython(LdapTests, DaemonTestCase):
             with self.subTest(user=user), d.connect() as c:
                 self.assertEqual(c.pap(user, password).status_name, status)
         self.assertEqual([dn for dn, _ in slapd.binds()], [READER, ALICE, READER, BOB, READER, DAVE])
+
+    def test_no_root_dse(self):
+        """A server that does not give the root DSE to LDAP_USER: the generic server type, not a backend error."""
+        log = self.capture_stderr("no-root-dse")
+        # an anonymous client can read it: the back-end reads it before the bind for StartTLS
+        _, d = self.start(root_dse=f'by dn.exact="{READER}" none by * read')
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+            self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        self.assertIn("no root DSE: the LDAP server type is generic", self.stderr(log))
 
     def test_root_dse_per_connection(self):
         """The back-end reads the root DSE on a new connection only, not after each bind."""
