@@ -211,10 +211,10 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS, entries=""):
         """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
 
-        access: the access lines, and other global lines, of slapd.conf.
+        access: the access lines, and other global lines, of slapd.conf. entries: LDIF entries after LDIF.
         """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
@@ -236,7 +236,7 @@ class Slapd:
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
-            f.write(LDIF)
+            f.write(LDIF + entries)
         p = subprocess.run([SLAPD, "-T", "add", "-f", self.conf, "-l", ldif], stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, check=False)
         if p.returncode:
@@ -335,14 +335,14 @@ class LdapTests:
     # the LDAP_SCOPE values of the back-end for subtree, one level and base
     SCOPES = ("sub", "one", "base")
 
-    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", entries="", **env):
+        """Start slapd and the daemon; tls, starttls, access, entries: see Slapd, settings: tac_plus-ng lines.
 
         env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
         """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls, access)
+                      starttls, access, entries)
         self.addCleanup(slapd.stop)
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
@@ -692,6 +692,20 @@ class LdapPython(LdapTests, DaemonTestCase):
                 with peer:
                     peer.settimeout(1)
                     self.fail(f"the back-end followed the referral and sent: {peer.recv(4096)!r}")
+
+    def test_group_dn_filter_characters(self):
+        """The groupOfNames walk escapes the group DN in its search filter: a CN with "(", ")" and "*" works."""
+        entries = (f"\ndn: uid=frank,ou=people,{BASE}\nobjectClass: inetOrgPerson\n"
+                   f"uid: frank\ncn: Frank\nsn: Frank\nuserPassword: frankpw\n"
+                   f"\ndn: cn=ops (a*b),ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: ops (a*b)\n"
+                   f"member: uid=frank,ou=people,{BASE}\n"
+                   f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
+                   f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
+                   f"member: cn=ops (a*b),ou=groups,{BASE}\n")
+        _, d = self.start(entries=entries)
+        with d.connect(timeout=15.0) as c:
+            r = c.ascii_login("frank", "frankpw")
+            self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
     def test_empty_password(self):
         """An empty password is a FAIL without a bind, not a backend error.
