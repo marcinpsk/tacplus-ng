@@ -119,6 +119,13 @@ class RuleMotd(DaemonTestCase):
                                      ("auditor", "pw3", DEVICE_MOTD), ("netadmin", "pw1", NETADMIN_MOTD)):
             self.assertEqual(self.motd(c, user, password), motd, user)
 
+    def test_issue258_single_connection_profile_acl_motd(self):
+        """A cache hit runs the profile acl again, so its banner comes back."""
+        c = self.start(profile_acl='motd banner = "Profile acl.\\n" permit')()
+        c.single_connect = True
+        for _ in range(2):
+            self.assertEqual(self.motd(c, "auditor", "pw3"), "Profile acl.\n")
+
 
 if __name__ == "__main__":
     unittest.main()
