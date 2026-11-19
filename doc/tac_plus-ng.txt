@@ -3161,6 +3161,13 @@ int async 1
    path can remove the StartTLS offer from it. Use ldaps:// or
    USE_STARTTLS to prevent clear-text binds.
 
+   After the first bind as LDAP_USER, the back-end reads the root
+   DSE again to find the server type (Active Directory or generic)
+   and the password modify extension. If the server does not give
+   the root DSE to LDAP_USER, the server type is generic and the
+   back-end does not change passwords on it. A message goes to
+   stderr.
+
    The back-end keeps two connections to the server. It does the
    searches on one connection, bound as LDAP_USER. It checks the
    password of the user on the other connection, and a password
