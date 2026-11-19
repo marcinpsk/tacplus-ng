@@ -5,9 +5,12 @@ Every test starts a slapd of its own, as a normal process on a free
 loopback port, with a database that slapadd fills before the start. The
 anonymous user can only bind, so the backend must bind as LDAP_USER to
 search. alice is a member of netadmins, and netadmins is a member of
-staff; dave is a direct member of staff; bob is in no group.
+staff; dave is a direct member of staff; bob is in no group. frank,
+grace and ivan have directory values with the characters of the list
+format of TACMEMBER and SSHKEY.
 """
 
+import base64
 import contextlib
 import glob
 import os
@@ -17,13 +20,14 @@ import shutil
 import signal
 import socket
 import string
+import struct
 import subprocess
 import tempfile
 import time
 import unittest
 
 from tactest import LINUX, DaemonTestCase, prefix, tls
-from tactest.daemon import free_port
+from tactest.daemon import features, free_port
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
 SCHEMA_DIRS = ("/etc/ldap/schema", "/etc/openldap/schema")
@@ -41,6 +45,14 @@ BASE = "dc=example,dc=com"
 READER = "cn=reader," + BASE
 STAFF = "cn=staff,ou=groups," + BASE
 ALICE, BOB, DAVE = (f"uid={uid},ou=people,{BASE}" for uid in ("alice", "bob", "dave"))
+COMMA_GROUP = 'cn=a\\,b,ou=groups,' + BASE
+BLOCKED_GROUP = 'cn=c\\,d,ou=groups,' + BASE
+# memberOf as in Active Directory (OpenLDAP has it only with the memberof overlay), sshPublicKey as in openssh-lpk
+EXTRA_SCHEMA = """\
+attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' SUP distinguishedName )
+attributetype ( 1.3.6.1.4.1.24552.500.1.1.1.13 NAME 'sshPublicKey' EQUALITY octetStringMatch
+	SYNTAX 1.3.6.1.4.1.1466.115.121.1.40 )
+"""
 # slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
 CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
 # runs the back-end argv[1]; on SIGUSR1 it writes the number of its ldap3.Connection objects to argv[2]
@@ -80,6 +92,8 @@ SLAPD_CONF = string.Template("""\
 include $core
 include $cosine
 include $inetorgperson
+include $nis
+include $extra
 $modules
 $tls
 pidfile $pidfile
@@ -93,6 +107,20 @@ database mdb
 suffix "$base"
 directory $db
 """)
+
+
+
+def ssh_ed25519_key(comment):
+    """An OpenSSH public key line ("ssh-ed25519 <base64> comment"), the key itself made up."""
+    def string(b):
+        return struct.pack("!I", len(b)) + b
+    blob = string(b"ssh-ed25519") + string(bytes(range(32)))
+    return "ssh-ed25519 %s %s" % (base64.b64encode(blob).decode(), comment)
+
+
+# values that contain the quote, the separator or a line break of the list format
+GRACE_KEY = ssh_ed25519_key('grace "laptop", 2026')
+IVAN_KEY = ssh_ed25519_key("ivan") + "\nmore"
 
 LDIF = string.Template("""\
 dn: $base
@@ -153,7 +181,76 @@ objectClass: groupOfNames
 cn: staff
 member: cn=netadmins,ou=groups,$base
 member: uid=dave,ou=people,$base
-""").substitute(base=BASE, reader=READER, staff=STAFF)
+
+dn: uid=frank,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: frank
+cn: Frank
+sn: Frank
+uidNumber: 5001
+gidNumber: 5000
+homeDirectory: /home/frank
+userPassword: frankpw
+
+dn: cn=users,ou=groups,$base
+objectClass: posixGroup
+cn: users
+gidNumber: 5000
+
+dn: cn=x\\"\\,\\"admins,ou=groups,$base
+objectClass: posixGroup
+cn: x","admins
+gidNumber: 5001
+memberUid: frank
+
+dn: uid=grace,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: grace
+cn: Grace
+sn: Grace
+userPassword: gracepw
+sshPublicKey: $grace_key
+
+dn: $comma_group
+objectClass: organizationalRole
+cn: a,b
+
+dn: uid=kim,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: kim
+cn: Kim
+sn: Kim
+userPassword: kimpw
+memberOf: $comma_group
+
+dn: $blocked_group
+objectClass: organizationalRole
+cn: c,d
+
+dn: uid=lee,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: lee
+cn: Lee
+sn: Lee
+userPassword: leepw
+memberOf: $staff
+memberOf: $blocked_group
+
+dn: uid=ivan,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: ivan
+cn: Ivan
+sn: Ivan
+userPassword: ivanpw
+sshPublicKey:: $ivan_key
+""").substitute(base=BASE, reader=READER, staff=STAFF, comma_group=COMMA_GROUP, blocked_group=BLOCKED_GROUP,
+               grace_key=GRACE_KEY,
+               ivan_key=base64.b64encode(IVAN_KEY.encode()).decode())
 
 
 def slapd_arg(value):
@@ -227,9 +324,11 @@ class Slapd:
         schema = first_existing(SCHEMA_DIRS)
         if schema is None:
             raise AssertionError(f"no OpenLDAP schema directory in {SCHEMA_DIRS}")
-        paths = {n: os.path.join(schema, n + ".schema") for n in ("core", "cosine", "inetorgperson")}
+        paths = {n: os.path.join(schema, n + ".schema") for n in ("core", "cosine", "inetorgperson", "nis")}
         paths.update(pidfile=os.path.join(directory, "slapd.pid"), argsfile=os.path.join(directory, "slapd.args"),
-                     db=os.path.join(directory, "db"))
+                     db=os.path.join(directory, "db"), extra=os.path.join(directory, "extra.schema"))
+        with open(paths["extra"], "w") as f:
+            f.write(EXTRA_SCHEMA)
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
                                           access=access, base=BASE))
@@ -314,12 +413,25 @@ $module
 	}
 	group netadmins { }
 	group staff { }
+	group admins { }
 	ruleset {
+		rule blocked {
+			script { if (memberof == $blocked_group) { deny } }
+		}
+		rule admins {
+			script { if (member == admins) { motd banner = "admins\\n" permit } }
+		}
 		rule nested {
 			script { if (member == netadmins && memberof == "$staff") { motd banner = "netadmins in staff\\n" permit } }
 		}
 		rule netadmins {
 			script { if (member == netadmins) { motd banner = "netadmins only\\n" permit } }
+		}
+		rule comma {
+			script { if (memberof == $comma_group) { motd banner = "comma\\n" permit } }
+		}
+		rule empty {
+			script { if (memberof == "") { motd banner = "empty\\n" permit } }
 		}
 		rule staff {
 			script { if (memberof == "$staff") { motd banner = "staff\\n" permit } }
@@ -347,7 +459,8 @@ class LdapTests:
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
         extra = "".join(f"\t\tsetenv {name} = {slapd_arg(value)}\n" for name, value in env.items() if value is not None)
-        body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF)
+        body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
+                                          comma_group=slapd_arg(COMMA_GROUP), blocked_group=slapd_arg(BLOCKED_GROUP))
         return slapd, self.start_daemon(body, check=check)
 
     def test_pap(self):
@@ -517,6 +630,56 @@ class LdapPython(LdapTests, DaemonTestCase):
             if text is None or text in content or time.monotonic() > deadline:
                 return content
             time.sleep(0.1)
+
+    def test_list_values(self):
+        """A quote, a comma or a line break in a directory value stays in that one value of TACMEMBER or SSHKEY.
+
+        frank is in the posixGroup x","admins, grace has a quote in the
+        comment of her SSH key, ivan has a line break in his. None of them
+        is a member of admins, and all can log in. The back-end logs the
+        value it cannot send.
+        """
+        log = self.capture_stderr("list")
+        _, d = self.start()
+        # without OpenSSL the daemon has no ssh-key, so the SSH keys fail the profile
+        for user in ("frank", "grace", "ivan") if "openssl" in features() else ("frank",):
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+        if "openssl" in features():
+            message = "user ivan: SSHKEY value skipped: the list cannot carry it"
+            self.assertIn(message, self.stderr(log, message))
+
+    def test_memberof_with_an_escaped_comma(self):
+        """A group DN with an escaped comma is one MEMBEROF value, as the server sent it.
+
+        The default LDAP_MEMBEROF_REGEX gives the TACMEMBER value a\\ (up
+        to the escaped comma); the other one gives a.
+        """
+        for regex in (None, "^cn=([a-z]+)"):
+            with self.subTest(regex=regex):
+                _, d = self.start(**({"LDAP_MEMBEROF_REGEX": regex} if regex else {}))
+                with d.connect() as c:
+                    r = c.ascii_login("kim", "kimpw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", "comma\n"), r)
+
+    def test_no_memberof_without_groups(self):
+        """A memberOf that LDAP_MEMBEROF_FILTER takes away completely gives no MEMBEROF, not one empty value."""
+        _, d = self.start(LDAP_MEMBEROF_FILTER="^cn=nothing,")
+        with d.connect() as c:
+            r = c.ascii_login("kim", "kimpw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+
+    def test_memberof_deny_rule_with_an_escaped_comma(self):
+        """A memberof deny rule matches a group DN with an escaped comma; lee is also in staff."""
+        for regex in (None, "^cn=([a-z]+)"):
+            with self.subTest(regex=regex):
+                _, d = self.start(**({"LDAP_MEMBEROF_REGEX": regex} if regex else {}))
+                with d.connect() as c:
+                    r = c.ascii_login("lee", "leepw")
+                self.assertEqual(r.status_name, "FAIL", r)
+                # the rule denies it, not a profile parse error
+                d.wait_log("authentication", "\tlee\ttty0\t127.0.0.1\tshell login denied by ACL")
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_starttls_offered(self):
