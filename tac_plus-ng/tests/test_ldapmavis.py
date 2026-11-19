@@ -13,6 +13,7 @@ import os
 import re
 import select
 import shutil
+import signal
 import socket
 import string
 import subprocess
@@ -40,6 +41,25 @@ READER = "cn=reader," + BASE
 STAFF = "cn=staff,ou=groups," + BASE
 # slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
 CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
+# runs the back-end argv[1]; on SIGUSR1 it writes the number of its ldap3.Connection objects to argv[2]
+COUNT_CONNECTIONS = """\
+import gc, os, runpy, signal, sys
+script, out = sys.argv[1:3]
+
+def count(*_):
+    import ldap3
+    gc.collect()
+    with open(out + ".tmp", "w") as f:
+        f.write(str(sum(isinstance(o, ldap3.Connection) for o in gc.get_objects())))
+    os.replace(out + ".tmp", out)
+
+signal.signal(signal.SIGUSR1, count)
+# the daemon can start the back-end with SIGUSR1 blocked
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
+sys.argv = [script]
+sys.path.insert(0, os.path.dirname(script))
+runpy.run_path(script, run_name="__main__")
+"""
 TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn="([^"]*)" method=128)')
 
 SLAPD_CONF = string.Template("""\
@@ -140,16 +160,21 @@ def modules():
     return ""
 
 
-def backend_fds(d, program):
-    """The number of open files of the back-end process of daemon d that runs program (executable or script)."""
+def backend_pid(d, program):
+    """The process ID of the back-end process of daemon d that runs program (executable or script)."""
     for pid in d.descendants():
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 if program.encode() in f.read().split(b"\0"):
-                    return len(os.listdir(f"/proc/{pid}/fd"))
+                    return pid
         except OSError:
             continue
     raise AssertionError(f"no process of {program}")
+
+
+def backend_fds(d, program):
+    """The number of open files of the back-end process of daemon d that runs program (executable or script)."""
+    return len(os.listdir(f"/proc/{backend_pid(d, program)}/fd"))
 
 
 def perl_ldap():
@@ -441,6 +466,30 @@ class LdapPython(LdapTests, DaemonTestCase):
         os.chmod(self.exe, 0o755)
         return log
 
+    def count_connections(self, name):
+        """The next start() runs the back-end through COUNT_CONNECTIONS; returns count(d).
+
+        count(d) is the number of ldap3.Connection objects in the back-end of daemon d.
+        """
+        out = self.scratch_file(name + ".count", "")
+        os.remove(out)
+        script = self.scratch_file(name + ".py", COUNT_CONNECTIONS)
+        self.exe = self.scratch_file(name + ".sh", f'#!/bin/sh\nexec "{PYTHON}" "{script}" "{LDAP_PYTHON}" "{out}"\n')
+        os.chmod(self.exe, 0o755)
+
+        def count(d):
+            os.kill(backend_pid(d, LDAP_PYTHON), signal.SIGUSR1)
+            deadline = time.monotonic() + 10
+            while not os.path.exists(out):
+                if time.monotonic() > deadline:
+                    raise AssertionError("the back-end did not count its connections")
+                time.sleep(0.1)
+            with open(out) as f:
+                n = int(f.read())
+            os.remove(out)
+            return n
+        return count
+
     def stderr(self, log, text=None):
         """The stderr of the back-end; with text, wait up to 10 s until it shows text."""
         deadline = time.monotonic() + 10
@@ -527,6 +576,19 @@ class LdapPython(LdapTests, DaemonTestCase):
         for _ in range(10):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(backend_fds(d, LDAP_PYTHON), before)
+
+    @unittest.skipUnless(LINUX, "the back-end process is found through /proc")
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_failed_starttls_frees_the_connection(self):
+        """Each login after a failed StartTLS makes a new connection; the back-end must not keep the old ones."""
+        count = self.count_connections("count")
+        ca = self.ca()
+        _, d = self.start(tls=self.ldaps(ca), starttls=True)
+        self.assertEqual(self.login(d), "FAIL")
+        before = count(d)
+        for _ in range(10):
+            self.assertEqual(self.login(d), "FAIL")
+        self.assertEqual(count(d), before)
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_reconnect_starts_tls(self):

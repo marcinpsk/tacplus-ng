@@ -194,10 +194,10 @@ except ValueError:
 if USE_STARTTLS is not None and ldap_skip_starttls:
 	sys.exit("USE_STARTTLS and LDAP_SKIP_STARTTLS=1 contradict each other, aborting.")
 eval_env('LDAP_HOSTS', 'ldaps://localhost')
-server_pool = ldap3.ServerPool(None, ldap3.FIRST, active=True)
+servers = []
 for server in LDAP_HOSTS.split():
 	server_object = ldap3.Server(server, get_info=ldap3.DSA, tls=tls, connect_timeout=LDAP_CONNECT_TIMEOUT)
-	server_pool.add(server_object)
+	servers.append(server_object)
 
 # Default to OpenLDAP: #######################################################
 #ldap3.set_config_parameter("POOLING_LOOP_TIMEOUT", LDAP_CONNECT_TIMEOUT)
@@ -227,7 +227,8 @@ def start_tls(c):
 
 # A new connection, bound as LDAP_USER; TLS comes before the bind: ##########
 def ldap_connect():
-	c = ldap3.Connection(server_pool, user=LDAP_USER, password=LDAP_PASSWD,
+	# a pool for each connection: a ServerPool keeps a reference to each connection that used it
+	c = ldap3.Connection(ldap3.ServerPool(servers, ldap3.FIRST, active=True), user=LDAP_USER, password=LDAP_PASSWD,
 		receive_timeout=LDAP_CONNECT_TIMEOUT)
 	try:
 		c.open(read_server_info=False)
