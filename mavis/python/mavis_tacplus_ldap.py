@@ -170,9 +170,10 @@ eval_env('LDAP_FILTER_GROUP', '(&(objectclass=groupOfNames)(member={}))')
 eval_env('LDAP_SCOPE', 'SUBTREE')
 eval_env('LDAP_SCOPE_GROUP', LDAP_SCOPE)
 eval_env('LDAP_SCOPE_POSIXGROUP', LDAP_SCOPE)
-# ldap3 packs the receive timeout as a C integer
+# ldap3 packs the receive timeout as a C integer; an empty value is invalid, not the default
+LDAP_CONNECT_TIMEOUT = os.getenv('LDAP_CONNECT_TIMEOUT', '5')
 try:
-	ldap_connect_timeout = int(eval_env('LDAP_CONNECT_TIMEOUT', '5'))
+	ldap_connect_timeout = int(LDAP_CONNECT_TIMEOUT)
 except ValueError:
 	ldap_connect_timeout = 0
 if ldap_connect_timeout < 1:

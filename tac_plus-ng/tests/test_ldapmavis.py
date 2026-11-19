@@ -718,7 +718,8 @@ class LdapPython(LdapTests, DaemonTestCase):
                  ({"LDAP_SKIP_STARTTLS": ""}, "invalid LDAP_SKIP_STARTTLS: ''"),
                  ({"LDAP_CONNECT_TIMEOUT": "5s"}, "invalid LDAP_CONNECT_TIMEOUT: '5s'"),
                  ({"LDAP_CONNECT_TIMEOUT": "0"}, "invalid LDAP_CONNECT_TIMEOUT: '0'"),
-                 ({"LDAP_CONNECT_TIMEOUT": "2.5"}, "invalid LDAP_CONNECT_TIMEOUT: '2.5'"))
+                 ({"LDAP_CONNECT_TIMEOUT": "2.5"}, "invalid LDAP_CONNECT_TIMEOUT: '2.5'"),
+                 ({"LDAP_CONNECT_TIMEOUT": ""}, "invalid LDAP_CONNECT_TIMEOUT: ''"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")
