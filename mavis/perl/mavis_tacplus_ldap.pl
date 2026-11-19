@@ -536,8 +536,10 @@ while ($in = <>) {
 				}
 
 				unless (defined $has_extension_password_modify) {
+					my $root_dse = $ldap->root_dse;
+					# the server can refuse the root DSE to the user: no password modify extension
 					$has_extension_password_modify =
-						$ldap->root_dse->supported_extension(LDAP_EXTENSION_PASSWORD_MODIFY);
+						$root_dse ? $root_dse->supported_extension(LDAP_EXTENSION_PASSWORD_MODIFY) : 0;
 				}
 
 				if (0 == $has_extension_password_modify) {
