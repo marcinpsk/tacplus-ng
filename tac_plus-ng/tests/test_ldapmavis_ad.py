@@ -28,14 +28,20 @@ import urllib.parse
 from typing import ClassVar
 from unittest import mock
 
-from tactest import DaemonTestCase, prefix
+from tactest import DaemonTestCase
 from tactest.tls import CA
-from test_ldapmavis import LDAP_PERL, LDAPMAVIS, PERL, perl_ldap, slapd_arg
+from test_ldapmavis import (
+    LDAP_PERL,
+    LDAP_PYTHON,
+    LDAPMAVIS,
+    PERL,
+    PYTHON,
+    perl_ldap,
+    python_ldap3,
+    slapd_arg,
+)
 
 URL = os.environ.get("TACTEST_SAMBA_DC")
-LDAP_PYTHON = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_ldap.py")
-# the interpreter of the "#!" line of the Python back-end
-PYTHON = "/usr/bin/python3" if os.access("/usr/bin/python3", os.X_OK) else shutil.which("python3") or "python3"
 SETTINGS = ("TACTEST_SAMBA_BASE", "TACTEST_SAMBA_ADMIN", "TACTEST_SAMBA_PASSWORD", "TACTEST_SAMBA_CA")
 SKIP_REASON = "TACTEST_SAMBA_DC is unset (see samba-dc/start in README)"
 
@@ -81,15 +87,6 @@ def settings():
     if missing:
         raise AssertionError("TACTEST_SAMBA_DC is set, but not " + ", ".join(missing))
     return {k: os.environ[k] for k in SETTINGS}
-
-
-def python_ldap3():
-    """The Python back-end needs the ldap3 module."""
-    try:
-        return subprocess.run([PYTHON, "-c", "import ldap3"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              check=False).returncode == 0
-    except OSError:
-        return False
 
 
 def perl_string(value):
