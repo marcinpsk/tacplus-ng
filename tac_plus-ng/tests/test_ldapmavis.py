@@ -727,7 +727,8 @@ class LdapPython(LdapTests, DaemonTestCase):
                  ({"LDAP_CONNECT_TIMEOUT": "2.5"}, "invalid LDAP_CONNECT_TIMEOUT: '2.5'"),
                  ({"LDAP_CONNECT_TIMEOUT": ""}, "invalid LDAP_CONNECT_TIMEOUT: ''"),
                  ({"LDAP_NESTED_GROUP_DEPTH": "two"}, "invalid LDAP_NESTED_GROUP_DEPTH: 'two'"),
-                 ({"LDAP_NESTED_GROUP_DEPTH": "-1"}, "invalid LDAP_NESTED_GROUP_DEPTH: '-1'"))
+                 ({"LDAP_NESTED_GROUP_DEPTH": "-1"}, "invalid LDAP_NESTED_GROUP_DEPTH: '-1'"),
+                 ({"LDAP_NESTED_GROUP_DEPTH": ""}, "invalid LDAP_NESTED_GROUP_DEPTH: ''"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")

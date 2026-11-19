@@ -185,7 +185,8 @@ memberof_filter = re.compile('(?i)' + eval_env('LDAP_MEMBEROF_FILTER', '.'))
 eval_env('LDAP_TACMEMBER', 'tacMember')
 ou_regex = re.compile('(?i)^ou=(.+)$')
 eval_env('LDAP_TACMEMBER_MAP_OU', None)
-ldap_nested_group_depth = eval_env('LDAP_NESTED_GROUP_DEPTH', None)
+# an empty value is invalid, not unset
+LDAP_NESTED_GROUP_DEPTH = ldap_nested_group_depth = os.getenv('LDAP_NESTED_GROUP_DEPTH')
 if ldap_nested_group_depth is not None:
 	try:
 		ldap_nested_group_depth = int(ldap_nested_group_depth)
