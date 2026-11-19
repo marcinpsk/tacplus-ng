@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
+   $Id: 303ef7c526c52147e4ad84fd0cf90a1cdd767e7a $
      __________________________________________________________
 
    Table of Contents
@@ -769,8 +769,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -2999,6 +2999,11 @@ int async 1
    LDAP search scope for groups (base, one, sub)
 
    Default: sub
+   LDAP_SCOPE_POSIXGROUP
+
+   LDAP search scope for the posixGroup groups (base, one, sub)
+
+   Default: sub
    LDAP_BASE
 
    Base user search DN of your LDAP server
@@ -3009,6 +3014,11 @@ int async 1
    Base group search DN of your LDAP server
 
    Example: dc=example,dc=com
+   LDAP_BASE_POSIXGROUP
+
+   Base DN of the search for posixGroup groups
+
+   Default: the value of LDAP_BASE
    LDAP_CONNECT_TIMEOUT
 
    Timeout for initital connect to remote LDAP server.
@@ -3090,6 +3100,50 @@ int async 1
    unset.
 
    Example: 1
+   LDAP_SKIP_MEMBEROF
+
+   1: ignore the memberOf attribute of the user. The back-end then
+   handles the user as a user without memberOf, see
+   LDAP_SKIP_GROUPOFNAMES.
+
+   0 or unset: read memberOf and look up the nested groups.
+
+   Default: unset
+   LDAP_SKIP_GROUPOFNAMES
+
+   1: do not search for groupOfNames groups (LDAP_FILTER_GROUP
+   below LDAP_BASE_GROUP).
+
+   0: do the search. mavis_tacplus-ng_ldap.pl searches only for a
+   user without memberOf, ldapmavis-mt searches for each user.
+
+   Unset: as 1 for Active Directory. For other servers the
+   back-end searches until it gets a user with memberOf. After
+   that, it does not search again until it restarts.
+
+   Default: unset
+   LDAP_SKIP_POSIXGROUP
+
+   For a user with a gidNumber, the back-end searches below
+   LDAP_BASE_POSIXGROUP for posixGroup groups: the group with this
+   gidNumber (only if exactly one group has it), and the groups
+   that have the user name in memberUid. The first cn value of the
+   gidNumber group and the cn values of the memberUid groups
+   become group memberships (TACMEMBER). GIDS gets the gidNumber
+   of the user, then the gidNumber values of the memberUid groups.
+
+   This is how mavis_tacplus-ng_ldap.pl works. It keeps the name
+   of the group of a gidNumber until it restarts. ldapmavis-mt
+   uses only the first group of each of the two searches, also
+   when more groups match. Of a memberUid group with more than one
+   cn value, it adds only the first. Its GIDS gets the gidNumber
+   values of these groups, not the gidNumber of the user.
+
+   1: do not search. 0: search.
+
+   Unset: as 1 for Active Directory, else as 0.
+
+   Default: unset
      __________________________________________________________
 
 5.1.1. Multi-threaded LDAP Backend

@@ -4746,6 +4746,15 @@ int async 1
             </row>
             <row>
               <entry>
+                <literal>LDAP_SCOPE_POSIXGROUP</literal>
+              </entry>
+              <entry>
+                <para>LDAP search scope for the <literal>posixGroup</literal> groups (<literal>base</literal>, <literal>one</literal>, <literal>sub</literal>)</para>
+                <para>Default: <literal>sub</literal></para>
+              </entry>
+            </row>
+            <row>
+              <entry>
                 <literal>LDAP_BASE</literal>
               </entry>
               <entry>
@@ -4762,6 +4771,15 @@ int async 1
                 <para>Base group search DN of your LDAP server</para>
                 <para>Example:
                 <literal>dc=example,dc=com</literal></para>
+              </entry>
+            </row>
+            <row>
+              <entry>
+                <literal>LDAP_BASE_POSIXGROUP</literal>
+              </entry>
+              <entry>
+                <para>Base DN of the search for <literal>posixGroup</literal> groups</para>
+                <para>Default: the value of <literal>LDAP_BASE</literal></para>
               </entry>
             </row>
             <row>
@@ -4905,6 +4923,39 @@ int async 1
               <entry>
                 <para>Limit nested group lookups to the given value. Unlimited if unset.</para>
                 <para>Example: <literal>1</literal></para>
+              </entry>
+            </row>
+            <row>
+              <entry>
+                <literal>LDAP_SKIP_MEMBEROF</literal>
+              </entry>
+              <entry>
+                <para><literal>1</literal>: ignore the <literal>memberOf</literal> attribute of the user. The back-end then handles the user as a user without <literal>memberOf</literal>, see <literal>LDAP_SKIP_GROUPOFNAMES</literal>.</para>
+                <para><literal>0</literal> or unset: read <literal>memberOf</literal> and look up the nested groups.</para>
+                <para>Default: unset</para>
+              </entry>
+            </row>
+            <row>
+              <entry>
+                <literal>LDAP_SKIP_GROUPOFNAMES</literal>
+              </entry>
+              <entry>
+                <para><literal>1</literal>: do not search for <literal>groupOfNames</literal> groups (<literal>LDAP_FILTER_GROUP</literal> below <literal>LDAP_BASE_GROUP</literal>).</para>
+                <para><literal>0</literal>: do the search. <literal>mavis_tacplus-ng_ldap.pl</literal> searches only for a user without <literal>memberOf</literal>, <literal>ldapmavis-mt</literal> searches for each user.</para>
+                <para>Unset: as <literal>1</literal> for Active Directory. For other servers the back-end searches until it gets a user with <literal>memberOf</literal>. After that, it does not search again until it restarts.</para>
+                <para>Default: unset</para>
+              </entry>
+            </row>
+            <row>
+              <entry>
+                <literal>LDAP_SKIP_POSIXGROUP</literal>
+              </entry>
+              <entry>
+                <para>For a user with a <literal>gidNumber</literal>, the back-end searches below <literal>LDAP_BASE_POSIXGROUP</literal> for <literal>posixGroup</literal> groups: the group with this <literal>gidNumber</literal> (only if exactly one group has it), and the groups that have the user name in <literal>memberUid</literal>. The first <literal>cn</literal> value of the <literal>gidNumber</literal> group and the <literal>cn</literal> values of the <literal>memberUid</literal> groups become group memberships (<literal>TACMEMBER</literal>). <literal>GIDS</literal> gets the <literal>gidNumber</literal> of the user, then the <literal>gidNumber</literal> values of the <literal>memberUid</literal> groups.</para>
+                <para>This is how <literal>mavis_tacplus-ng_ldap.pl</literal> works. It keeps the name of the group of a <literal>gidNumber</literal> until it restarts. <literal>ldapmavis-mt</literal> uses only the first group of each of the two searches, also when more groups match. Of a <literal>memberUid</literal> group with more than one <literal>cn</literal> value, it adds only the first. Its <literal>GIDS</literal> gets the <literal>gidNumber</literal> values of these groups, not the <literal>gidNumber</literal> of the user.</para>
+                <para><literal>1</literal>: do not search. <literal>0</literal>: search.</para>
+                <para>Unset: as <literal>1</literal> for Active Directory, else as <literal>0</literal>.</para>
+                <para>Default: unset</para>
               </entry>
             </row>
           </tbody>
