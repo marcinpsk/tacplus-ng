@@ -470,6 +470,13 @@ static int LDAP_bind_user(LDAP *ldap, const char *ldap_dn, const char *ldap_pass
     return LDAP_INVALID_CREDENTIALS;
 }
 
+// A value that the list cannot carry (see av_add_quoted()) is skipped
+static void add_list_value(av_ctx *ac, int attribute, char *value, size_t len)
+{
+    if (av_add_quoted(ac, attribute, value, len))
+	fprintf(stderr, "user %s: %s value skipped: the list cannot carry it\n", av_get(ac, AV_A_USER), av_char[attribute].name);
+}
+
 struct dnhash {
     struct dnhash *next;
     size_t len;
@@ -891,10 +898,10 @@ static void *run_thread(void *arg)
 			ldap_skip_groupofnames = 1;
 		} else if (ldap_tacmember_attr && !strcasecmp(attribute, ldap_tacmember_attr)) {
 		    for (int i = 0; v[i]; i++)
-			av_add(ac, AV_A_TACMEMBER, ",", "\"%s\"", v[i]->bv_val);
+			add_list_value(ac, AV_A_TACMEMBER, v[i]->bv_val, v[i]->bv_len);
 		} else if (!strcasecmp(attribute, "sshPublicKey")) {
 		    for (int i = 0; v[i]; i++)
-			av_add(ac, AV_A_SSHKEY, ",", "\"%s\"", v[i]->bv_val);
+			add_list_value(ac, AV_A_SSHKEY, v[i]->bv_val, v[i]->bv_len);
 		} else if (*v) {
 		    if (!strcasecmp(attribute, "uidNumber")) {
 			av_set(ac, AV_A_UID, v[0]->bv_val);
@@ -939,7 +946,7 @@ static void *run_thread(void *arg)
 					struct berval **v = ldap_get_values_len(ldap, entry, attribute);
 					if (v && *v) {
 					    if (!strcasecmp(attribute, "cn")) {
-						av_add(ac, AV_A_TACMEMBER, ",", "\"%s\"", v[0]->bv_val);
+						add_list_value(ac, AV_A_TACMEMBER, v[0]->bv_val, v[0]->bv_len);
 					    } else if (!strcasecmp(attribute, "gidNumber")) {
 						av_add(ac, AV_A_GIDS, ",", "%s", v[0]->bv_val);
 					    }
@@ -983,35 +990,25 @@ static void *run_thread(void *arg)
 	if (ldap_skip_groupofnames != 1)
 	    dnhash_add_entry_groupOfNames(ldap, hash, dn, ldap_group_depth);
 
-	char *tacmember_ou = "";
 	if (ldap_tacmember_map_ou) {
-	    tacmember_ou = alloca(strlen(dn));
-	    char *d = dn;
-	    char *t = tacmember_ou;
-	    while (*d && *d != ',')
-		d++;
-	    while (*d) {
-		if (d[0] == ',' && tolower((int) d[1]) == 'o' && tolower((int) d[2]) == 'u' && d[3] == '=') {
-		    d += 4;
-		    char *ou_start = d;
-		    while (*d && *d != ',')
-			d++;
-		    av_add(ac, AV_A_TACMEMBER, ",", "\"%.*s\"", (int) (ou_start - d - 1), ou_start);
-		    if (*d)
-			d++;
-		} else
-		    do {
-			d++;
-		    } while (*d && *d != ',');
+	    // the RDNs after the first one, a backslash escapes a comma
+	    for (char *d = dn; *d;) {
+		while (*d && *d != ',')
+		    d += (*d == '\\' && d[1]) ? 2 : 1;
+		if (*d && !strncasecmp(d, ",ou=", 4)) {
+		    char *ou_start = d + 4;
+		    for (d = ou_start; *d && *d != ','; d += (*d == '\\' && d[1]) ? 2 : 1);
+		    add_list_value(ac, AV_A_TACMEMBER, ou_start, (size_t) (d - ou_start));
+		} else if (*d)
+		    d++;
 	    }
-	    *t = 0;
 	}
 
 	for (int i = 0; i < 256; i++)
 	    for (struct dnhash * h = hash[i]; h; h = h->next)
 		if (h->add) {
-		    av_add(ac, AV_A_MEMBEROF, ",", "\"%.*s\"", (int) h->len, h->name);
-		    av_add(ac, AV_A_TACMEMBER, ",", "\"%.*s\"", (int) h->match_len, h->name + h->match_start);
+		    add_list_value(ac, AV_A_MEMBEROF, h->name, h->len);
+		    add_list_value(ac, AV_A_TACMEMBER, h->name + h->match_start, h->match_len);
 		}
 
 	dnhash_drop(hash);
@@ -1256,6 +1253,9 @@ int main(int argc, char **argv __attribute__((unused)))
     ldap_tacmember_attr = getenv("LDAP_TACMEMBER");
     if (!ldap_tacmember_attr)
 	ldap_tacmember_attr = "tacMember";
+
+    // as in mavis_tacplus-ng_ldap.pl: any value switches it on
+    ldap_tacmember_map_ou = getenv("LDAP_TACMEMBER_MAP_OU") != NULL;
 
     tmp = getenv("LDAP_NESTED_GROUP_DEPTH");
     if (tmp)

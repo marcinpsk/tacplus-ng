@@ -456,7 +456,7 @@ retry_once:
 		$V[AV_A_SHELL] = $val if $val = $entry->get_value('loginShell');
 		$V[AV_A_HOME] = $val if $val = $entry->get_value('homeDirectory');
 		$val = $entry->get_value('sshPublicKey', asref => 1);
-		$V[AV_A_SSHKEY] = '"' . join('","', @$val) . '"' if $val;
+		$V[AV_A_SSHKEY] = quote_list('SSHKEY', $V[AV_A_USER], @$val) if $val;
 
 		my $authdn = $mesg->entry(0)->dn;
 
@@ -493,8 +493,8 @@ retry_once:
 			$V[AV_A_GIDS] = join(',', @G);
 		}
 
-		$V[AV_A_TACMEMBER] = '"' . join('","', @M) . '"' if $#M > -1;
-		$V[AV_A_MEMBEROF] = '"' . join('","', @MO) . '"' if $#MO > -1;
+		$V[AV_A_TACMEMBER] = quote_list('TACMEMBER', $V[AV_A_USER], @M) if $#M > -1;
+		$V[AV_A_MEMBEROF] = quote_list('MEMBEROF', $V[AV_A_USER], @MO) if $#MO > -1;
 
 		if ($V[AV_A_TACTYPE] eq AV_V_TACTYPE_AUTH) {
 			my $caller_cap_chpw = exists($V[AV_A_CALLER_CAP]) && $V[AV_A_CALLER_CAP] =~ /:chpw:/;
