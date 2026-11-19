@@ -656,25 +656,40 @@ class LdapPython(LdapTests, DaemonTestCase):
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
     def test_skip_group_lookups(self):
-        """LDAP_SKIP_MEMBEROF and LDAP_SKIP_GROUPOFNAMES: 0 does the lookup, 1 skips it.
+        """LDAP_SKIP_MEMBEROF, LDAP_SKIP_GROUPOFNAMES, LDAP_SKIP_POSIXGROUP: 1 skips the lookup, other values do it.
 
         erin has memberOf staff, and is a member of a second netadmins group (groupOfNames); alice has no memberOf.
+        kim is a posixAccount in the posixGroup netadmins. The Perl back-end reads the values the same way.
         """
         schema = ("attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' EQUALITY distinguishedNameMatch "
-                  "SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 )")
-        erin = (f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
-                f"\ndn: uid=erin,ou=people,{BASE}\nobjectClass: inetOrgPerson\nobjectClass: extensibleObject\n"
-                f"uid: erin\ncn: Erin\nsn: Erin\nuserPassword: erinpw\nmemberOf: {STAFF}\n"
-                f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
-                f"member: uid=erin,ou=people,{BASE}\n")
+                  "SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 )\n"
+                  "include " + slapd_arg(os.path.join(first_existing(SCHEMA_DIRS), "nis.schema")))
+        entries = (f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
+                   f"\ndn: uid=erin,ou=people,{BASE}\nobjectClass: inetOrgPerson\nobjectClass: extensibleObject\n"
+                   f"uid: erin\ncn: Erin\nsn: Erin\nuserPassword: erinpw\nmemberOf: {STAFF}\n"
+                   f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
+                   f"member: uid=erin,ou=people,{BASE}\n"
+                   f"\ndn: uid=kim,ou=people,{BASE}\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\n"
+                   f"uid: kim\ncn: Kim\nsn: Kim\nuserPassword: kimpw\nuidNumber: 2000\ngidNumber: 1001\n"
+                   f"homeDirectory: /home/kim\n"
+                   f"\ndn: ou=posix,{BASE}\nobjectClass: organizationalUnit\nou: posix\n"
+                   f"\ndn: cn=netadmins,ou=posix,{BASE}\nobjectClass: posixGroup\ncn: netadmins\n"
+                   f"gidNumber: 1001\n")
         # without LDAP_SKIP_GROUPOFNAMES, the first memberOf stops the groupOfNames lookups
-        cases = (({}, (("erin", "staff\n"), ("alice", ""))),
+        cases = (({}, (("erin", "staff\n"), ("alice", ""), ("kim", "netadmins only\n"))),
                  ({"LDAP_SKIP_MEMBEROF": "0"}, (("erin", "staff\n"),)),
                  ({"LDAP_SKIP_MEMBEROF": "1"}, (("erin", "netadmins only\n"),)),
+                 ({"LDAP_SKIP_MEMBEROF": "yes"}, (("erin", "staff\n"),)),
                  ({"LDAP_SKIP_GROUPOFNAMES": "0"}, (("alice", "netadmins in staff\n"),)),
-                 ({"LDAP_SKIP_GROUPOFNAMES": "1"}, (("alice", ""),)))
+                 ({"LDAP_SKIP_GROUPOFNAMES": "1"}, (("alice", ""),)),
+                 ({"LDAP_SKIP_GROUPOFNAMES": "yes"}, (("alice", "netadmins in staff\n"),)),
+                 # an empty value is set: no automatic skip after the first memberOf
+                 ({"LDAP_SKIP_GROUPOFNAMES": ""}, (("erin", "staff\n"), ("alice", "netadmins in staff\n"))),
+                 ({"LDAP_SKIP_POSIXGROUP": "0"}, (("kim", "netadmins only\n"),)),
+                 ({"LDAP_SKIP_POSIXGROUP": "1"}, (("kim", ""),)),
+                 ({"LDAP_SKIP_POSIXGROUP": "yes"}, (("kim", "netadmins only\n"),)))
         for env, logins in cases:
-            _, d = self.start(access=ACCESS + "\n" + schema, entries=erin, **env)
+            _, d = self.start(access=ACCESS + "\n" + schema, entries=entries, **env)
             for user, motd in logins:
                 with self.subTest(env=env, user=user), d.connect() as c:
                     r = c.ascii_login(user, user + "pw")
