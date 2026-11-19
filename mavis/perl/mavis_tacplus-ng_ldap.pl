@@ -477,7 +477,7 @@ retry_once:
 				debug_timer_start("ldap gidNumber");
 				$mesg = $ldap->search(base => $LDAP_BASE_POSIXGROUP, scope => $LDAP_SCOPE_POSIXGROUP, attrs => ['cn'],
 					filter => sprintf('(&(objectclass=posixGroup)(gidNumber=%s))', escape_filter_value($gidNumber)));
-				$gidHash{$gidNumber} = $mesg->entry(0)->get_value('cn') if $mesg->count() == 1;
+				$gidHash{$gidNumber} = $mesg->entry(0)->get_value('cn') if !$mesg->code && $mesg->count() == 1;
 				debug_timer_stop;
 			}
 			push @M, $gidHash{$gidNumber} if exists $gidHash{$gidNumber};

@@ -61,7 +61,7 @@ include $nis
 include $tacacs
 include $memberof
 $modules
-sizelimit unlimited
+sizelimit $sizelimit
 $tls
 pidfile $pidfile
 argsfile $argsfile
@@ -246,9 +246,9 @@ def libldap_tls_package():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, entries="", tls="", starttls=False):
+    def __init__(self, directory, entries="", tls="", starttls=False, sizelimit="unlimited"):
         """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only,
-        or on ldap:// for StartTLS."""
+        or on ldap:// for StartTLS; sizelimit: entries of one search."""
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
@@ -266,7 +266,7 @@ class Slapd:
                      db=os.path.join(directory, "db"), memberof=os.path.join(directory, "memberof.schema"))
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
-                                          base=BASE))
+                                          base=BASE, sizelimit=sizelimit))
         with open(paths["memberof"], "w") as f:
             f.write(MEMBEROF_SCHEMA)
         os.mkdir(os.path.join(directory, "db"))
@@ -501,7 +501,12 @@ $module
 	}
 	group netadmins { }
 	group staff { }
+	group ops { }
+	group dev { }
 	ruleset {
+		rule posix {
+			script { if (member == ops && member == dev) { motd banner = "ops and dev\\n" permit } }
+		}
 		rule wide {
 			script { if (memberof == "cn=wide-$last,ou=groups,$base") { motd banner = "wide\\n" permit } }
 		}
@@ -612,18 +617,19 @@ class LdapTests:
             self.assert_login(d, "FAIL")
             self.assertEqual(slapd.binds(), [])
 
-    def slapd(self, ldif="", tls="", starttls=False):
-        """A running slapd; ldif: more entries, tls, starttls: see Slapd."""
+    def slapd(self, ldif="", tls="", starttls=False, sizelimit="unlimited"):
+        """A running slapd; ldif: more entries, tls, starttls, sizelimit: see Slapd."""
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif,
-                      tls, starttls)
+                      tls, starttls, sizelimit)
         self.addCleanup(slapd.stop)
         slapd.start()
         return slapd
 
-    def start(self, ldif="", policy="", tls="", starttls=False, **env):
-        """Start slapd (ldif, tls, starttls: see slapd()) and the daemon; policy: more daemon lines, env: for the back-end."""
-        slapd = self.slapd(ldif, tls, starttls)
+    def start(self, ldif="", policy="", tls="", starttls=False, sizelimit="unlimited", **env):
+        """Start slapd (ldif, tls, starttls, sizelimit: see slapd()) and the daemon; policy: more daemon lines, env: for
+        the back-end."""
+        slapd = self.slapd(ldif, tls, starttls, sizelimit)
         extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
         return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
                                                                             base=BASE, last=WIDE - 1) + policy)
@@ -788,6 +794,31 @@ member: cn=xylophone,ou=groups,$base
         with d.connect() as c:
             r = c.ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
+
+    def test_posix_groups(self):
+        """kim: primary gid 1000, memberUid in ops (1002) and dev (1001); GIDS: 1000, then the server order."""
+        ldif = person("kim", "objectClass: posixAccount\nuidNumber: 2000\ngidNumber: 1000\nhomeDirectory: /home/kim\n")
+        for name, gid in (("ops", 1002), ("dev", 1001)):
+            ldif += (f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: posixGroup\ncn: {name}\ngidNumber: {gid}\n"
+                     "memberUid: kim\n")
+        log = 'log gids { destination = "$tmp/gids.log" authentication format = "$${user} gids=$${gids}" }\n'
+        _, d = self.start(ldif=ldif, policy="\t" + log + "\tauthentication log = gids\n")
+        with d.connect() as c:
+            r = c.ascii_login("kim", "kimpw")
+        self.assertIn("kim gids=1000,1002,1001\n", d.wait_log("gids", "kim gids="))
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "ops and dev\n"), r)
+
+    def test_posix_primary_group_of_a_truncated_search(self):
+        """lee: two groups ops have the primary gid 1003, slapd returns one with sizeLimitExceeded: no group ops."""
+        ldif = person("lee", "objectClass: posixAccount\nuidNumber: 2001\ngidNumber: 1003\nhomeDirectory: /home/lee\n")
+        ldif += f"\ndn: ou=other,{BASE}\nobjectClass: organizationalUnit\nou: other\n"
+        for ou in ("groups", "other"):
+            ldif += f"\ndn: cn=ops,ou={ou},{BASE}\nobjectClass: posixGroup\ncn: ops\ngidNumber: 1003\n"
+        ldif += f"\ndn: cn=dev,ou=groups,{BASE}\nobjectClass: posixGroup\ncn: dev\ngidNumber: 1001\nmemberUid: lee\n"
+        _, d = self.start(ldif=ldif, sizelimit=1)
+        with d.connect() as c:
+            r = c.ascii_login("lee", "leepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
 
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""

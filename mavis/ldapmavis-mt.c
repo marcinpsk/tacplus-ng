@@ -829,6 +829,60 @@ static void av_write(av_ctx *ac, uint32_t result)
     av_free(ac);
 }
 
+// as mavis_tacplus-ng_ldap.pl: GIDS is the primary gid, then the gidNumber of each memberUid group
+static void add_posixgroups(LDAP *ldap, av_ctx *ac, char *gid, char *username_escaped)
+{
+    char gid_escaped[FILTER_ESCAPED_LEN(gid)];
+    filter_escape(gid, gid_escaped);
+#define FILTER_GID "(&(objectclass=posixGroup)(gidNumber=%s))"
+#define FILTER_UID "(&(objectclass=posixGroup)(memberUid=%s))"
+    size_t len = sizeof(FILTER_GID) + strlen(gid_escaped);
+    char filter_gid[len];
+    snprintf(filter_gid, len, FILTER_GID, gid_escaped);
+    len = sizeof(FILTER_UID) + strlen(username_escaped);
+    char filter_uid[len];
+    snprintf(filter_uid, len, FILTER_UID, username_escaped);
+#undef FILTER_GID
+#undef FILTER_UID
+    char *filter[2] = { filter_gid, filter_uid };
+    char *attrs[] = { "cn", "gidNumber", NULL };
+    int msgid[2];
+
+    // both searches in flight, the results read in this order
+    for (int i = 0; i < 2; i++)
+	if (ldap_search_ext(ldap, base_dn_posixgroup, scope_posixgroup, filter[i], attrs, 0, NULL, NULL, NULL, ldap_sizelimit, &msgid[i]) != LDAP_SUCCESS)
+	    msgid[i] = -1;
+
+    av_set(ac, AV_A_GIDS, gid);
+    for (int i = 0; i < 2; i++) {
+	if (msgid[i] < 0)
+	    continue;
+	struct timeval tv = {.tv_sec = ldap_timeout };
+	LDAPMessage *res = NULL;
+	int rc = ldap_result(ldap, msgid[i], LDAP_MSG_ALL, &tv, &res);
+	if (rc == 0)
+	    ldap_abandon_ext(ldap, msgid[i], NULL, NULL);
+	int err = LDAP_OTHER;
+	// a chain read before has the type of its first message; the group of the primary gid counts only if a complete search finds it alone
+	if (rc > 0 && (i == 1 || (ldap_parse_result(ldap, res, &err, NULL, NULL, NULL, NULL, 0) == LDAP_SUCCESS && err == LDAP_SUCCESS
+				  && ldap_count_entries(ldap, res) == 1)))
+	    for (LDAPMessage * entry = ldap_first_entry(ldap, res); entry; entry = ldap_next_entry(ldap, entry)) {
+		struct berval **cn = ldap_get_values_len(ldap, entry, "cn");
+		if (cn && *cn)
+		    av_add(ac, AV_A_TACMEMBER, ",", "\"%s\"", cn[0]->bv_val);
+		ldap_value_free_len(cn);
+		if (i == 1) {
+		    struct berval **g = ldap_get_values_len(ldap, entry, "gidNumber");
+		    if (g && *g)
+			av_add(ac, AV_A_GIDS, ",", "%s", g[0]->bv_val);
+		    ldap_value_free_len(g);
+		}
+	    }
+	if (res)
+	    ldap_msgfree(res);
+    }
+}
+
 static void *run_thread(void *arg)
 {
     av_ctx *ac = (av_ctx *) arg;
@@ -896,60 +950,8 @@ static void *run_thread(void *arg)
 			av_set(ac, AV_A_UID, v[0]->bv_val);
 		    } else if (!strcasecmp(attribute, "gidNumber")) {
 			av_set(ac, AV_A_GID, v[0]->bv_val);
-			if (ldap_skip_posixgroup != 1) {
-			    int msgid_dummy;
-#define FILTER "(&(objectclass=posixGroup)(gidNumber=%s))"
-			    size_t len = sizeof(FILTER) + strlen(v[0]->bv_val);
-			    char filter1[len];
-			    snprintf(filter1, len, FILTER, v[0]->bv_val);
-#undef FILTER
-#define FILTER "(&(objectclass=posixGroup)(memberUid=%s))"
-			    len = sizeof(FILTER) + strlen(username_escaped);
-			    char filter2[len];
-			    snprintf(filter2, len, FILTER, username_escaped);
-#undef FILTER
-			    int success = 0;
-
-			    char *attrs[] = { "cn", "gidNumber", NULL };
-
-			    int rc = ldap_search_ext(ldap, base_dn_posixgroup, scope_posixgroup, filter1, attrs, 0, NULL, NULL, NULL, ldap_sizelimit,
-						     &msgid_dummy);
-			    if (rc == LDAP_SUCCESS)
-				success++;
-			    rc = ldap_search_ext(ldap, base_dn_posixgroup, scope_posixgroup, filter2, attrs, 0, NULL, NULL, NULL, ldap_sizelimit,
-						 &msgid_dummy);
-			    if (rc == LDAP_SUCCESS)
-				success++;
-
-			    for (int i = 0; i < success; i++) {
-				struct timeval tv = {.tv_sec = ldap_timeout };
-				LDAPMessage *res = NULL;
-
-				int rc = ldap_result(ldap, LDAP_RES_ANY, 1, &tv, &res);
-
-				if (rc == LDAP_RES_SEARCH_RESULT && ldap_count_entries(ldap, res) > 0) {
-				    LDAPMessage *entry = ldap_first_entry(ldap, res);
-				    BerElement *ber = NULL;
-				    for (char *attribute = ldap_first_attribute(ldap, entry, &ber); attribute;
-					 attribute = ldap_next_attribute(ldap, entry, ber)) {
-					struct berval **v = ldap_get_values_len(ldap, entry, attribute);
-					if (v && *v) {
-					    if (!strcasecmp(attribute, "cn")) {
-						av_add(ac, AV_A_TACMEMBER, ",", "\"%s\"", v[0]->bv_val);
-					    } else if (!strcasecmp(attribute, "gidNumber")) {
-						av_add(ac, AV_A_GIDS, ",", "%s", v[0]->bv_val);
-					    }
-					}
-					if (v)
-					    ldap_value_free_len(v);
-				    }
-				    if (ber)
-					ber_free(ber, 0);
-				}
-				if (res)
-				    ldap_msgfree(res);
-			    }
-			}
+			if (ldap_skip_posixgroup != 1)
+			    add_posixgroups(ldap, ac, v[0]->bv_val, username_escaped);
 		    } else if (!strcasecmp(attribute, "loginShell")) {
 			av_set(ac, AV_A_SHELL, v[0]->bv_val);
 		    } else if (!strcasecmp(attribute, "homeDirectory")) {
