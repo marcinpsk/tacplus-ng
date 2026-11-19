@@ -311,6 +311,7 @@ struct sym {
     u_int line:29;		/* current line number for parsing */
     u_int flag_parse_pcre:1;
     u_int flag_prohibit_include:1;
+    u_int flag_prohibit_envvar:1;	/* no ${VAR} in a string, for text from a backend */
     u_int quoted:1;
     u_int noescape:1;
     u_int nowarn:1;

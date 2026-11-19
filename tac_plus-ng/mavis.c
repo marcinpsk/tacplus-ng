@@ -327,7 +327,7 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 
 	    if (!u || (u->dynamic && (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_AUTH) || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHPW)
 				      || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_INFO)))) {
-		struct sym sym = {.filename = session->username.txt,.line = 1,.flag_prohibit_include = 1 };
+		struct sym sym = {.filename = session->username.txt,.line = 1,.flag_prohibit_include = 1,.flag_prohibit_envvar = 1 };
 
 		if (!r->caching_period && session->user) {
 		    free_user(session->user);
@@ -726,7 +726,7 @@ static void mavis_ctx_lookup_final(struct context *ctx, av_ctx *avc)
 	    h->mem = ctx->mem;
 	    init_host(h, ctx->host, ctx->realm, 0);
 
-	    struct sym sym = {.filename = ctx->device_addr_ascii.txt,.line = 1,.flag_prohibit_include = 1 };
+	    struct sym sym = {.filename = ctx->device_addr_ascii.txt,.line = 1,.flag_prohibit_include = 1,.flag_prohibit_envvar = 1 };
 	    sym.in = sym.tin = profile;
 	    sym.len = sym.tlen = strlen(profile);
 	    if (!parse_host_profile(&sym, ctx->realm, h)) {
@@ -854,7 +854,7 @@ static void mavis_dacl_lookup_final(tac_session *session, av_ctx *avc)
 	    RB_search_and_delete(r->dacls, dacl);
 	}
 
-	struct sym sym = {.filename = session->username.txt,.line = 1,.flag_prohibit_include = 1 };
+	struct sym sym = {.filename = session->username.txt,.line = 1,.flag_prohibit_include = 1,.flag_prohibit_envvar = 1 };
 	char *profile = av_get(avc, AV_A_TACPROFILE);
 	if (!profile || parse_dacl_fmt(&sym, session, r, profile))
 	    session->radius_data->dacl = NULL;
