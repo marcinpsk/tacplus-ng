@@ -231,6 +231,24 @@ static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
     }
 }
 
+// The partial answer and the unwritten requests of a child; the requests stay in by_serial
+static void free_iobufs(struct context *ctx)
+{
+    if (ctx->b_in) {
+	free(ctx->b_in->buf);
+	free(ctx->b_in);
+	ctx->b_in = NULL;
+    }
+    ctx->hdr_len = 0;
+    while (ctx->b_out) {
+	struct iobuf *next = ctx->b_out->next;
+	free(ctx->b_out->buf);
+	free(ctx->b_out);
+	ctx->b_out = next;
+    }
+    ctx->b_out_last = NULL;
+}
+
 #define HAVE_mavis_drop_in
 static void mavis_drop_in(mavis_ctx *mcx)
 {
@@ -253,14 +271,7 @@ static void mavis_drop_in(mavis_ctx *mcx)
 	    kill(mcx->ctx->pid, SIGTERM);
 	}
 
-	if (mcx->ctx->b_in)
-	    free(mcx->ctx->b_in);
-	while (mcx->ctx->b_out) {
-	    struct iobuf *next = mcx->ctx->b_out->next;
-	    free(mcx->ctx->b_out->buf);
-	    free(mcx->ctx->b_out);
-	    mcx->ctx->b_out = next;
-	}
+	free_iobufs(mcx->ctx);
 	free(mcx->ctx);
 	mcx->ctx = NULL;
     }
@@ -322,6 +333,8 @@ static void child_died(struct context *ctx, int cur __attribute__((unused)))
 	    ctx->fd_err = -1;
 	}
 
+	// the new child gets all live requests again, from the start of an empty queue
+	free_iobufs(ctx);
 	fork_ctx(ctx->mcx);
 
 	if (!RB_empty(ctx->mcx->by_serial)) {
@@ -388,8 +401,17 @@ static void read_from_child(struct context *ctx, int cur __attribute__((unused))
     }
     av_ctx *ac_in = av_new(NULL, NULL);
     av_char_to_array(ac_in, ctx->b_in->buf, NULL);
+    // av_char_to_array() skips what is not a whole attribute line: such an answer is the request, refused
+    int bad = av_wire_check(ctx->b_in->buf, hbl);
+    if (bad)
+	logmsg("%s: %lu: malformed answer", ctx->mcx->argv[0], (u_long) ctx->pid);
     struct query q_tmp;
     q_tmp.serial = av_get(ac_in, AV_A_SERIAL);
+    if (!q_tmp.serial) {
+	// no request to answer: the child is out of sync, child_died() starts a new one
+	av_free(ac_in);
+	goto read_error;
+    }
     q_tmp.serial_crc = crc32_update(INITCRC32, (u_char *) q_tmp.serial, strlen(q_tmp.serial));
     rb_node_t *rbn = RB_search(ctx->mcx->by_serial, &q_tmp);
     if (!rbn) {
@@ -407,12 +429,17 @@ static void read_from_child(struct context *ctx, int cur __attribute__((unused))
 	free(q);
 	goto bye;
     }
+    if (bad) {
+	av_copy(ac_in, q->ac);
+	av_list_set_malformed(ac_in, AV_A_MEMBEROF, ctx->mcx->identifier);
+	q_tmp.serial = av_get(ac_in, AV_A_SERIAL);
+    }
     ac_in->app_ctx = q->ac->app_ctx;
     ac_in->app_cb = q->ac->app_cb;
     av_free(q->ac);
     q->ac = ac_in;
     q->serial = q_tmp.serial;
-    q->result = ntohl(ctx->hdr.result);
+    q->result = bad ? MAVIS_FINAL : ntohl(ctx->hdr.result);
 
     if (q->result == MAVIS_FINAL) {
 	char *r = av_get(ac_in, AV_A_RESULT);

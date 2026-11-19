@@ -347,6 +347,22 @@ void av_list_set_malformed(av_ctx *ac, int av_attribute, char *who)
     av_list_refuse(ac, av_attribute, who);
 }
 
+// 0: len bytes of "<attribute> <value>" lines (and empty lines), each with its LF; -1: a NUL, another line (as a
+// LF in a value makes) or no final LF
+int av_wire_check(char *buf, size_t len)
+{
+    if (memchr(buf, 0, len) || (len && buf[len - 1] != '\n'))
+	return -1;
+    for (char *l = buf; l < buf + len; l = strchr(l, '\n') + 1) {
+	char *t = l;
+	while (isdigit((int) *t))
+	    t++;
+	if (!(t > l && *t == ' ') && *l != '\n')
+	    return -1;
+    }
+    return 0;
+}
+
 // Cut the next value off *list and decode it in place: 1 a value, 0 the end, -1 malformed
 int av_list_next(char **list, char **value, int *quoted)
 {
