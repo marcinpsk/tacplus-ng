@@ -45,7 +45,7 @@ import time
 import unittest
 
 from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
-from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env
+from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
 	user backend = mavis
@@ -609,6 +609,8 @@ class AttributePastLast(DaemonTestCase):
 
 
 @unittest.skipUnless(os.path.exists(os.path.join(prefix(), "lib", "libmavis.so")), "no installed libmavis.so")
+@unittest.skipIf(os.path.exists(os.path.join(prefix(), "lib", "libmavis.so")) and sanitizers(),
+                 "a sanitizer build of libmavis.so needs the sanitizer runtime of the daemon; AttributePastLast runs there")
 class AttributePastLastInLibrary(unittest.TestCase):
     """av_get() and av_char_to_array() of the installed libmavis.so with the attribute number 56.
 
