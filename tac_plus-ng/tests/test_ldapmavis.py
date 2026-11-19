@@ -291,13 +291,11 @@ class Slapd:
                 self.proc.wait()
 
 
-# ldapmavis-mt skips the groupOfNames search while LDAP_NESTED_GROUP_DEPTH is unset
 MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
 		setenv LDAP_BASE = "$base"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=$uid))"
-		setenv LDAP_NESTED_GROUP_DEPTH = "10"
 $extra		exec = $exec
 	}
 """)
@@ -345,7 +343,8 @@ class LdapTests:
                       starttls, access)
         self.addCleanup(slapd.stop)
         slapd.start()
-        env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
+        # ldapmavis-mt skips the groupOfNames search while LDAP_NESTED_GROUP_DEPTH is unset
+        env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", "LDAP_NESTED_GROUP_DEPTH": "10", **env}
         extra = "".join(f"\t\tsetenv {name} = {slapd_arg(value)}\n" for name, value in env.items() if value is not None)
         body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF)
         return slapd, self.start_daemon(body, check=check)
@@ -705,6 +704,13 @@ class LdapPython(LdapTests, DaemonTestCase):
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
         self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
 
+    def test_nested_group_depth_unset(self):
+        """Without LDAP_NESTED_GROUP_DEPTH the nested group lookups have no limit."""
+        _, d = self.start(LDAP_NESTED_GROUP_DEPTH=None)
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
+
     def test_connect_timeout(self):
         """LDAP_CONNECT_TIMEOUT from the configuration reaches ldap3 as a number of seconds."""
         _, d = self.start(LDAP_CONNECT_TIMEOUT="5")
@@ -719,7 +725,10 @@ class LdapPython(LdapTests, DaemonTestCase):
                  ({"LDAP_CONNECT_TIMEOUT": "5s"}, "invalid LDAP_CONNECT_TIMEOUT: '5s'"),
                  ({"LDAP_CONNECT_TIMEOUT": "0"}, "invalid LDAP_CONNECT_TIMEOUT: '0'"),
                  ({"LDAP_CONNECT_TIMEOUT": "2.5"}, "invalid LDAP_CONNECT_TIMEOUT: '2.5'"),
-                 ({"LDAP_CONNECT_TIMEOUT": ""}, "invalid LDAP_CONNECT_TIMEOUT: ''"))
+                 ({"LDAP_CONNECT_TIMEOUT": ""}, "invalid LDAP_CONNECT_TIMEOUT: ''"),
+                 ({"LDAP_NESTED_GROUP_DEPTH": "two"}, "invalid LDAP_NESTED_GROUP_DEPTH: 'two'"),
+                 ({"LDAP_NESTED_GROUP_DEPTH": "-1"}, "invalid LDAP_NESTED_GROUP_DEPTH: '-1'"),
+                 ({"LDAP_NESTED_GROUP_DEPTH": ""}, "invalid LDAP_NESTED_GROUP_DEPTH: ''"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")
