@@ -4962,8 +4962,9 @@ int async 1
             </tbody>
           </tgroup>
         </informaltable>
-        <para>On each new connection to an <literal>ldap://</literal> URL, the back-end first reads the root DSE without a bind. Then it starts TLS. Then it binds as <literal>LDAP_USER</literal>. If the root DSE search or StartTLS fails, the back-end closes the connection and the request gets a back-end error. A connection without TLS writes a warning to stderr. <literal>ldaps://</literal> URLs do not use StartTLS. <literal>TLS_OPTIONS</literal> also applies to StartTLS.</para>
+        <para>On each new connection to an <literal>ldap://</literal> URL, the back-end first reads the root DSE without a bind. Then it starts TLS. Then it binds as <literal>LDAP_USER</literal>, or as the user on the connection for the user binds. If the root DSE search or StartTLS fails, the back-end closes the connection and the request gets a back-end error. A connection without TLS writes a warning to stderr. <literal>ldaps://</literal> URLs do not use StartTLS. <literal>TLS_OPTIONS</literal> also applies to StartTLS.</para>
         <para>The root DSE has no authentication. An attacker in the network path can remove the StartTLS offer from it. Use <literal>ldaps://</literal> or <literal>USE_STARTTLS</literal> to prevent clear-text binds.</para>
+        <para>The back-end keeps two connections to the server. It does the searches on one connection, bound as <literal>LDAP_USER</literal>. It checks the password of the user on the other connection, and a password change after a good user bind also runs there. After AD data code 532 or 773 (password expired, password must change), the AD password change runs on the <literal>LDAP_USER</literal> connection. The back-end does not follow referrals.</para>
       </section>
     </section>
     <section>
