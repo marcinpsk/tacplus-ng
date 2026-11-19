@@ -159,7 +159,7 @@ static void *run_thread(void *arg)
 	{
 	    char *cap = av_get(ac, AV_A_CALLER_CAP);
 	    if (cap && strstr(cap, ":chpw:")) {
-		av_get(ac, AV_A_PASSWORD_MUSTCHANGE);
+		av_set(ac, AV_A_PASSWORD_MUSTCHANGE, "1");
 		av_set(ac, AV_A_RESULT, AV_V_RESULT_OK);
 		break;
 	    }
