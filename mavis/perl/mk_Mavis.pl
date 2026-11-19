@@ -37,10 +37,28 @@ BEGIN {
 	\@ISA = qw(Exporter);
 	\@EXPORT = qw(
 $e
+		quote_list
 	);
 };
 
 $o
+
+# The list format of TACMEMBER, MEMBEROF and SSHKEY*, as av_add_quoted() of libmavis writes it: each value in
+# double quotes with a backslash before each double quote, joined by commas. A value with a CR, LF or NUL, or
+# that ends with a backslash, cannot go in the list: it is skipped, with a message on stderr.
+sub quote_list(\$\$@) {
+	my (\$attribute, \$user, \@values) = \@_;
+	my \@quoted;
+	foreach my \$v (\@values) {
+		if (\$v =~ /[\\r\\n\\0]|\\\\\$/) {
+			print STDERR "user \$user: \$attribute value skipped: the list cannot carry it\\n";
+			next;
+		}
+		(my \$q = \$v) =~ s/"/\\\\"/g;
+		push \@quoted, '"' . \$q . '"';
+	}
+	return \@quoted ? join(',', \@quoted) : undef;
+}
 
 END { }
 
