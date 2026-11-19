@@ -210,10 +210,10 @@ def python_ldap3():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, tls="", starttls=False, access=ACCESS):
+    def __init__(self, directory, tls="", starttls=False, access=ACCESS, entries=""):
         """tls: TLS lines for slapd.conf; with them slapd listens on ldaps:// only, or on ldap:// for StartTLS.
 
-        access: the access lines, and other global lines, of slapd.conf.
+        access: the access lines, and other global lines, of slapd.conf. entries: LDIF entries after LDIF.
         """
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
@@ -235,7 +235,7 @@ class Slapd:
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
-            f.write(LDIF)
+            f.write(LDIF + entries)
         p = subprocess.run([SLAPD, "-T", "add", "-f", self.conf, "-l", ldif], stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, check=False)
         if p.returncode:
@@ -334,14 +334,14 @@ class LdapTests:
     # the LDAP_SCOPE values of the back-end for subtree, one level and base
     SCOPES = ("sub", "one", "base")
 
-    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", **env):
-        """Start slapd and the daemon; tls, starttls, access: see Slapd, settings: tac_plus-ng lines.
+    def start(self, tls="", starttls=False, access=ACCESS, check=True, settings="", entries="", **env):
+        """Start slapd and the daemon; tls, starttls, access, entries: see Slapd, settings: tac_plus-ng lines.
 
         env: of the back-end; None unsets a variable (LDAP_USER=None: no bind as LDAP_USER).
         """
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), tls,
-                      starttls, access)
+                      starttls, access, entries)
         self.addCleanup(slapd.stop)
         slapd.start()
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
@@ -721,6 +721,22 @@ class LdapPython(LdapTests, DaemonTestCase):
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
         self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
+
+    def test_krb_password_expiration_format(self):
+        """A krbPasswordExpiration that is not YYYYMMDDHHMMSSZ gives no expiry; the back-end continues."""
+        schema = ("attributetype ( 2.16.840.1.113719.1.301.4.6.1 NAME 'krbPasswordExpiration' "
+                  "EQUALITY generalizedTimeMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.24 SINGLE-VALUE )")
+        # a generalized time with a time zone offset
+        frank = (f"\ndn: uid=frank,ou=people,{BASE}\nobjectClass: inetOrgPerson\nobjectClass: extensibleObject\n"
+                 "uid: frank\ncn: Frank\nsn: Frank\nuserPassword: frankpw\n"
+                 "krbPasswordExpiration: 20991231235959+0100\n")
+        _, d = self.start(access=ACCESS + "\n" + schema, entries=frank)
+        for password, status in (("frankpw", "PASS"), ("wrong", "FAIL")):
+            with self.subTest(password=password), d.connect() as c:
+                self.assertEqual(c.pap("frank", password).status_name, status)
+        # no backend error: the fallback-only user cannot log in
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
 
     def test_starttls_settings_invalid(self):
         """USE_STARTTLS with LDAP_SKIP_STARTTLS=1, or a LDAP_SKIP_STARTTLS that is not a number, stops the back-end."""
