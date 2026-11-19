@@ -350,11 +350,15 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 				else:
 					D.set_expiry(expiry)
 		if not conn.rebind(user=entry.entry_dn, password=D.password):
-			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw
-				and conn.result == ldap3.core.results.RESULT_INVALID_CREDENTIALS
-				and re.search(r"DSID-.*, data (532|773) ", conn.message)):
+			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
+				and conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
+				and re.search(r"DSID-.*, data (532|773)[, ]", conn.result["message"])):
 				D.password_mustchange(True)
 				user_msg = translate_ldap_error(conn)
+				# the failed bind left the connection anonymous (RFC 4511 4.2.1): AD refuses the change, and the group searches
+				if not conn.rebind(user=LDAP_USER, password=LDAP_PASSWD):
+					D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
+					continue
 			else:
 				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(conn))
 				continue
@@ -365,7 +369,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 			continue
 		if ((LDAP_SERVER_TYPE == "microsoft"
 				and not conn.extend.microsoft.modify_password(
-				entry.entry_dn, D.password, D.password_new))
+				entry.entry_dn, D.password_new, D.password))
 			or  (LDAP_SERVER_TYPE == "generic"
 				and not conn.extend.standard.modify_password (
 				entry.entry_dn, D.password, D.password_new))):
