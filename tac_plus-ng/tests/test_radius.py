@@ -718,6 +718,42 @@ class RegexOnOtherAttributes(DaemonTestCase):
         self.assertEqual(self.messages((self.NAS_IP_ADDRESS, bytes([10, 0, 0, 2]))), [b"pcre", b"posix"])
 
 
+@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+class ArgsWithLongSeparator(DaemonTestCase):
+    """"${args,separator}" in a script condition: a separator longer than the free space makes the dump grow, too."""
+
+    NAS_IDENTIFIER = 32
+    SEPARATOR = "S" * 2000
+    CONFIG = """
+	include = "%s"
+	device radius-nas {
+		address = 127.0.0.6
+		key = tactest
+		radius.key = %s
+	}
+	user alice {
+		password login = clear alicepw
+		password pap = login
+	}
+	profile admin {
+		script {
+			if ("$${args,%s}" =~ /SNAS-Identifier=n5/) set radius[Reply-Message] = "separated"
+			permit
+		}
+	}
+	ruleset {
+		rule { script { profile = admin permit } }
+	}
+""" % (DICTIONARY, SECRET, SEPARATOR)
+    UDP = True
+
+    def test_each_attribute_has_its_separator(self):
+        attributes = [(self.NAS_IDENTIFIER, b"n%d" % i) for i in range(1, 6)]
+        r = self.radius(SECRET, source=NAS).access_request("alice", "alicepw", attributes=attributes,
+                                                           message_authenticator=True)
+        self.assertEqual((r.code_name, r.get(radius.REPLY_MESSAGE)), ("Access-Accept", [b"separated"]), r)
+
+
 class EqualOnOtherAttributes(DaemonTestCase):
     """"==" and "!=" on a string or address attribute compare its text."""
 

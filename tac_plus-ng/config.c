@@ -5686,7 +5686,9 @@ static int tac_script_cond_eval(tac_session *session, struct mavis_cond *m)
 	    v = &session->ctx->server_addr_ascii;
 	    break;
 	case S_string:
+	    session->eval_log_full = 1;
 	    v->txt = eval_log_format(session, session->ctx, NULL, (struct log_item *) m->s.lhs, io_now.tv_sec, &v->len);
+	    session->eval_log_full = 0;
 	    break;
 	case S_member:
 	    if (session->user)

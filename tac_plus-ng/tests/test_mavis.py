@@ -396,6 +396,38 @@ class ManyGroups(DaemonTestCase):
         self.assertEqual((r.status_name, r.args), ("PASS_ADD", ["priv-lvl=15"]))
 
 
+MEMBEROF = ["CN=group-with-a-rather-long-name-%03d,OU=groups,DC=example" % i for i in range(200)] + ["CN=last,OU=groups,DC=example"]
+
+
+class LongMemberofString(DaemonTestCase):
+    """A "${memberof}" string in a script condition has the whole MEMBEROF list, not the first 8000 bytes."""
+
+    CONFIG = Stub.module(childs=(1, 1)) + BACKEND + """
+	ruleset {
+		rule last-dn {
+			script { if ("$${memberof}" =~ /CN=last,OU=groups,DC=example/) { motd banner = "last dn\\n" permit } }
+		}
+		rule tail {
+			script { if ("$${memberof}tail" =~ /xytail$$/) { motd banner = "tail\\n" permit } }
+		}
+	}
+"""
+
+    def test_match_at_the_end_of_a_long_memberof(self):
+        Stub(self.daemon).set(users={"alice": {"password": "pw", "memberof": MEMBEROF}})
+        self.assertGreater(len(",".join('"%s"' % m for m in MEMBEROF)), 8000)
+        r = self.connect().ascii_login("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "last dn\n"))
+
+    def test_item_after_a_value_that_fills_the_buffer(self):
+        """The escaped value fills the first 8000 bytes nearly to the end; the item after it is still there."""
+        memberof = "\x01" * 1995 + "xy"
+        self.assertEqual(4 * len(memberof) + 11, 7999)     # the space it reserves: the buffer does not grow
+        Stub(self.daemon).set(users={"bob": {"password": "pw", "memberof": memberof}})
+        r = self.connect().ascii_login("bob", "pw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "tail\n"))
+
+
 @unittest.skipUnless("openssl" in features(), "SSH keys need a build with OpenSSL")
 class SshKeys(DaemonTestCase):
     """#194: SSH keys in OpenSSH format ("type base64 comment") from the backend.

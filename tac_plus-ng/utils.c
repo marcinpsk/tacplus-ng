@@ -1106,6 +1106,25 @@ struct log_item *parse_log_format(struct sym *sym, mem_t *mem)
     return start;
 }
 
+// Grow the eval_log_format() buffer to need free bytes, but not past cap. Returns 1 if it grew.
+static int log_buf_room(mem_t *mem, char *sbuf, char **buf, char **b, size_t *buf_size, size_t total_len, size_t need, size_t cap)
+{
+    size_t n = *buf_size;
+    while (n - total_len < need && n < cap)
+	n = (n > cap / 2) ? cap : 2 * n;
+    if (n == *buf_size)
+	return 0;
+    size_t off = *b - *buf;
+    if (*buf == sbuf) {
+	*buf = mem_alloc(mem, n);
+	memcpy(*buf, sbuf, off);
+    } else
+	*buf = mem_realloc(mem, *buf, n);
+    *b = *buf + off;
+    *buf_size = n;
+    return 1;
+}
+
 static size_t ememcpy(char *dest, char *src, size_t n, size_t remaining)
 {
     size_t res = 0;
@@ -2059,9 +2078,16 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
 #endif
     }
 
-    char buf[8000];
+    char sbuf[8000];
+    char *buf = sbuf;
+    size_t buf_size = sizeof(sbuf);
+    // log output stays at 8000 bytes, a script condition gets the whole string
+    size_t cap = (session && session->eval_log_full) ? SIZE_MAX : sizeof(sbuf);
     char *b = buf;
     size_t total_len = 0;
+#define LOG_ROOM(need) log_buf_room(mem, sbuf, &buf, &b, &buf_size, total_len, (need), cap)
+// near the end of the buffer: stop, unless the buffer can grow
+#define LOG_FULL (total_len > buf_size - 20 && !LOG_ROOM(21))
 
     for (struct log_item * li = start; li; li = li->next) {
 	size_t len = 0;
@@ -2069,8 +2095,9 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
 	if (session && li->token == S_dacl) {
 	    tac_realm *r = session->ctx->realm;
 	    struct rad_dacl *dacl = lookup_dacl(li->text, r);
-	    if (sizeof(buf) - total_len > 40 + strlen(li->text)) {
-		len += snprintf(b, sizeof(buf) - total_len, ACSACL "%s-%.8x", li->text, dacl ? dacl->version : (uint32_t) io_now.tv_sec);
+	    LOG_ROOM(41 + strlen(li->text));
+	    if (buf_size - total_len > 40 + strlen(li->text)) {
+		len += snprintf(b, buf_size - total_len, ACSACL "%s-%.8x", li->text, dacl ? dacl->version : (uint32_t) io_now.tv_sec);
 		b += len;
 		total_len += len;
 	    }
@@ -2078,7 +2105,8 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
 	}
 	if (li->text) {
 	    struct tm *tm = localtime(&sec);
-	    len = strftime(b, sizeof(buf) - total_len, li->text, tm);
+	    LOG_ROOM(256 + 64 * strlen(li->text));
+	    len = strftime(b, buf_size - total_len, li->text, tm);
 	    total_len += len;
 	    b += len;
 	    continue;
@@ -2108,13 +2136,15 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
 			data_len = RADIUS_DATA_LEN(session->radius_data->pak_in);
 			break;
 		    }
-		    size_t buf_len = buf + sizeof(buf) - b;
-		    size_t old_len = buf_len;
-		    rad_attr_val_dump(mem, data, data_len, &b, &buf_len, NULL, li->separator.txt, li->separator.len);
-		    // rad_attr_val_dump called with buf != NULL. Both b and buf_len are already adjused, but
-		    // total_len isn't.
-		    total_len += old_len - buf_len;
-		    if (total_len > sizeof(buf) - 20)
+		    size_t buf_len;
+		    // rad_attr_val_dump() skips what does not fit: dump again into a larger buffer while less than one attribute and separator are left
+		    do {
+			b = buf + total_len;
+			buf_len = buf_size - total_len;
+			rad_attr_val_dump(mem, data, data_len, &b, &buf_len, NULL, li->separator.txt, li->separator.len);
+		    } while (buf_len < 1024 + li->separator.len && LOG_ROOM(2 * (buf_size - total_len)));
+		    total_len = buf_size - buf_len;
+		    if (LOG_FULL)
 			break;
 		    continue;
 		} else {
@@ -2158,16 +2188,18 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
 			    }
 			}
 			if (separate && li->separator.txt) {
-			    len = ememcpy(b, li->separator.txt, li->separator.len, sizeof(buf) - total_len);
+			    LOG_ROOM(4 * li->separator.len + 11);
+			    len = ememcpy(b, li->separator.txt, li->separator.len, buf_size - total_len);
 			    total_len += len;
 			    b += len;
-			    if (total_len > sizeof(buf) - 20)
+			    if (LOG_FULL)
 				break;
 			}
-			len = ememcpy(b, s, l, sizeof(buf) - total_len);
+			LOG_ROOM(4 * l + 11);
+			len = ememcpy(b, s, l, buf_size - total_len);
 			total_len += len;
 			b += len;
-			if (total_len > sizeof(buf) - 20)
+			if (LOG_FULL)
 			    break;
 			argp += (size_t) *arg_len;
 			separate = 1;
@@ -2183,21 +2215,26 @@ char *eval_log_format(tac_session *session, struct context *ctx, struct logfile 
 	    if (!len)
 		len = strlen(s->txt);
 	    if (li->token == S_umessage || li->token == S_AUTHFAIL_BANNER || li->token == S_FS || (session && session->eval_log_raw)) {
-		if (sizeof(buf) - total_len < len + 20)
-		    len = (sizeof(buf) - total_len > 20) ? sizeof(buf) - total_len - 20 : 0;
+		LOG_ROOM(len + 20);
+		if (buf_size - total_len < len + 20)
+		    len = (buf_size - total_len > 20) ? buf_size - total_len - 20 : 0;
 		memcpy(b, s->txt, len);
-	    } else
-		len = ememcpy(b, s->txt, s->len, sizeof(buf) - total_len);
+	    } else {
+		LOG_ROOM(4 * s->len + 11);
+		len = ememcpy(b, s->txt, s->len, buf_size - total_len);
+	    }
 	    total_len += len;
 	    b += len;
-	    if (total_len > sizeof(buf) - 20)
+	    if (LOG_FULL)
 		break;
 	}
     }
+#undef LOG_ROOM
+#undef LOG_FULL
     *b = 0;
     if (outlen)
 	*outlen = total_len;
-    return mem_strdup(session ? session->mem : ctx->mem, buf);
+    return (buf == sbuf) ? mem_strdup(mem, buf) : buf;
 }
 
 #ifdef WITH_PCRE2
