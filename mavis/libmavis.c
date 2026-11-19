@@ -294,8 +294,23 @@ void av_add(av_ctx *ac, int av_attribute, char *separator, char *format, ...)
     }
 }
 
-// -1: the list cannot carry a CR, LF or NUL, or a backslash before the closing quote
-int av_add_quoted(av_ctx *ac, int av_attribute, char *value, size_t len)
+// Append value as it is to the list in l
+void av_list_add(struct av_list *l, char *value, size_t len)
+{
+    if (l->len + len + 2 > l->size) {
+	l->size = 2 * (l->len + len + 2);
+	l->buf = Xrealloc(l->buf, l->size);
+    }
+    if (l->len)
+	l->buf[l->len++] = ',';
+    memcpy(l->buf + l->len, value, len);
+    l->len += len;
+    l->buf[l->len] = 0;
+}
+
+// Append value in double quotes to the list in l. -1: the list cannot carry a CR, LF or NUL, or a backslash before
+// the closing quote
+int av_list_add_quoted(struct av_list *l, char *value, size_t len)
 {
     if (memchr(value, '\n', len) || memchr(value, '\r', len) || memchr(value, 0, len) || (len && value[len - 1] == '\\'))
 	return -1;
@@ -307,9 +322,28 @@ int av_add_quoted(av_ctx *ac, int av_attribute, char *value, size_t len)
 	    *b++ = '\\';
 	*b++ = value[i];
     }
-    *b = '"';
-    av_list_append(ac, av_attribute, buf);
+    *b++ = '"';
+    av_list_add(l, buf, (size_t) (b - buf));
     free(buf);
+    return 0;
+}
+
+// The list in l into av_attribute (no list: unset); frees l
+void av_list_set(av_ctx *ac, int av_attribute, struct av_list *l)
+{
+    av_set(ac, av_attribute, l->len ? l->buf : NULL);
+    free(l->buf);
+    *l = (struct av_list) { 0 };
+}
+
+// -1: the list cannot carry a CR, LF or NUL, or a backslash before the closing quote
+int av_add_quoted(av_ctx *ac, int av_attribute, char *value, size_t len)
+{
+    struct av_list l = { 0 };
+    if (av_list_add_quoted(&l, value, len))
+	return -1;
+    av_list_append(ac, av_attribute, l.buf);
+    free(l.buf);
     return 0;
 }
 
