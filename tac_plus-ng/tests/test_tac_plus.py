@@ -240,5 +240,61 @@ class SingleConnectionMayClose(TacPlusTestCase):
         self.assertEqual(keep.pap("alice", "alicepw").status_name, "PASS")
 
 
+class ModuleScriptOnMalformedList(TacPlusTestCase):
+    """A module script with a deny rule and a malformed TACMEMBER: libmavis fails the answer, also for tac_plus."""
+
+    CONFIG = Stub.module(childs=(1, 1), script=r"""
+		script out {
+			if ($$TACMEMBER =~ /blocked/) {
+				set $$RESULT = NAK
+				return
+			}
+		}""") + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = guest {
+		service = shell { default command = permit }
+	}
+	group = blocked {
+		service = shell { default command = permit }
+	}
+"""
+
+    def author(self, user, member):
+        Stub(self.daemon).set(users={user: {"password": "pw", "member": member}})
+        return self.connect().author(user, ["service=shell", "cmd="]).status_name
+
+    def test_deny_rule(self):
+        self.assertEqual(self.author("carol", '"guest"'), "PASS_ADD")
+        self.assertEqual(self.author("dave", '"guest","blocked"'), "FAIL")
+        # a line break: the tac_plus parser takes it as a blank, the list decoder as malformed
+        self.assertEqual(self.author("erin", '"guest",\n"blocked"'), "FAIL")
+
+
+class GroupsFilterOnMalformedList(TacPlusTestCase):
+    """The groups module and a malformed TACMEMBER: libmavis fails the answer, also for tac_plus."""
+
+    CONFIG = """
+	mavis module = groups {
+		groups filter = /^guest$$/
+	}
+""" + Stub.module(childs=(1, 1)) + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = guest {
+		service = shell { default command = permit }
+	}
+"""
+
+    def test_filter(self):
+        stub = Stub(self.daemon)
+        stub.set(users={"carol": {"password": "pw", "member": '"guest","blocked"'}})
+        self.assertEqual(self.connect().author("carol", ["service=shell", "cmd="]).status_name, "PASS_ADD")
+        stub.set(users={"dave": {"password": "pw", "member": '"guest",\n"blocked"'}})
+        self.assertEqual(self.connect().author("dave", ["service=shell", "cmd="]).status_name, "FAIL")
+
+
 if __name__ == "__main__":
     unittest.main()

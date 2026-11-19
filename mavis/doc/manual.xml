@@ -647,6 +647,21 @@ cache expire FTP = 0</screen>
         writing custom modules, as external authentication programs may be
         implemented as easy-to-deploy Perl programs. Plus, you're likely to
         get get parallelism for free.</para>
+        <para>A program writes the list attributes (<literal>TACMEMBER</literal>, <literal>MEMBEROF</literal>,
+        <literal>SSHKEY</literal>, <literal>SSHKEYHASH</literal> and <literal>SSHKEYID</literal>) as a comma separated
+        list of values in double quotes, e.g. <literal>"admins","a \"quoted\" name"</literal>. In the quotes, put a
+        backslash before each double quote of the value. Any other backslash is part of the value, so a DN such as
+        <literal>"cn=a\,b,dc=example"</literal> goes as it is. Such a list cannot carry a value that contains a line
+        break or a NUL, or that ends with a backslash.</para>
+        <para>tac_plus-ng and the <emphasis>groups</emphasis> module read the lists in the same way. Blanks around a
+        value are allowed. A value can also be in single quotes, with a backslash before each single quote, or without
+        quotes; a value without quotes does not start with a quote, cannot be empty and ends at the next comma.
+        <literal>MEMBEROF</literal> values must have quotes. tac_plus-ng takes each value literally (no
+        <literal>${VAR}</literal> and no alias), as a value of that one attribute. A malformed list (for example an
+        empty value without quotes, text after the closing quote, or a line break) makes the whole answer a
+        failure, and so does a group name of <literal>resolve gids</literal> that the list cannot carry. libmavis
+        makes such an answer a failure too (<literal>RESULT</literal> is <literal>NAK</literal>): a script of a module
+        does not run on it, and the <emphasis>groups</emphasis> module does not filter it.</para>
         <section>
           <title>Configuration directives</title>
           <para>The following configuration directives are available:</para>

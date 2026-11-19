@@ -284,6 +284,21 @@ void av_setf(av_ctx *, int, char *, ...)
     __attribute__((format(printf, 3, 4)));
 void av_add(av_ctx * ac, int av_attribute, char *separator, char *format, ...)
     __attribute__((format(printf, 4, 5)));
+/* The list codec of TACMEMBER, MEMBEROF, SSHKEY, SSHKEYHASH and SSHKEYID (manual: the external module):
+ *   list   = [ value *( "," value ) ]   blanks (space, tab) around a value; a CR or LF anywhere is malformed
+ *   value  = quoted | plain
+ *   quoted = q *( '\' q | other ) q     q is '"' or '\''; a backslash before anything else stays
+ *   plain  = 1*( not ',' ), not starting with a quote, without its trailing blanks; an empty one is malformed
+ * av_add_quoted() writes '"' and the value with a backslash before each '"'. It refuses a CR, LF, NUL
+ * and a value that ends with a backslash. */
+int av_add_quoted(av_ctx *, int, char *, size_t);
+int av_list_next(char **, char **, int *);
+int av_list_check(char *, int);
+int av_lists_check(av_ctx *);
+int av_list_attribute(int);
+void av_list_append(av_ctx *, int, char *);
+void av_list_refuse(av_ctx *, int, char *);
+void av_list_set_malformed(av_ctx *, int, char *);
 #define av_unset(A,B) av_set(A,B, NULL)
 void av_clear(av_ctx *);
 void av_dump(av_ctx *);
