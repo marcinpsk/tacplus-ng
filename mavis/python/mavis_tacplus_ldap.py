@@ -291,11 +291,12 @@ def user_bind(dn, password):
 def expand_groupOfNames(g):
 	H = { }
 	def expand_groupOfNames_sub(m, depth):
-		if ldap_nested_group_depth is not None and ldap_nested_group_depth <= depth:
-			return [ ]
 		if ((not m in H) and ((m is g) or memberof_regex.match(m))):
 			if not m is g:
 				H[m] = True
+			# depth 1: the groups of the user, as in the memberOf walk
+			if ldap_nested_group_depth is not None and ldap_nested_group_depth <= depth:
+				return
 			conn.search(search_base = LDAP_BASE_GROUP,
 				search_filter = LDAP_FILTER_GROUP.format(m),
 				search_scope=LDAP_SCOPE_GROUP, attributes = ['dn'])
