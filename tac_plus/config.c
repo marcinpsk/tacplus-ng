@@ -1726,33 +1726,10 @@ static struct tac_acl *tac_acl_lookup(char *s)
     return (struct tac_acl *) RB_lookup(acltable, a);
 }
 
-static void parse_member(struct sym *sym, tac_user * user, tac_realm * r)
+static void parse_member_values(struct sym *sym, tac_user * user, tac_realm * r, struct tac_acl *acfg, int negate,
+				struct tac_acllist **aclgrp)
 {
-    struct tac_acl *acfg = NULL, *a = NULL;
-    int negate = 0;
-    struct tac_acllist **aclgrp = &user->nas_member_acl;
-    tac_sym_get(sym);
-
-    parse_acl_cond(sym, user, &acfg, &negate);
-
-    if (acfg) {
-	while (*aclgrp && ((*aclgrp)->acl != acfg || (*aclgrp)->negate != negate)) {
-	    if (!(*aclgrp)->acl)
-		parse_error_order(sym, "member");
-	    aclgrp = &(*aclgrp)->next;
-	}
-	if (!(*aclgrp)) {
-	    *aclgrp = mem_alloc(user->mem, sizeof(struct tac_acllist));
-	    (*aclgrp)->u.rt = radix_new(NULL, (int (*)(void *, void *)) cmp_groups);
-	    radix_set_payload_hash((*aclgrp)->u.rt, groups_hash);
-	    (*aclgrp)->acl = acfg;
-	    (*aclgrp)->negate = negate;
-	} else if ((*aclgrp)->next) {
-	    parse_error_order(sym, "member");
-	}
-    }
-
-    parse(sym, S_equal);
+    struct tac_acl *a = NULL;
 
     do {
 	tac_user *g = NULL;
@@ -1832,6 +1809,36 @@ static void parse_member(struct sym *sym, tac_user * user, tac_realm * r)
 	tac_sym_get(sym);
     }
     while (parse_comma(sym));
+}
+
+static void parse_member(struct sym *sym, tac_user * user, tac_realm * r)
+{
+    struct tac_acl *acfg = NULL;
+    int negate = 0;
+    struct tac_acllist **aclgrp = &user->nas_member_acl;
+    tac_sym_get(sym);
+
+    parse_acl_cond(sym, user, &acfg, &negate);
+
+    if (acfg) {
+	while (*aclgrp && ((*aclgrp)->acl != acfg || (*aclgrp)->negate != negate)) {
+	    if (!(*aclgrp)->acl)
+		parse_error_order(sym, "member");
+	    aclgrp = &(*aclgrp)->next;
+	}
+	if (!(*aclgrp)) {
+	    *aclgrp = mem_alloc(user->mem, sizeof(struct tac_acllist));
+	    (*aclgrp)->u.rt = radix_new(NULL, (int (*)(void *, void *)) cmp_groups);
+	    radix_set_payload_hash((*aclgrp)->u.rt, groups_hash);
+	    (*aclgrp)->acl = acfg;
+	    (*aclgrp)->negate = negate;
+	} else if ((*aclgrp)->next) {
+	    parse_error_order(sym, "member");
+	}
+    }
+
+    parse(sym, S_equal);
+    parse_member_values(sym, user, r, acfg, negate, aclgrp);
 }
 
 static void parse_enable(struct sym *sym, mem_t * mem, struct pwdat **enable, char *enable_implied)
@@ -3039,6 +3046,55 @@ static void parse_host(struct sym *sym, tac_realm * r)
 	}
 }
 
+// A list attribute of a backend (TACMEMBER, TACCLIENT): av_list_next() gives the values, one at a time, to the
+// attribute parser; its tokenizer never sees a value
+int parse_user_profile_list(struct sym *sym, tac_user * user, enum token attribute, char *list)
+{
+    char *s = Xstrdup(list), *rest, *v;
+    sym->in = sym->tin = s + strlen(s);
+    sym->len = sym->tlen = 1;
+    sym->env_valid = 1;
+    if (setjmp(sym->env)) {
+	free(s);
+	return -1;
+    }
+    sym_init(sym);
+    // the whole list first: a list that fails must not leave a part behind
+    if (av_list_check(s, 0))
+	parse_error(sym, "Malformed list");
+    char *check = Xstrdup(s);
+    for (rest = check; av_list_next(&rest, &v, NULL) > 0;)
+	if (strlen(v) >= sizeof(sym->buf)) {
+	    free(check);
+	    parse_error(sym, "Value too long");
+	}
+    free(check);
+    for (rest = s; av_list_next(&rest, &v, NULL) > 0;) {
+	struct groups_s *g = (struct groups_s *) 0xdeadbeaf;
+	switch (attribute) {
+	case S_member:
+	    memcpy(sym->buf, v, strlen(v) + 1);
+	    sym->code = S_string;
+	    parse_member_values(sym, user, user->realm, NULL, 0, &user->nas_member_acl);
+	    break;
+	case S_client:
+	    // "deny 10.0.0.0/8", as the configuration writes it
+	    if (!strncmp(v, "not ", 4) || !strncmp(v, "deny ", 5))
+		g = NULL;
+	    if (!strncmp(v, "not ", 4) || !strncmp(v, "deny ", 5) || !strncmp(v, "permit ", 7))
+		v = strchr(v, ' ') + strspn(strchr(v, ' '), " \t");
+	    if (!user->nac_range)
+		user->nac_range = radix_new(NULL, NULL);
+	    radix_add_members(sym, user->nac_range, v, g, user->realm);
+	    break;
+	default:
+	    parse_error(sym, "'%s' is not available here", codestring[attribute].txt);
+	}
+    }
+    parse_user_final(user);
+    free(s);
+    return 0;
+}
 static struct tac_acllist *eval_tac_acllist(tac_session * session, char *cmd, struct tac_acllist **al)
 {
     while (*al) {
