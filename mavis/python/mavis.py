@@ -121,7 +121,7 @@ class Mavis:
 			return False
 
 		if re.match(r'\(|\)|,|\||&|=|\*', self.av_pairs[AV_A_USER]):
-			self.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "Username not valid.")
+			self.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Username not valid.")
 			return False
 
 		if ((self.av_pairs[AV_A_TACTYPE] == AV_V_TACTYPE_AUTH

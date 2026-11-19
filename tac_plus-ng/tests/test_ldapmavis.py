@@ -705,6 +705,18 @@ class LdapPython(LdapTests, DaemonTestCase):
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
         self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
 
+    def test_invalid_user_name(self):
+        """A user name with a filter character: FAIL, not a back-end error, so no fallback for the next logins."""
+        _, d = self.start()
+        # the daemon refuses "(", "*" and others before MAVIS; valid() checks the first character only
+        for user in ("x,y", "x&y", ",x", "&x"):
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, "alicepw").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+
     def test_starttls_settings_invalid(self):
         """USE_STARTTLS with LDAP_SKIP_STARTTLS=1, or a LDAP_SKIP_STARTTLS that is not a number, stops the back-end."""
         cases = (({"USE_STARTTLS": "1", "LDAP_SKIP_STARTTLS": "1"},
