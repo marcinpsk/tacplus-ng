@@ -2,7 +2,7 @@
 "http://www.w3.org/TR/html4/loose.dtd">
 <html>
 <head>
-<meta name="generator" content="HTML Tidy for HTML5 for Linux version 5.6.0">
+<meta name="generator" content="HTML Tidy for HTML5 for Linux version 5.8.0">
 <link rel="stylesheet" type="text/css" href="style.css">
 <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -14,7 +14,7 @@
 <div class="TITLEPAGE">
 <h1 class="title"><a name="AEN2" id="AEN2">MAVIS - Modular Attribute-Value Interchange System</a></h1>
 <h3 class="author"><a name="AEN4" id="AEN4">Marc Huber</a></h3>
-<span class="releaseinfo">$Id: 7d95a415212ec7b336fafddbf6a12f2dcb0fe6fe $<br></span>
+<span class="releaseinfo">$Id: b9bb530447e6e3db463e0abc55e44dd63617383c $<br></span>
 <hr></div>
 <div class="TOC">
 <dl>
@@ -1331,7 +1331,7 @@ Sample usage: mavistest -d -1  /usr/local/etc/tac_plus.cfg tac_plus TACPLUS joe 
 <h2 class="section"><a name="AEN1269" id="AEN1269">7. Environmental Variables</a></h2>
 <p>Text enclosed in double quotes may make use of environment variables, e.g.:</p>
 <pre class="screen">filename = "${HOME}/log.txt"</pre>
-<p>The braces are required.</p>
+<p>The braces are required. This applies to the configuration file only: tac_plus-ng does not replace environment variables in a user profile or other text from a backend.</p>
 </div>
 <div class="section">
 <hr>
