@@ -113,7 +113,7 @@ while ($in = <>) {
 	}
 	elsif ($V[AV_A_USER] !~ /[-0-9a-z_]+/i){
 		$V[AV_A_USER_RESPONSE] = "User name not valid.";
-		$V[AV_A_RESULT] = AV_V_RESULT_ERROR;
+		$V[AV_A_RESULT] = AV_V_RESULT_FAIL;
 		$result = MAVIS_FINAL;
 	}
 	elsif (!defined $V[AV_A_PASSWORD]){

@@ -82,7 +82,9 @@ while ($in = <>) {
 	}
 	if ($V[AV_A_USER] =~ /\(|\)|,|\||&|\*/){
 		$V[AV_A_USER_RESPONSE] = "Username not valid.";
-		goto fatal;
+		$V[AV_A_RESULT] = AV_V_RESULT_FAIL;
+		$result = MAVIS_FINAL;
+		goto bye;
 	}
 	if (!defined $V[AV_A_PASSWORD]){
 		$result = MAVIS_DOWN;
