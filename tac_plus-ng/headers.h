@@ -677,6 +677,7 @@ struct tac_session {
 	BISTATE(chpass);
 	BISTATE(authorized);
 	BISTATE(eval_log_raw);
+	BISTATE(eval_log_full);
 	BISTATE(want_mfa);
 	BISTATE(eval_prompt_only);
 	BISTATE(flag_rule_prompt);
