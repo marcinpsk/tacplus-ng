@@ -71,6 +71,12 @@ tests:
         docker rm -f "$TACTEST_SAMBA_CONTAINER" > /dev/null; exit $rc
     )
 
+The PAM tests (test_pammavis.py) put a PAM service file on /etc/pam.d
+in a user and mount namespace of their own, with "unshare" and "mount"
+(util-linux). They need the PAM headers for the build (libpam0g-dev;
+Alpine: linux-pam-dev) and the modules pam_debug, pam_exec and
+pam_permit. Without a namespace they are skipped, as the VRF tests.
+
 run-tests configures and builds tac_plus-ng, the tactester client
 (only with OpenSSL; without it the tactester tests are skipped) and the
 older tac_plus daemon, installs them into build/<OS>/tests-prefix (no root needed, nothing outside the
@@ -105,7 +111,8 @@ or "sysctl vm.mmap_rnd_bits=28" helps.
 Other environment variables: TACTEST_CONFIGURE (extra configure
 arguments), TACTEST_WORKDIR, TACTEST_KEEP=1, TACTEST_DEBUG=<mask>,
 TACTEST_TIMEOUT (seconds, default 600), TACTEST_REQUIRE_VRF=1 (the VRF
-tests fail instead of skipping).
+tests fail instead of skipping), TACTEST_REQUIRE_PAM=1 (the PAM tests
+fail instead of skipping in a build with pammavis-mt).
 
 Layout
 ------
