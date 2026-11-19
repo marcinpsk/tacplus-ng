@@ -278,7 +278,7 @@ def expand_groupOfNames(g):
 			if not m is g:
 				H[m] = True
 			conn.search(search_base = LDAP_BASE_GROUP,
-				search_filter = LDAP_FILTER_GROUP.format(m),
+				search_filter = LDAP_FILTER_GROUP.format(escape_filter_chars(m)),
 				search_scope=LDAP_SCOPE_GROUP, attributes = ['dn'])
 			for e in conn.entries:
 				expand_groupOfNames_sub(e.entry_dn, depth + 1)
@@ -499,7 +499,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		D.set_gid(entry.gidNumber[0])
 	if len(entry.gidNumber) > 0 and (LDAP_SKIP_POSIXGROUP is None or LDAP_SKIP_POSIXGROUP == "0"):
 		conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
-			search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(entry.gidNumber[0]),
+			search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(escape_filter_chars(entry.gidNumber[0])),
 			attributes=["cn"])
 		if len(conn.entries) == 1:
 			TACMEMBER.extend(conn.entries[0].cn)
