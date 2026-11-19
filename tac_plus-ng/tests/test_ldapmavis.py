@@ -614,7 +614,8 @@ class LdapPython(LdapTests, DaemonTestCase):
         """USE_STARTTLS with LDAP_SKIP_STARTTLS=1, or a LDAP_SKIP_STARTTLS that is not a number, stops the back-end."""
         cases = (({"USE_STARTTLS": "1", "LDAP_SKIP_STARTTLS": "1"},
                   "USE_STARTTLS and LDAP_SKIP_STARTTLS=1 contradict each other"),
-                 ({"LDAP_SKIP_STARTTLS": "yes"}, "invalid LDAP_SKIP_STARTTLS: 'yes'"))
+                 ({"LDAP_SKIP_STARTTLS": "yes"}, "invalid LDAP_SKIP_STARTTLS: 'yes'"),
+                 ({"LDAP_SKIP_STARTTLS": ""}, "invalid LDAP_SKIP_STARTTLS: ''"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")

@@ -187,8 +187,10 @@ try:
 except Exception as e:
 	sys.exit("invalid TLS_OPTIONS ({}): {}".format(", ".join(sorted(tls_options)), e))
 eval_env('USE_STARTTLS', None)
+# an empty value is invalid, not the default
+LDAP_SKIP_STARTTLS = os.getenv('LDAP_SKIP_STARTTLS', '0')
 try:
-	ldap_skip_starttls = int(eval_env('LDAP_SKIP_STARTTLS', '0'))
+	ldap_skip_starttls = int(LDAP_SKIP_STARTTLS)
 except ValueError:
 	sys.exit("invalid LDAP_SKIP_STARTTLS: {!r} (0 or 1)".format(LDAP_SKIP_STARTTLS))
 if USE_STARTTLS is not None and ldap_skip_starttls:
