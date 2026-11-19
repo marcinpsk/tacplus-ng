@@ -243,13 +243,13 @@ $module
 class LdapTests:
     """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
-    def start(self, **env):
-        """Start slapd and the daemon; env: more environment variables for the back-end."""
+    def start(self, *settings, **env):
+        """Start slapd and the daemon; settings: (name, value) pairs, then env: more environment for the back-end."""
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))))
         self.addCleanup(slapd.stop)
         slapd.start()
-        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
+        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in settings + tuple(env.items()))
         return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF))
 
     def test_pap(self):
@@ -283,6 +283,14 @@ class LdapTests:
         for scope, status in (("sub", "PASS"), ("one", "FAIL"), ("base", "FAIL")):
             with self.subTest(scope=scope):
                 _, d = self.start(LDAP_SCOPE=scope)
+                with d.connect() as c:
+                    self.assertEqual(c.pap("alice", "alicepw").status_name, status)
+
+    def test_setenv_twice(self):
+        """A variable set twice for the module: the back-end gets the last value only."""
+        for scopes, status in ((("base", "sub"), "PASS"), (("sub", "base"), "FAIL")):
+            with self.subTest(scopes=scopes):
+                _, d = self.start(*(("LDAP_SCOPE", scope) for scope in scopes))
                 with d.connect() as c:
                     self.assertEqual(c.pap("alice", "alicepw").status_name, status)
 

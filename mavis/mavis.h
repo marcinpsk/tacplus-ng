@@ -501,6 +501,8 @@ void mavis_module_parse_action(mavis_ctx *, struct sym *);
 
 void mavis_set_type6(char *(*fun)(const char *, const char *), char *master_key);
 char *mavis_decrypt_type6(char *);
+/* set name=value in the NULL-terminated list *env of *count entries; a second setting of name replaces the first */
+void mavis_env_set(char ***env, int *count, char *name, char *value);
 
 #define MAVIS_EXT_MAGIC_V1 0x4d610001
 struct mavis_ext_hdr_v1 {
