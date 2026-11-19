@@ -193,10 +193,10 @@ class Slapd:
             raise AssertionError(f"slapd did not start on {self.url}:\n{f.read()[-3000:]}")
 
     def open_connections(self):
-        """The number of client connections that slapd accepted and did not close, from its log."""
+        """The IDs of the client connections that slapd accepted and did not close, from its log."""
         with open(self.log, errors="replace") as f:
             text = f.read()
-        return len(set(re.findall(r"conn=(\d+) fd=\d+ ACCEPT", text)) - set(re.findall(r"conn=(\d+) fd=\d+ closed", text)))
+        return set(re.findall(r"conn=(\d+) fd=\d+ ACCEPT", text)) - set(re.findall(r"conn=(\d+) fd=\d+ closed", text))
 
     def stop(self):
         if self.proc is not None and self.proc.poll() is None:
@@ -287,9 +287,10 @@ class LdapTests:
             with d.connect(timeout=15.0) as c:
                 self.assertEqual(c.pap(f"nobody{i}", "x").status_name, "FAIL")
         deadline = time.monotonic() + CLOSE_TIMEOUT
-        while slapd.open_connections() > before and time.monotonic() < deadline:
+        # compare IDs, not counts: a baseline connection that closes late must not hide a new one
+        while slapd.open_connections() - before and time.monotonic() < deadline:
             select.select([], [], [], 0.05)
-        self.assertLessEqual(slapd.open_connections(), before)
+        self.assertEqual(slapd.open_connections() - before, set())
 
     def test_unknown_user_closes_the_connection(self):
         slapd, d = self.start()
