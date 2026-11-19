@@ -129,10 +129,11 @@ def ldap_attributes(dn, *attributes):
 class Domain:
     """The users and groups of one test class, in OU=tactest-<tag>; the login name of a user is <cn>-<tag>.
 
-    alice is a member of netadmins, netadmins of staff, dave of staff;
-    posix has the gidNumber of the posixGroup unix. The account states
-    of the BIND_ERRORS users, of inactive (533), and of reset, renew and
-    refused (773) and aged (532), give the bind errors of AD.
+    alice and grouped are members of netadmins, netadmins of staff, dave
+    of staff; posix has the gidNumber of the posixGroup unix. The account
+    states of the BIND_ERRORS users, of inactive (533), and of reset,
+    renew, refused and grouped (773) and aged (532), give the bind errors
+    of AD.
     """
 
     # cn: (userAccountControl, more LDIF lines); 512: a normal account, 514: disabled
@@ -146,6 +147,7 @@ class Domain:
         "mustchange": (512, "pwdLastSet: 0\n"),
         "reset": (512, "pwdLastSet: 0\n"),
         "renew": (512, "pwdLastSet: 0\n"),
+        "grouped": (512, "pwdLastSet: 0\n"),
         "refused": (512, "pwdLastSet: 0\n"),
         "disabled": (514, ""),
         "inactive": (514, ""),
@@ -184,7 +186,7 @@ class Domain:
         for cn, (uac, more) in self.USERS.items():
             ldif.append(f"dn: {self.dn(cn)}\nobjectClass: user\nsAMAccountName: {self.login(cn)}\n"
                         f"unicodePwd:: {unicode_pwd(self.password(cn))}\nuserAccountControl: {uac}\n{more}")
-        for cn, members in (("netadmins", ["alice"]), ("staff", ["netadmins", "dave"])):
+        for cn, members in (("netadmins", ["alice", "grouped"]), ("staff", ["netadmins", "dave"])):
             ldif.append(f"dn: {self.dn(cn)}\nobjectClass: group\nsAMAccountName: {self.login(cn)}\n"
                         + "".join(f"member: {self.dn(m)}\n" for m in members))
         ldif.append(f"dn: {self.dn('unix')}\nobjectClass: group\nobjectClass: posixGroup\n"
@@ -230,7 +232,7 @@ def ber(data, i=0):
 
 
 class Relay:
-    """An LDAPS relay to the DC; it records the bind requests, bind results and modify requests of each connection.
+    """An LDAPS relay to the DC; it records the bind, search and modify requests and the bind results of each connection.
 
     refuse: a DN. The relay itself answers the first bind of this DN that
     follows a failed bind on the same connection, with resultCode 49
@@ -238,7 +240,8 @@ class Relay:
     """
 
     def __init__(self, ca, refuse=None):
-        self.events = []    # (connection, "bind" and the DN | "bound" and the result code | "modify" and the DN)
+        # (connection, "bind" and the DN | "bound" and the result code | "search" or "modify" and the DN)
+        self.events = []
         self.count = 0
         self.refuse = refuse
         self.refused = False
@@ -298,6 +301,8 @@ class Relay:
                 return bytes([0x30, len(msgid) + len(op)]) + msgid + op
         elif tag == 0x61:   # BindResponse: resultCode
             self.events.append((conn, "bound", int.from_bytes(ber(op)[1], "big")))
+        elif tag == 0x63:   # SearchRequest: baseObject
+            self.events.append((conn, "search", ber(op)[1].decode()))
         elif tag == 0x66:   # ModifyRequest: object
             self.events.append((conn, "modify", ber(op)[1].decode()))
         return None
@@ -543,6 +548,19 @@ class AdTests:
             self.assertEqual(results[-1:], [0], f"event {k}, the modify of {dn}, follows a failed bind: {events}")
         with d.connect() as c:
             self.assertEqual(c.pap(self.login("renew"), "renew-new").status_name, "PASS")
+
+    def test_must_change_groups_bound(self):
+        """After a 773 bind error, the group searches of the AUTH request run bound, as the password change."""
+        relay, d = self.start_relay()
+        with d.connect() as c:
+            r = c.ascii_login(self.login("grouped"), "grouped-pw", data=["grouped-new", "grouped-new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        events = relay.events
+        searches = [k for k, (_, op, _) in enumerate(events) if op == "search"]
+        self.assertTrue(searches, events)
+        for k in searches:
+            results = [value for conn, op, value in events[:k] if conn == events[k][0] and op == "bound"]
+            self.assertIn(results[-1:], ([], [0]), f"event {k}, a search, follows a failed bind: {events}")
 
     def test_must_change_rebind_fails(self):
         """A failed LDAP_USER bind after the 773 bind error gives a backend error (ERROR), and no change."""
