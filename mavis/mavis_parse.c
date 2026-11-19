@@ -2627,6 +2627,12 @@ void mavis_script_parse(mavis_ctx *mcx, mem_t *mem, struct sym *sym)
 
 enum token mavis_script_eval(mavis_ctx *mcx, av_ctx *ac, struct mavis_action *m)
 {
+    // a script cannot decide on a malformed list: the answer is a FAIL and the script ends here
+    int a = av_lists_check(ac);
+    if (a > -1) {
+	av_list_refuse(ac, a, mcx->identifier);
+	return S_return;
+    }
 #ifdef WITH_PCRE2
     pcre_res = 0;
     pcre_arg = NULL;

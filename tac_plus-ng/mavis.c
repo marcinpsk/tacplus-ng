@@ -59,6 +59,34 @@ struct mavis_ctx_data {
 static void mavis_lookup_final(tac_session *, av_ctx *);
 static void dump_av_pairs(tac_session * session, av_ctx * avc, char *what);
 
+static void mavis_parse_error(tac_session *session)
+{
+    session->mavisauth_res = S_deny;
+    session->bad_backend_data = 1;
+    static struct log_item *li_mavis_parse_error = NULL;
+    if (!li_mavis_parse_error)
+	li_mavis_parse_error = parse_log_format_inline(session->ctx->host->user_messages[UM_MAVIS_PARSE_ERROR], __FILE__, __LINE__);
+    session->user_msg.txt = eval_log_format(session, session->ctx, NULL, li_mavis_parse_error, io_now.tv_sec, &session->user_msg.len);
+}
+
+static int profile_lists[] = { AV_A_TACMEMBER, AV_A_SSHKEY, AV_A_SSHKEYHASH, AV_A_SSHKEYID, -1 };
+
+// An answer with a malformed list is a FAIL: no part of it reaches a user, a script or a log format
+static int mavis_lists_malformed(tac_session *session, av_ctx *avc)
+{
+    int a = av_lists_check(avc);
+    // the values that go to the profile parser: all of them fit, before the parser takes the first one
+    for (int i = 0; a < 0 && profile_lists[i] > -1; i++)
+	if (av_get(avc, profile_lists[i]) && parse_user_profile_list_check(av_get(avc, profile_lists[i])))
+	    a = profile_lists[i];
+    if (a < 0)
+	return 0;
+    report(session, LOG_ERR, ~0, "user %s: %s from the backend is malformed", session->username.txt, av_char[a].name);
+    av_set(avc, AV_A_RESULT, AV_V_RESULT_FAIL);
+    mavis_parse_error(session);
+    return -1;
+}
+
 static void mavis_switch(tac_session *session, av_ctx *avc, int result)
 {
     if (!session->user_is_session_specific)
@@ -67,6 +95,7 @@ static void mavis_switch(tac_session *session, av_ctx *avc, int result)
     switch (result) {
     case MAVIS_FINAL:
 	session->mavis_pending = 0;
+	int malformed = mavis_lists_malformed(session, avc);
 	mavis_lookup_final(session, avc);
 	if (!session->user_msg.txt) {
 	    char *comment = av_get(avc, AV_A_USER_RESPONSE);
@@ -80,11 +109,12 @@ static void mavis_switch(tac_session *session, av_ctx *avc, int result)
 	    }
 	}
 	av_free_private(avc);
-	if (session->user) {
+	if (session->user && !malformed) {
 	    if (session->user->avc)
 		av_free(session->user->avc);
 	    session->user->avc = avc;
-	}
+	} else
+	    av_free(avc);
 	session->mavis_data->mavisfn(session);
 	break;
     case MAVIS_TIMEOUT:
@@ -251,21 +281,10 @@ void mavis_lookup(tac_session *session, void (*f)(tac_session *), const char *co
     }
 }
 
-static int parse_user_profile_multi(av_ctx *avc, struct sym *sym, tac_user *u, char *format, int attribute)
+static int parse_user_profile_multi(av_ctx *avc, struct sym *sym, tac_user *u, enum token token, int attribute)
 {
-    int res = 0;
     char *a = av_get(avc, attribute);
-    if (a)
-	while (!res && *a) {
-	    char *t = a;
-	    for (; *t && *t != '\n'; t++);
-	    res |= parse_user_profile_fmt(sym, u, format, (int) (t - a), a);
-	    if (!*t)
-		break;
-	    a = t;
-	    a++;
-	}
-    return res;
+    return a ? parse_user_profile_list(sym, u, token, a, strlen(a)) : 0;
 }
 
 static inline int parse_user_profile_single(av_ctx *avc, struct sym *sym, tac_user *u, char *format, int attribute)
@@ -353,21 +372,17 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 
 		u->dynamic = io_now.tv_sec + r->caching_period;
 
-		if (parse_user_profile_multi(avc, &sym, u, "{ member = %.*s }", AV_A_TACMEMBER) ||
-		    parse_user_profile_multi(avc, &sym, u, "{ ssh-key = %.*s }", AV_A_SSHKEY) ||
-		    parse_user_profile_multi(avc, &sym, u, "{ ssh-key-hash = %.*s }", AV_A_SSHKEYHASH) ||
-		    parse_user_profile_multi(avc, &sym, u, "{ ssh-key-id = %.*s }", AV_A_SSHKEYID) ||
+		// the groups last: an answer that fails in another attribute adds no group to the realm
+		if (parse_user_profile_multi(avc, &sym, u, S_ssh_key, AV_A_SSHKEY) ||
+		    parse_user_profile_multi(avc, &sym, u, S_ssh_key_hash, AV_A_SSHKEYHASH) ||
+		    parse_user_profile_multi(avc, &sym, u, S_ssh_key_id, AV_A_SSHKEYID) ||
+		    parse_user_profile_multi(avc, &sym, u, S_member, AV_A_TACMEMBER) ||
 		    parse_user_profile_single(avc, &sym, u, "%.*s", AV_A_TACPROFILE)
 		    ) {
 
 		    free_user(u);
 		    session->user = NULL;
-		    session->mavisauth_res = S_deny;
-
-		    static struct log_item *li_mavis_parse_error = NULL;
-		    if (!li_mavis_parse_error)
-			li_mavis_parse_error = parse_log_format_inline(session->ctx->host->user_messages[UM_MAVIS_PARSE_ERROR], __FILE__, __LINE__);
-		    session->user_msg.txt = eval_log_format(session, session->ctx, NULL, li_mavis_parse_error, io_now.tv_sec, &session->user_msg.len);
+		    mavis_parse_error(session);
 		    return;
 		}
 
@@ -501,6 +516,10 @@ static void mavis_ctx_switch(struct context *ctx, av_ctx *avc, int result)
     switch (result) {
     case MAVIS_FINAL:
 	ctx->mavis_pending = 0;
+	if (av_lists_check(avc) > -1) {
+	    report_cfg_error(LOG_ERR, ~0, "host %s: malformed list from the backend", ctx->device_addr_ascii.txt);
+	    av_set(avc, AV_A_RESULT, AV_V_RESULT_FAIL);
+	}
 	mavis_ctx_lookup_final(ctx, avc);
 	ctx->mavis_data->mavisfn(ctx);
 	break;
@@ -752,13 +771,19 @@ static void mavis_dacl_switch(tac_session *session, av_ctx *avc, int result)
     switch (result) {
     case MAVIS_FINAL:
 	session->mavis_pending = 0;
+	if (mavis_lists_malformed(session, avc)) {
+	    av_free(avc);
+	    session->mavis_data->mavisfn(session);
+	    break;
+	}
 	mavis_dacl_lookup_final(session, avc);
 	av_free_private(avc);
 	if (session->user) {
 	    if (session->user->avc)
 		av_free(session->user->avc);
 	    session->user->avc = avc;
-	}
+	} else
+	    av_free(avc);
 	session->mavis_data->mavisfn(session);
 	break;
     case MAVIS_TIMEOUT:

@@ -3129,11 +3129,8 @@ static struct tac_acl *tac_acl_lookup(char *s, tac_realm *r)
     return NULL;
 }
 
-static void parse_member(struct sym *sym, tac_groups **groups, mem_t *mem, tac_realm *r)
+static void parse_member_list(struct sym *sym, tac_groups **groups, mem_t *mem, tac_realm *r)
 {
-    sym_get(sym);
-
-    parse(sym, S_equal);
     if (!*groups)
 	*groups = mem_alloc(mem, sizeof(tac_groups));
 
@@ -3161,6 +3158,13 @@ static void parse_member(struct sym *sym, tac_groups **groups, mem_t *mem, tac_r
     while (parse_comma(sym));
 
     memcpy(sym->env, env, sizeof(jmp_buf));
+}
+
+static void parse_member(struct sym *sym, tac_groups **groups, mem_t *mem, tac_realm *r)
+{
+    sym_get(sym);
+    parse(sym, S_equal);
+    parse_member_list(sym, groups, mem, r);
 }
 
 static void parse_enable(struct sym *sym, mem_t *mem, struct pwdat **enable, tac_host *type6_host)
@@ -3429,6 +3433,8 @@ static void parse_sshkey(struct sym *sym, tac_user *user)
 
     do {
 	size_t slen = strlen(sym->buf);
+	if (!slen)
+	    parse_error(sym, "Empty SSH key");
 	unsigned char t[slen];
 	char n[slen];		// the BASE64 text of a RFC 4716 key; p points here after the block below
 	char *hash, *key;
@@ -3750,6 +3756,79 @@ static void parse_user_attr(struct sym *sym, tac_user *user)
 	}
     }
     sym_get(sym);
+}
+
+// 0: a well-formed list whose values fit the parse buffer; -1: else
+int parse_user_profile_list_check(char *list)
+{
+    if (av_list_check(list, 0))
+	return -1;
+    char *check = Xstrdup(list), *rest = check, *v;
+    int res = 0;
+    while (!res && av_list_next(&rest, &v, NULL) > 0)
+	if (strlen(v) >= sizeof(((struct sym *) 0)->buf))
+	    res = -1;
+    free(check);
+    return res;
+}
+
+// A list attribute of a backend: av_list_next() gives the values, one at a time, to the attribute parser
+int parse_user_profile_list(struct sym *sym, tac_user *user, enum token attribute, char *list, size_t len)
+{
+    char *s = Xcalloc(1, len + 1);
+    memcpy(s, list, len);
+    // the parser reads only the end of s: its tokenizer never sees the value
+    sym->in = sym->tin = s + len;
+    sym->len = sym->tlen = 1;
+    sym->env_valid = 1;
+    if (setjmp(sym->env)) {
+	free(s);
+	return -1;
+    }
+    sym_init(sym);
+    // the whole list first: a list that fails must not leave a new group behind
+    if (parse_user_profile_list_check(s))
+	parse_error(sym, "Malformed list or value too long");
+    // the SSH parsers append at the end of a list of the user: each one gets an empty list, and the end is kept
+    // here, so that a value does not walk all values before it
+    struct ssh_key *keys = user->ssh_key, **keys_end = &keys;
+    struct ssh_key_id *ids = user->ssh_key_id, **ids_end = &ids;
+    while (*keys_end)
+	keys_end = &(*keys_end)->next;
+    while (*ids_end)
+	ids_end = &(*ids_end)->next;
+    char *rest = s, *v;
+    while (av_list_next(&rest, &v, NULL) > 0) {
+	size_t vlen = strlen(v);
+	memcpy(sym->buf, v, vlen + 1);
+	sym->code = S_string;
+	user->ssh_key = NULL;
+	user->ssh_key_id = NULL;
+	switch (attribute) {
+	case S_member:
+	    parse_member_list(sym, &user->groups, user->mem, user->realm);
+	    break;
+#ifdef WITH_CRYPTO
+	case S_ssh_key:
+	    parse_sshkey(sym, user);
+	    break;
+#endif
+	case S_ssh_key_hash:
+	    parse_sshkeyhash(sym, user);
+	    break;
+	case S_ssh_key_id:
+	    parse_sshkeyid(sym, user);
+	    break;
+	default:
+	    parse_error(sym, "'%s' is not available here", codestring[attribute].txt);
+	}
+	for (*keys_end = user->ssh_key; *keys_end; keys_end = &(*keys_end)->next);
+	for (*ids_end = user->ssh_key_id; *ids_end; ids_end = &(*ids_end)->next);
+    }
+    user->ssh_key = keys;
+    user->ssh_key_id = ids;
+    free(s);
+    return 0;
 }
 
 static void add_host(struct sym *sym, radixtree_t *ht, tac_host *host)
@@ -5680,36 +5759,17 @@ static int tac_script_cond_eval(tac_session *session, struct mavis_cond *m)
 	    return tac_script_cond_eval_res(session, m, res);
 	case S_memberof:
 	    if (session->user && session->user->avc && session->user->avc->arr[AV_A_MEMBEROF]) {
-		size_t l = strlen(session->user->avc->arr[AV_A_MEMBEROF]) + 1;
-		char buf[l];
-		memcpy(buf, session->user->avc->arr[AV_A_MEMBEROF], l);
-		char *v = buf;
-		while (*v) {
-		    char *e;
-		    if (*v != '"') {
-			report(DEBACL, " memberof attribute '%s' is malformed (missing '\"')", session->user->avc->arr[AV_A_MEMBEROF]);
-			return tac_script_cond_eval_res(session, m, 0);
-		    }
-		    v++;
-		    for (e = v; *e && *e != '"'; e++);
-		    if (*e != '"') {
-			report(DEBACL, " memberof attribute '%s' is malformed (missing '\"')", session->user->avc->arr[AV_A_MEMBEROF]);
-			return tac_script_cond_eval_res(session, m, 0);
-		    }
-		    *e++ = 0;
-		    // perform checks
-		    res = tac_mavis_cond_compare(session, m, v, strlen(v));
-		    if (res)
-			return tac_script_cond_eval_res(session, m, res);
-		    v = e;
-		    if (!*v)
-			return tac_script_cond_eval_res(session, m, 0);
-		    if (*v != ',') {
-			report(DEBACL, " memberof attribute '%s' is malformed (expected a ',')", session->user->avc->arr[AV_A_MEMBEROF]);
-			return tac_script_cond_eval_res(session, m, 0);
-		    }
-		    v++;
+		// mavis.c refuses a malformed list; this one place must not take a part of one as "no match"
+		if (av_list_check(session->user->avc->arr[AV_A_MEMBEROF], 1)) {
+		    report(DEBACL, " memberof attribute '%s' is malformed", session->user->avc->arr[AV_A_MEMBEROF]);
+		    session->bad_backend_data = 1;
+		    return tac_script_cond_eval_res(session, m, 0);
 		}
+		char *buf = Xstrdup(session->user->avc->arr[AV_A_MEMBEROF]), *list = buf, *v;
+		while (!res && av_list_next(&list, &v, NULL) > 0)
+		    res = tac_mavis_cond_compare(session, m, v, strlen(v));
+		free(buf);
+		return tac_script_cond_eval_res(session, m, res);
 	    }
 	    return 0;
 	case S_radius:
@@ -6022,10 +6082,13 @@ enum token tac_script_eval_r(tac_session *session, struct mavis_action *m)
 	}
 	break;
     case S_if:
-	if (tac_script_cond_eval(session, m->a.c)) {
+	if (tac_script_cond_eval(session, m->a.c) && !session->bad_backend_data) {
 	    r = tac_script_eval_r(session, m->b.a);
 	    if (r != S_unknown)
 		return r;
+	} else if (session->bad_backend_data) {
+	    report(DEBACL, " line %u: the condition failed, deny", m->line);
+	    return S_deny;
 	} else if (m->c.a) {
 	    report(DEBACL, " line %u: [%s]", m->line, codestring[S_else].txt);
 	    r = tac_script_eval_r(session, m->c.a);
