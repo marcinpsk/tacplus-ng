@@ -355,6 +355,11 @@ while True:
 	if try_once:
 		try:
 			conn = ldap_connect()
+		except Exception:
+			# ldap_connect() writes the error and closes the connection
+			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+			continue
+		try:
 			# Check for MS AD LDAP
 			if '1.2.840.113556.1.4.800' in map(
 				lambda x: x[0], conn.server.info.supported_features):
@@ -382,15 +387,16 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 				if LDAP_FILTER == None:
 					LDAP_FILTER = '(&(objectclass=posixaccount)(uid={}))'
 			try_once = False
-		except:
-			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+		except Exception as e:
+			# for example no root DSE (conn.server.info is None): the next request opens a new connection
+			backend_error(D, e)
 			continue
 
 	elif conn.closed:
 		# bind() would open a new socket without StartTLS
 		try:
 			conn = ldap_connect()
-		except:
+		except Exception:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
 			continue
 
