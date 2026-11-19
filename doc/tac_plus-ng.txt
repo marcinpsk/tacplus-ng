@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 773cfc3e0d5b8522d5334d67fe9cdbc49119f2e5 $
+   $Id: c97a3b834cfb3cf21421810f1f2252150ac56e2c $
      __________________________________________________________
 
    Table of Contents
@@ -96,6 +96,7 @@ Marc Huber
         5.1. LDAP Backends
 
               5.1.1. Multi-threaded LDAP Backend
+              5.1.2. Python LDAP Backend
 
         5.2. PAM back-end
         5.3. System Password Backends
@@ -3094,6 +3095,38 @@ int async 1
    needs to be be invoked via the external-mt module and is suited
    for long-lasting authentication session, e.g. due to
    multi-factor authentication.
+     __________________________________________________________
+
+5.1.2. Python LDAP Backend
+
+   mavis_tacplus_ldap.py is an LDAP back-end for the external
+   module. It uses the Python ldap3 library. This variable
+   controls TLS:
+
+     Variable  Description
+   TLS_OPTIONS
+
+   Keyword arguments of ldap3.Tls for LDAPS and StartTLS, in
+   Python syntax. The values can use the names of the Python ssl
+   module, e.g. ssl.CERT_NONE. No other Python names are
+   available. See the ldap3 SSL and TLS documentation for the
+   keys.
+
+   The back-end checks the server certificate if TLS_OPTIONS does
+   not set validate (validate=ssl.CERT_REQUIRED). The certificate
+   must chain to a CA of the system, and it must match the host
+   name in LDAP_HOSTS. ca_certs_file='/path/to/ca.pem' uses the
+   CAs in that file instead of the CAs of the system.
+   validate=ssl.CERT_NONE turns the check off.
+
+   An invalid value stops the back-end with a message on stderr,
+   e.g. a syntax error, an unknown key, an invalid validate value
+   or a ca_certs_file that does not exist. The message does not
+   show the values.
+
+   Default: unset
+
+   Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
      __________________________________________________________
 
 5.2. PAM back-end

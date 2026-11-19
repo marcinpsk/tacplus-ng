@@ -4913,6 +4913,36 @@ int async 1
         <title>Multi-threaded LDAP Backend</title>
         <para><literal>ldapmavis-mt</literal> (<emphasis>mt</emphasis> stands for <emphasis>multi-threaded</emphasis>) basically evaluates the same envrionment variables as <literal>mavis_tacplus-ng_ldap.pl</literal>. It needs to be be invoked via the <literal>external-mt</literal> module and is suited for long-lasting authentication session, e.g. due to multi-factor authentication.</para>
       </section>
+      <section>
+        <title>Python LDAP Backend</title>
+        <para><literal>mavis_tacplus_ldap.py</literal> is an LDAP back-end for the <emphasis>external</emphasis> module. It uses the Python <literal>ldap3</literal> library. This variable controls TLS:</para>
+        <informaltable frame="all">
+          <tgroup cols="2">
+            <colspec colname="col1" colnum="1" colwidth="30*"/>
+            <colspec colname="col2" colnum="2" colwidth="70*"/>
+            <thead>
+              <row>
+                <entry>Variable</entry>
+                <entry>Description</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry>
+                  <literal>TLS_OPTIONS</literal>
+                </entry>
+                <entry>
+                  <para>Keyword arguments of <literal>ldap3.Tls</literal> for LDAPS and StartTLS, in Python syntax. The values can use the names of the Python <literal>ssl</literal> module, e.g. <literal>ssl.CERT_NONE</literal>. No other Python names are available. See <ulink url="https://ldap3.readthedocs.io/en/latest/ssltls.html">the ldap3 SSL and TLS documentation</ulink> for the keys.</para>
+                  <para>The back-end checks the server certificate if <literal>TLS_OPTIONS</literal> does not set <literal>validate</literal> (<literal>validate=ssl.CERT_REQUIRED</literal>). The certificate must chain to a CA of the system, and it must match the host name in <literal>LDAP_HOSTS</literal>. <literal>ca_certs_file='/path/to/ca.pem'</literal> uses the CAs in that file instead of the CAs of the system. <literal>validate=ssl.CERT_NONE</literal> turns the check off.</para>
+                  <para>An invalid value stops the back-end with a message on stderr, e.g. a syntax error, an unknown key, an invalid <literal>validate</literal> value or a <literal>ca_certs_file</literal> that does not exist. The message does not show the values.</para>
+                  <para>Default: unset</para>
+                  <para>Example: <literal>"ca_certs_file='/etc/ssl/ldap-ca.pem'"</literal></para>
+                </entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </informaltable>
+      </section>
     </section>
     <section>
       <title>PAM back-end</title>
