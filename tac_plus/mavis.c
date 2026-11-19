@@ -227,8 +227,10 @@ static void mavis_lookup_final(tac_session * session, av_ctx * avc)
 
 		u->dynamic = io_now.tv_sec + ar->caching_period;
 
-		if ((tacclient && parse_user_profile_fmt(&sym, u, "{ client = %s }", tacclient)) ||
-		    (tacmember && parse_user_profile_fmt(&sym, u, "{ member = %s }", tacmember)) ||
+		// a malformed list fails the whole answer, as a profile that does not parse
+		if ((tacclient && parse_user_profile_list(&sym, u, S_client, tacclient)) ||
+		    (tacmember && parse_user_profile_list(&sym, u, S_member, tacmember)) ||
+		    av_lists_check(avc) > -1 ||
 		    (tacprofile && parse_user_profile_fmt(&sym, u, "%s", tacprofile))) {
 		    char *errbuf = NULL;
 		    time_t tt = (time_t) io_now.tv_sec;

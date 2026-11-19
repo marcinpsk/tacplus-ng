@@ -46,6 +46,7 @@ State, all keys optional:
   users         {name: {"password": str,
                         "member": [groups] or a string as it is,
                         "memberof": [LDAP group DNs] or a string as it is,
+                        "client": TACCLIENT as it is (tac_plus only),
                         "sshkey": str, "gid": str, "gids": str, "mustchange": bool,
                         "new_password": str,
                         "profile": the user profile (AV_A_TACPROFILE) as it is,
@@ -235,6 +236,8 @@ def serve(libdir):
             member = known.get("member")
             if member:
                 d.set_tacmember(member if isinstance(member, str) else ",".join('"%s"' % m for m in member))
+            if known.get("client"):
+                d.av_pairs[M.AV_A_TACCLIENT] = known["client"]
             memberof = known.get("memberof")
             if memberof:
                 d.set_memberof(memberof if isinstance(memberof, str) else ",".join('"%s"' % m for m in memberof))

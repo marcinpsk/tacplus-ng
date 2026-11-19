@@ -350,5 +350,79 @@ class ResolvedGroupNameInNamespace(TacPlusTestCase):
                 self.assertEqual(self.connect(d).author("bob", ["service=shell", "cmd="]).status_name, "PASS_ADD")
 
 
+class MavisListValues(TacPlusTestCase):
+    """TACMEMBER and TACCLIENT of a backend: the list values of that one attribute, taken literally."""
+
+    CONFIG = Stub.module(childs=(1, 1)) + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = admin {
+		service = shell {
+			default command = permit
+			set priv-lvl = 15
+		}
+	}
+	group = guest {
+		service = shell {
+			default command = permit
+			set priv-lvl = 1
+		}
+	}
+	group = "$${TACTEST_ENV_LITERAL}" {
+		service = shell {
+			default command = permit
+			set priv-lvl = 7
+		}
+	}
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        # the daemon gets the environment of the tests; the configuration replaces ${VAR}, so the group
+        # "$${TACTEST_ENV_LITERAL}" (template text) has the literal name ${TACTEST_ENV_GROUP}
+        for name, value in (("TACTEST_ENV_GROUP", "admin"), ("TACTEST_ENV_LITERAL", "${TACTEST_ENV_GROUP}")):
+            os.environ[name] = value
+            cls.addClassCleanup(os.environ.pop, name)
+        super().setUpClass()
+
+    count = 0
+
+    def author(self, **attributes):
+        """A user of its own for each request: the daemon keeps the users of the backend for a while."""
+        MavisListValues.count += 1
+        user = "user%d" % MavisListValues.count
+        Stub(self.daemon).set(users={user: dict(password="pw", **attributes)})
+        r = self.connect().author(user, ["service=shell", "cmd="])
+        return r.status_name, r.args
+
+    def test_list(self):
+        self.assertEqual(self.author(member='"admin"'), ("PASS_ADD", ["priv-lvl=15"]))
+        self.assertEqual(self.author(member="guest"), ("PASS_ADD", ["priv-lvl=1"]))
+
+    def test_value_is_literal(self):
+        """No ${VAR} in a value: the value names the group with the literal name."""
+        self.assertEqual(self.author(member='"${TACTEST_ENV_GROUP}"'), ("PASS_ADD", ["priv-lvl=7"]))
+
+    def pap(self, client, rem_addr):
+        MavisListValues.count += 1
+        user = "user%d" % MavisListValues.count
+        Stub(self.daemon).set(users={user: {"password": "pw", "client": client}})
+        return self.connect().pap(user, "pw", rem_addr=rem_addr).status_name
+
+    def test_client_keyword(self):
+        """TACCLIENT: a blank or a tab after "deny", as the configuration tokenizer reads them."""
+        for client in ("deny 10.0.0.0/8,0.0.0.0/0", "deny\t10.0.0.0/8,0.0.0.0/0", '"deny\t10.0.0.0/8","0.0.0.0/0"'):
+            with self.subTest(client=client):
+                self.assertEqual(self.pap(client, "10.1.2.3"), "FAIL")
+                self.assertEqual(self.pap(client, "192.0.2.1"), "PASS")
+
+    def test_value_has_only_entries_of_its_attribute(self):
+        """Text after the list is a parse error: no authorization."""
+        for member in ('"guest" member = admin', '"guest" }', '"guest",'):
+            with self.subTest(member=member):
+                self.assertNotIn(self.author(member=member)[0], ("PASS_ADD", "PASS_REPL"))
+
+
 if __name__ == "__main__":
     unittest.main()
