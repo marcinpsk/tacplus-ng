@@ -146,7 +146,7 @@ LDAP_SKIP_GROUPOFNAMES
 
 import os, sys, re, ldap3, time, calendar, socket, ssl
 from ldap3.utils.conv import escape_filter_chars
-from mavis import (Mavis,
+from mavis import (Mavis, quote_list,
 	MAVIS_DOWN, MAVIS_FINAL,
 	AV_V_RESULT_OK, AV_V_RESULT_ERROR, AV_V_RESULT_FAIL,
 	AV_V_RESULT_NOTFOUND
@@ -486,7 +486,9 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		if len(entry[LDAP_TACMEMBER]) > 0:
 			TACMEMBER.extend(entry[LDAP_TACMEMBER])
 	else:
-		D.set_memberof("\"" + "\",\"".join(L) + "\"")
+		value = quote_list(D.user, "MEMBEROF", L)
+		if value:
+			D.set_memberof(value)
 		TACMEMBER.extend([memberof_regex.sub(r'\1', l) for l in L])
 
 	if LDAP_TACMEMBER_MAP_OU != None:
@@ -509,11 +511,13 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		for e in conn.entries:
 			TACMEMBER.extend(e.cn)
 
-	if len(TACMEMBER) > 0:
-		D.set_tacmember("\"" + "\",\"".join(TACMEMBER) + "\"")
+	value = quote_list(D.user, "TACMEMBER", TACMEMBER)
+	if value:
+		D.set_tacmember(value)
 
-	if len(entry.sshPublicKey) > 0:
-		D.set_sshpubkey("\"" + "\",\"".join(entry.sshPublicKey) + "\"")
+	value = quote_list(D.user, "SSHKEY", entry.sshPublicKey)
+	if value:
+		D.set_sshpubkey(value)
 
 	# the password change comes last: a failed group search leaves the old password
 	if D.is_tacplus_chpw:
