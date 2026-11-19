@@ -29,6 +29,7 @@
 """MAVIS: the external module with the stub backend (tactest/mavis_stub.py)."""
 
 import base64
+import ctypes
 import glob
 import os
 import pwd
@@ -574,6 +575,66 @@ class ChallengeResponse(DaemonTestCase):
         """Only the challenge is unescaped: a control character in the user name from the client stays escaped."""
         prompt = self.prompt('\twelcome banner = "Hello $${user}.\\n"\n', user="otpuser\x07")
         self.assertEqual(prompt, "Hello otpuser\\007.\n\notp-md5 99 tactest\nResponse: ")
+
+
+# answers each request with OK, and also with attribute 56 (AV_A_ARRAYSIZE, one past the last attribute)
+PAST_LAST_BACKEND = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import mavis as M
+
+while True:
+	d = M.Mavis()
+	d.av_pairs[56] = "x"
+	d.write(M.MAVIS_FINAL, M.AV_V_RESULT_OK, None)
+"""
+
+
+class AttributePastLast(DaemonTestCase):
+    """An answer line with the attribute number 56: libmavis drops it and reads no attribute past the last."""
+
+    CONFIG = None
+
+    def test_login_passes(self):
+        script = self.scratch_file("backend.py", PAST_LAST_BACKEND)
+        d = self.start_daemon("""
+	mavis module = external {
+		exec = "%s" "%s" "-u" "%s" "%s"
+		childs min = 1
+		childs max = 1
+	}
+""" % (sys.executable, sys.executable, script, os.path.join(prefix(), "lib", "mavis")) + BACKEND + PERMIT)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "pw").status_name, "PASS")
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(prefix(), "lib", "libmavis.so")), "no installed libmavis.so")
+class AttributePastLastInLibrary(unittest.TestCase):
+    """av_get() and av_char_to_array() of the installed libmavis.so with the attribute number 56.
+
+    The app_cb pointer of struct av_ctx follows the attribute array, so an
+    unchecked av_get(ac, 56) returns it.
+    """
+
+    def setUp(self):
+        lib = self.lib = ctypes.CDLL(os.path.join(prefix(), "lib", "libmavis.so"))
+        lib.av_new.restype = ctypes.c_void_p
+        lib.av_new.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        lib.av_get.restype = ctypes.c_char_p
+        lib.av_get.argtypes = (ctypes.c_void_p, ctypes.c_int)
+        lib.av_char_to_array.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p)
+        lib.av_free.argtypes = (ctypes.c_void_p,)
+        self.cb = ctypes.create_string_buffer(b"a\rb")
+        self.ac = lib.av_new(ctypes.addressof(self.cb), None)
+        self.addCleanup(lib.av_free, self.ac)
+
+    def test_av_get(self):
+        self.assertIsNone(self.lib.av_get(self.ac, 56))
+
+    def test_av_char_to_array(self):
+        self.lib.av_char_to_array(self.ac, ctypes.create_string_buffer(b"56 x\n"), None)
+        self.assertEqual(self.cb.value, b"a\rb")
+        self.assertIsNone(self.lib.av_get(self.ac, 56))
 
 
 def cpu_seconds(pid):
