@@ -1732,10 +1732,6 @@ class LdapPython(LdapTests, DaemonTestCase):
     def test_group_depth(self):
         pass
 
-    @unittest.skip("without the root DSE the Python back-end does not use the generic server type")
-    def test_no_root_dse(self):
-        pass
-
     @staticmethod
     def TRUST(cafile):
         # ldap3 compares only the DNS names of the certificate with the host
@@ -1908,16 +1904,16 @@ class LdapPython(LdapTests, DaemonTestCase):
 
     @unittest.skipUnless(LINUX, "the open files of the back-end are found through /proc")
     def test_failed_server_detection_closes_the_connection(self):
-        """A failure after the first connect (no root DSE after the bind) is a backend error; the connection closes."""
+        """A failure after the first connect (the server closes it at the root DSE search) is a backend error."""
         log = self.capture_stderr("detection")
-        # the bind passes, the root DSE search of ldap3 after it does not; no StartTLS: it reads the root DSE before
-        _, d = self.start(access=ACCESS + "\nrestrict search", LDAP_SKIP_STARTTLS="1")
+        # slapd closes a bound connection at a larger request: the bind passes, the root DSE search does not
+        _, d = self.start(access=ACCESS + "\nsockbuf_max_incoming_auth 100", LDAP_SKIP_STARTTLS="1")
         self.assert_login(d, "FAIL")
         before = backend_fds(d, LDAP_PYTHON)
         for _ in range(10):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(backend_fds(d, LDAP_PYTHON), before)
-        self.assertIn("supported_features", self.stderr(log, "supported_features"))
+        self.assertIn("session terminated by server", self.stderr(log, "session terminated by server"))
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_reconnect_starts_tls(self):
@@ -1958,6 +1954,31 @@ class LdapPython(LdapTests, DaemonTestCase):
             with self.subTest(user=user), d.connect() as c:
                 self.assertEqual(c.pap(user, password).status_name, status)
         self.assertEqual([dn for dn, _ in slapd.binds()], [READER, ALICE, READER, BOB, READER, DAVE])
+
+    def test_no_root_dse(self):
+        """A server that does not give the root DSE to LDAP_USER: the generic server type, not a backend error."""
+        # the first rule denies only LDAP_USER: the back-end must not read the root DSE anonymously instead
+        cases = (("LDAP_USER denied", f'by dn.exact="{READER}" none by * read', False),
+                 ("no client, StartTLS", "by * none", True))
+        for i, (name, root_dse, starttls) in enumerate(cases):
+            with self.subTest(name):
+                if starttls and not tls.openssl_available():
+                    self.skipTest("the certificates need the openssl command")
+                log = self.capture_stderr(f"no-root-dse-{i}")
+                if starttls:
+                    ca = self.ca()
+                    slapd, d = self.start(tls=self.ldaps(ca, "security simple_bind=1\n"), starttls=True,
+                                          root_dse=root_dse, **self.TRUST(ca.cert))
+                else:
+                    slapd, d = self.start(root_dse=root_dse)
+                with d.connect() as c:
+                    r = c.ascii_login("alice", "alicepw")
+                    self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
+                with d.connect() as c:
+                    self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+                self.assertIn("no root DSE: the LDAP server type is generic", self.stderr(log))
+                if starttls:
+                    self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
 
     def test_root_dse_per_connection(self):
         """The back-end reads the root DSE on a new connection only, not after each bind."""
