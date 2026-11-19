@@ -265,7 +265,12 @@ $module
 	}
 	group netadmins { }
 	group staff { }
+	group ops { }
+	group dev { }
 	ruleset {
+		rule posix {
+			script { if (member == ops && member == dev) { motd banner = "ops and dev\\n" permit } }
+		}
 		rule wide {
 			script { if (memberof == "cn=wide-$last,ou=groups,$base") { motd banner = "wide\\n" permit } }
 		}
@@ -465,6 +470,19 @@ member: cn=xylophone,ou=groups,$base
         for name in chain:
             searches = re.findall(rf'SRCH base="cn={name},ou=groups,{BASE}" scope=0 ', log, re.IGNORECASE)
             self.assertEqual(len(searches), 1, name)
+
+    def test_posix_groups(self):
+        """kim: primary gid 1000, memberUid in ops (1002) and dev (1001); GIDS: 1000, then the server order."""
+        ldif = person("kim", "objectClass: posixAccount\nuidNumber: 2000\ngidNumber: 1000\nhomeDirectory: /home/kim\n")
+        for name, gid in (("ops", 1002), ("dev", 1001)):
+            ldif += (f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: posixGroup\ncn: {name}\ngidNumber: {gid}\n"
+                     "memberUid: kim\n")
+        log = 'log gids { destination = "$tmp/gids.log" authentication format = "$${user} gids=$${gids}" }\n'
+        _, d = self.start(ldif=ldif, policy="\t" + log + "\tauthentication log = gids\n")
+        with d.connect() as c:
+            r = c.ascii_login("kim", "kimpw")
+        self.assertIn("kim gids=1000,1002,1001\n", d.wait_log("gids", "kim gids="))
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "ops and dev\n"), r)
 
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
