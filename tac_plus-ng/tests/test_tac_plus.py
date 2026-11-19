@@ -27,6 +27,12 @@ class Smoke(TacPlusTestCase):
 		pap = clear alicepw
 		service = shell { default command = permit }
 	}
+	user = bob {
+		service = shell {
+			default command = permit
+			set priv-lvl = 15
+		}
+	}
 """
 
     def test_pap(self):
@@ -35,6 +41,11 @@ class Smoke(TacPlusTestCase):
     def test_author(self):
         r = self.connect().author("alice", ["service=shell", "cmd="])
         self.assertEqual(r.status_name, "PASS_ADD", r)
+
+    def test_author_with_an_attribute(self):
+        """The attribute trees of authorize_svc() call their compare function with the type of the tree."""
+        r = self.connect().author("bob", ["service=shell", "cmd="])
+        self.assertEqual((r.status_name, r.args), ("PASS_ADD", ["priv-lvl=15"]))
 
     def test_acct(self):
         self.assertTrue(self.connect().acct("alice", ["task_id=1", "service=shell"]).ok)
