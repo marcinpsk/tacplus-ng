@@ -705,12 +705,21 @@ class LdapPython(LdapTests, DaemonTestCase):
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
         self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
 
-    def test_starttls_settings_invalid(self):
-        """USE_STARTTLS with LDAP_SKIP_STARTTLS=1, or a LDAP_SKIP_STARTTLS that is not a number, stops the back-end."""
+    def test_connect_timeout(self):
+        """LDAP_CONNECT_TIMEOUT from the configuration reaches ldap3 as a number of seconds."""
+        _, d = self.start(LDAP_CONNECT_TIMEOUT="5")
+        self.assert_login(d, "PASS")
+
+    def test_settings_invalid(self):
+        """An invalid setting stops the back-end with a message on stderr."""
         cases = (({"USE_STARTTLS": "1", "LDAP_SKIP_STARTTLS": "1"},
                   "USE_STARTTLS and LDAP_SKIP_STARTTLS=1 contradict each other"),
                  ({"LDAP_SKIP_STARTTLS": "yes"}, "invalid LDAP_SKIP_STARTTLS: 'yes'"),
-                 ({"LDAP_SKIP_STARTTLS": ""}, "invalid LDAP_SKIP_STARTTLS: ''"))
+                 ({"LDAP_SKIP_STARTTLS": ""}, "invalid LDAP_SKIP_STARTTLS: ''"),
+                 ({"LDAP_CONNECT_TIMEOUT": "5s"}, "invalid LDAP_CONNECT_TIMEOUT: '5s'"),
+                 ({"LDAP_CONNECT_TIMEOUT": "0"}, "invalid LDAP_CONNECT_TIMEOUT: '0'"),
+                 ({"LDAP_CONNECT_TIMEOUT": "2.5"}, "invalid LDAP_CONNECT_TIMEOUT: '2.5'"),
+                 ({"LDAP_CONNECT_TIMEOUT": ""}, "invalid LDAP_CONNECT_TIMEOUT: ''"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")
