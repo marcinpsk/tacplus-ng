@@ -105,7 +105,7 @@ static int mavis_init_in(mavis_ctx *mcx)
 	UNUSED_RESULT(seteuid(mcx->euid));
 	mcx->hashfile_tmp[dirlen + 2] = '/';
 	mcx->hashfile = calloc(1, dirlen + 39 + 10 /* safety margin, see above */ );
-	memcpy(mcx->hashfile, mcx->hashfile_tmp, 36);
+	memcpy(mcx->hashfile, mcx->hashfile_tmp, dirlen + 3);
 	mcx->hashfile_offset = dirlen;
     }
 

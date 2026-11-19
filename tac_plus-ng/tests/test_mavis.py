@@ -44,7 +44,7 @@ import time
 import unittest
 
 from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
-from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env
+from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, scratch_dir
 
 BACKEND = """
 	user backend = mavis
@@ -207,8 +207,7 @@ class DaclAnsweredAtOnce(DaemonTestCase):
 """ % (DACL_NAS, DACL_SECRET) + PERMIT
 
     def test_dacl_from_the_cache_is_applied(self):
-        # a short path: tacinfo_cache keeps only 36 characters of the cache file path (libmavis_tacinfo_cache.c)
-        cache = tempfile.mkdtemp(prefix="tacinfo-", dir="/tmp")
+        cache = scratch_dir("tacinfo-cache")
         self.addCleanup(shutil.rmtree, cache)
         d = self.start_daemon(self.POLICY.replace("@CACHE@", cache), udp=True)
         stub = Stub(d)
@@ -249,7 +248,7 @@ class DaclCacheExpired(DaemonTestCase):
 
     def test_expired_cache_file_is_closed(self):
         self.assertIn("dacl cache timeout = 1", self.POLICY)
-        cache = tempfile.mkdtemp(prefix="tacinfo-", dir="/tmp")
+        cache = scratch_dir("tacinfo-cache")
         self.addCleanup(shutil.rmtree, cache)
         d = self.start_daemon(self.POLICY.replace("@CACHE@", cache), udp=True)
         stub = Stub(d)
@@ -287,9 +286,10 @@ class TacinfoCache(DaemonTestCase):
 """ % (DACL_NAS, DACL_SECRET)
 
     def start(self, **state):
-        # a short path: tacinfo_cache keeps only 36 characters of the cache file path (libmavis_tacinfo_cache.c)
-        cache = tempfile.mkdtemp(prefix="tacinfo-", dir="/tmp")
-        self.addCleanup(shutil.rmtree, cache)
+        top = scratch_dir("tacinfo-cache")
+        self.addCleanup(shutil.rmtree, top)
+        cache = os.path.join(top, "a-directory-with-a-long-name")
+        os.mkdir(cache)
         d = self.start_daemon(self.POLICY.replace("@CACHE@", cache), udp=True)
         stub = Stub(d)
         stub.set(**state)
@@ -302,6 +302,16 @@ class TacinfoCache(DaemonTestCase):
             with self.subTest(source=source):
                 download_dacl(self, d)
         self.assertEqual([e["type"] for e in stub.requests()], ["DACL"])
+
+    def test_long_directory(self):
+        """The cache works in a directory with a path longer than 36 characters."""
+        d, stub, cache = self.start(users={"bob": {"password": "pw", "memberof": ["cn=staff,dc=example"]}})
+        self.assertGreater(len(cache), 36)
+        for source in ("backend", "cache"):
+            with self.subTest(source=source):
+                self.assertEqual(self.connect(d).author("bob", ["service=shell", "cmd="]).status_name, "PASS_ADD")
+        self.assertEqual([e["type"] for e in stub.requests()], ["INFO"])
+        self.assertEqual(len(glob.glob(os.path.join(cache, "*", "*"))), 1)
 
     def test_truncated_entry_is_a_miss(self):
         """A cache file cut after a complete line is not an answer: the request goes to the backend."""
