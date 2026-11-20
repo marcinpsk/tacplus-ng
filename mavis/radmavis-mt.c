@@ -136,33 +136,11 @@ static void *run_thread(void *arg)
     if (*buf)
 	av_set(ac, AV_A_COMMENT, buf);
     if (received) {
-	if (!mfa && (group_attribute_name || group_attribute > -1)) {
-	    int remaining = sizeof(buf) - 10;
-	    char *b = buf;
-	    *b = 0;
-
-	    VALUE_PAIR *r = received;
-	    while (r) {
-		if (!strcmp(r->name, group_attribute_name) || ((int) group_attribute == (int) r->attribute)) {
-		    int len = snprintf(b, remaining, "%s\"", *buf ? "," : "");
-		    if (len > 0) {
-			b += len;
-			remaining -= len;
-			len = snprintf(b, remaining, "%s\"", r->strvalue);
-		    }
-		    if (len < 0) {
-			result = ERROR_RC;
-			*buf = 0;
-			break;
-		    }
-		    b += len;
-		    remaining -= len;
-		}
-		r = r->next;
-	    }
-	    if (*buf)
-		av_set(ac, AV_A_TACMEMBER, buf);
-	}
+	if (!mfa && (group_attribute_name || group_attribute > -1))
+	    for (VALUE_PAIR *r = received; r; r = r->next)
+		if ((!strcmp(r->name, group_attribute_name) || ((int) group_attribute == (int) r->attribute))
+		    && av_add_quoted(ac, AV_A_TACMEMBER, r->strvalue, strlen(r->strvalue)))
+		    fprintf(stderr, "user %s: TACMEMBER value skipped: the list cannot carry it\n", av_get(ac, AV_A_USER));
     }
 
     rc_avpair_free(send);
