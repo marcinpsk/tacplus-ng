@@ -3010,3 +3010,20 @@ char *mavis_decrypt_type6(char *in)
 {
     return (type6_decryptfun && type6_masterkey) ? type6_decryptfun(in, type6_masterkey) : NULL;
 }
+
+void mavis_env_set(char ***env, int *count, char *name, char *value)
+{
+    size_t name_len = strlen(name);
+    size_t len = name_len + strlen(value) + 2;
+    char *e = Xcalloc(1, len);
+    snprintf(e, len, "%s=%s", name, value);
+    for (int i = 0; i < *count; i++)
+	if (!strncmp((*env)[i], e, name_len + 1)) {
+	    free((*env)[i]);
+	    (*env)[i] = e;
+	    return;
+	}
+    *env = Xrealloc(*env, (*count + 2) * sizeof(char *));
+    (*env)[(*count)++] = e;
+    (*env)[*count] = NULL;
+}

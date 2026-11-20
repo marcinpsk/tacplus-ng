@@ -690,6 +690,7 @@ cache expire FTP = 0</screen>
                 <emphasis>Value</emphasis>
               </para>
               <para>Set environment variables.</para>
+              <para>If you set a variable more than once, the last value applies.</para>
               <para>In <emphasis>tac_plus-ng</emphasis> context the value can be type6 encoded.</para>
             </listitem>
             <listitem>
@@ -748,6 +749,7 @@ cache expire FTP = 0</screen>
                 <emphasis>Value</emphasis>
               </para>
               <para>Set environment variables.</para>
+              <para>If you set a variable more than once, the last value applies.</para>
               <para>In <emphasis>tac_plus-ng</emphasis> context the value can be type6 encoded.</para>
             </listitem>
             <listitem>

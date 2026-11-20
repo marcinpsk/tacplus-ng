@@ -142,7 +142,6 @@ setenv a = b
 #define HAVE_mavis_parse_in
 static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 {
-    size_t len;
     struct stat st;
 
     while (1) {
@@ -167,13 +166,9 @@ static int mavis_parse_in(mavis_ctx *mcx, struct sym *sym)
 		sym_get(sym);
 		if (sym->code == S_equal)
 		    sym_get(sym);
-		len = strlen(env_name) + strlen(d ? d : sym->buf) + 2;
-		mcx->env = Xrealloc(mcx->env, (mcx->envcount + 2) * sizeof(char *));
-		mcx->env[mcx->envcount] = Xcalloc(1, len);
-		snprintf(mcx->env[mcx->envcount++], len, "%s=%s", env_name, d ? d : sym->buf);
+		mavis_env_set(&mcx->env, &mcx->envcount, env_name, d ? d : sym->buf);
 		if (d)
 		    free(d);
-		mcx->env[mcx->envcount] = NULL;
 		sym->noescape = 0;
 		sym_get(sym);
 		continue;
