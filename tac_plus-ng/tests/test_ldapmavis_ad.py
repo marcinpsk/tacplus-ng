@@ -337,6 +337,11 @@ $module
 	user backend = mavis
 	login backend = mavis chpass
 	pap backend = mavis
+	authentication fallback = permit
+	user rescue {
+		fallback-only
+		password pap = clear rescuepw
+	}
 	group netadmins { }
 	group staff { }
 	group unix { }
@@ -376,15 +381,18 @@ class AdTests:
             cls.addClassCleanup(cls.domain.remove_pso, dn)
         cls.domain.create()
 
-    def start(self, url=URL, ca=None, config="", **env):
-        """Start the daemon; config goes in front of the MAVIS module, env into its setenv lines."""
+    def start(self, command=None, check=True, url=URL, ca=None, config="", **env):
+        """The daemon with the back-end of the class (or command); config goes in front of the MAVIS module.
+
+        env: more setenv lines, None unsets one.
+        """
         d = self.domain
         tls = self.env(ca or settings()["TACTEST_SAMBA_CA"])
         # the daemon reads a quoted string as slapd.conf does
-        lines = "\n".join(f"\t\tsetenv {k} = {slapd_arg(v)}" for k, v in {**tls, **env}.items())
+        lines = "\n".join(f"\t\tsetenv {k} = {slapd_arg(v)}" for k, v in {**tls, **env}.items() if v is not None)
         module = MODULE.substitute(module=self.MODULE, url=url, base=d.ou, reader=d.dn("reader"),
-                                   readerpw=d.password("reader"), env=lines, exec=self.EXEC)
-        return self.start_daemon(POLICY.substitute(module=config + module, staff=d.dn("staff")))
+                                   readerpw=d.password("reader"), env=lines, exec=command or self.EXEC)
+        return self.start_daemon(POLICY.substitute(module=config + module, staff=d.dn("staff")), check=check)
 
     def start_relay(self, refuse=None):
         """Start a Relay (refuse: see there) and the daemon with the relay as its DC; return both."""
@@ -573,15 +581,16 @@ class AdTests:
         modifies = [k for k, (_, op, value) in enumerate(events) if op == "modify" and value.lower() == dn.lower()]
         self.assertEqual(relay.refused, self.CHPW_REBIND, events)
         if self.CHPW_REBIND:
-            # the client gets FAIL also for a backend error; the log tells them apart
+            # the client gets FAIL also for a backend error
             self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "FAIL"], r)
-            line = f"\t{self.login('refused')}\ttty0\t127.0.0.1\tpassword change failed (backend error)"
-            self.wait_log("authentication", line, daemon=d)
             self.assertEqual(modifies, [], events)
             self.assertEqual(self.domain.bind_code("refused", "refused-pw"), "773")
         else:
             self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
             self.assertEqual(self.domain.bind_code("refused", "refused-new"), "")
+        # only after a backend error can the fallback-only user log in
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS" if self.CHPW_REBIND else "FAIL")
 
 
 @unittest.skipUnless(URL, SKIP_REASON)
@@ -623,16 +632,54 @@ class AdPerl(AdTests, DaemonTestCase):
 @unittest.skipUnless(URL, SKIP_REASON)
 @unittest.skipUnless(python_ldap3(), f"no ldap3 module for {PYTHON}")
 class AdPython(AdTests, DaemonTestCase):
-    """No certificate check: TLS_OPTIONS of mavis_tacplus_ldap.py cannot give ldap3 a CA."""
-
     CONFIG = None
     MODULE = "external"
     EXEC = f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
     MESSAGE = "Permission denied: %s"
-    CHECKS_CA = False
+    # ldap3 cannot match an IP address in the certificate; the certificate of the DC also names localhost
+    NAMES = "valid_names=['localhost']"
 
     def env(self, ca):
-        return {}
+        return {"TLS_OPTIONS": f"ca_certs_file={ca!r}, {self.NAMES}"}
+
+    def test_tls_server_certificate_is_checked(self):
+        """By default the back-end checks the certificate of the server: a CA it does not trust is a backend error."""
+        trusted = self.env(settings()["TACTEST_SAMBA_CA"])["TLS_OPTIONS"]
+        for options, status in ((None, "FAIL"), (self.NAMES, "FAIL"), (trusted, "PASS"),
+                                ("validate=ssl.CERT_NONE", "PASS")):
+            d = self.start(TLS_OPTIONS=options)
+            with self.subTest(options=options), d.connect() as c:
+                self.assertEqual(c.pap(self.login("alice"), "alice-pw").status_name, status)
+            with self.subTest(options=options, user="rescue"), d.connect() as c:
+                self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS" if status == "FAIL" else "FAIL")
+
+    def test_tls_options_invalid(self):
+        """An invalid TLS_OPTIONS stops the back-end with a message on stderr; the message does not show the values."""
+        # Python 3.8 and 3.9 do not name the class in the TypeError
+        unknown = r"(Tls\.)?__init__\(\) got an unexpected keyword argument 'nonsense'"
+        cases = (("nonsense=1", rf"invalid TLS_OPTIONS \(nonsense\): {unknown}"),
+                 ("local_private_key_password='s3cret', nonsense=1",
+                  rf"invalid TLS_OPTIONS \(local_private_key_password, nonsense\): {unknown}"),
+                 ("local_private_key_password=s3cret", r"invalid TLS_OPTIONS: NameError"))
+        for i, (options, message) in enumerate(cases):
+            with self.subTest(options=options):
+                log = self.scratch_file(f"python-{i}.log", "")
+                status = self.scratch_file(f"python-{i}.status", "")
+                # MAVIS logs the stderr of the back-end to syslog only; the exit status follows the complete stderr
+                script = f'#!/bin/sh\n"{PYTHON}" "{LDAP_PYTHON}" 2>>"{log}"\necho $? >>"{status}"\n'
+                wrapper = self.scratch_file(f"python-{i}.sh", script)
+                os.chmod(wrapper, 0o755)
+                # the worker starts the back-end when it starts; check=False: the back-end exits on purpose
+                self.start(command=f'"{wrapper}" "python3"', check=False, TLS_OPTIONS=options)
+                deadline = time.monotonic() + 10
+                while os.path.getsize(status) == 0 and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                with open(status) as f:
+                    self.assertEqual(f.read().split()[:1], ["1"], "the back-end did not exit with status 1")
+                with open(log) as f:
+                    text = f.read()
+                self.assertNotIn("s3cret", text)
+                self.assertRegex(text, message)
 
 
 class DomainCleanup(unittest.TestCase):
