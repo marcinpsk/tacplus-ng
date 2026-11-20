@@ -32,7 +32,7 @@ import re
 import subprocess
 import unittest
 
-from tactest import DaemonError, DaemonTestCase, config, features, tacacs
+from tactest import LINUX, DaemonError, DaemonTestCase, config, features, tacacs
 from tactest.daemon import READY_TIMEOUT, parse_only
 from tactest.detect import sanitizer_reports
 
@@ -432,6 +432,34 @@ class Type6Undecryptable(DaemonTestCase):
         # test_tls.Psk has a TLS-PSK client and the working type 6 PSK
         nas = TYPE6_NAS.replace("key = 6", "tls psk id = nas6\n\t\ttls psk key = 6")
         self.assert_rejected(nas + USERS + "type6-key = wrong\n", self.WRONG_KEY, None)
+
+
+@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+class ProfileAclCache(DaemonTestCase):
+    """The profile ACL decides also on a later request of the same connection, which gets its result from the cache."""
+
+    CONFIG = """
+	device single {
+		address = 127.0.0.3
+		key = tactest
+		single-connection = yes
+	}
+	user alice {
+		password pap = clear alicepw
+	}
+	profile locked {
+		acl { deny }
+	}
+	ruleset {
+		rule { script { profile = locked permit } }
+	}
+"""
+
+    def test_second_request(self):
+        c = self.connect(source="127.0.0.3", single_connect=True)
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(c.pap("alice", "alicepw").status_name, "FAIL")
 
 
 if __name__ == "__main__":

@@ -2722,8 +2722,8 @@ static void cache_user_profile(tac_session *session, enum token res)
     session->ctx->user_profile_cache[j].valid_until = io_now.tv_sec + 120;
 }
 
-// A cache hit skips the profile acl, too. Keep the motd banner it may have set.
-static void cache_user_profile_motd(tac_session *session)
+// A cache hit skips the profile acl, too. Keep its result and the motd banner it may have set.
+static void cache_user_profile_acl(tac_session *session, enum token res)
 {
     if (!session->user || session->user_is_session_specific)
 	return;
@@ -2734,6 +2734,7 @@ static void cache_user_profile_motd(tac_session *session)
 	    && session->ctx->user_profile_cache[i].serial == session->user->serial
 	    && session->ctx->user_profile_cache[i].valid_until >= io_now.tv_sec) {
 	    session->ctx->user_profile_cache[i].motd_banner = session->motd_banner;
+	    session->ctx->user_profile_cache[i].res = res;
 	    return;
 	}
 }
@@ -2804,7 +2805,9 @@ enum token eval_ruleset(tac_session *session, tac_realm *realm)
     res = eval_ruleset_r(session, realm, session->ctx->realm->script_realm_parent_first);
     if (res == S_permit && session->profile && session->profile->acl) {
 	res = eval_profile_acl(session, session->profile, session->ctx->realm->script_realm_parent_first);
-	cache_user_profile_motd(session);
+	if (res != S_permit)
+	    res = S_deny;
+	cache_user_profile_acl(session, res);
     }
     if (res == S_permit)
 	return res;
