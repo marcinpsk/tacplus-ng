@@ -134,16 +134,8 @@ while ($in = <>) {
 
 		$V[AV_A_TACMEMBER] = undef;
 		if (defined $RADIUS_GROUP_ATTR) {
-			for my $a ($radius->get_attributes()) {
-				if ($a->{'Name'} eq $RADIUS_GROUP_ATTR) {
-					next if $a->{'Value'} =~ /^CACS:/;
-					if (defined($V[AV_A_TACMEMBER])) {
-						$V[AV_A_TACMEMBER] .= "," .$a->{'Value'};
-					} else {
-						$V[AV_A_TACMEMBER] = $a->{'Value'};
-					}
-				}
-			}
+			my @M = map { $_->{'Value'} } grep { $_->{'Name'} eq $RADIUS_GROUP_ATTR && $_->{'Value'} !~ /^CACS:/ } $radius->get_attributes();
+			$V[AV_A_TACMEMBER] = quote_list('TACMEMBER', $V[AV_A_USER], @M) if @M;
 		}
 
 		$V[AV_A_RESULT] = AV_V_RESULT_OK;

@@ -6,6 +6,7 @@ For the answers B does not give -- none at all, an Access-Challenge --
 a RADIUS responder of the test takes the place of B. The tests of a
 timeout and a challenge that must not open the fallback run with
 radmavis (one request at a time, module "external") as well.
+RadmavisListValues does the same for test_list_values.
 
 A backend error opens the fallback of the realm ("authentication
 fallback period"): the fallback-only user rescue can log in. As
@@ -44,10 +45,15 @@ SERVER = string.Template("""
 	user alice { password login = clear alicepw }
 	user bob { password login = clear bobpw }
 	user carol { password login = clear carolpw }
+	user dan { password login = clear danpw }
+	user erin { password login = clear erinpw }
 	profile reply {
 		script {
 			if (user == carol) permit
 			if (user == alice) set radius[Class] = "netadmins"
+			# a quote and a comma, a line break: the characters of the TACMEMBER list
+			if (user == dan) set radius[Class] = "x\\",\\"netadmins"
+			if (user == erin) set radius[Class] = "x\\nnetadmins"
 			set radius[Reply-Message] = "welcome"
 			permit
 		}
@@ -239,6 +245,18 @@ class RadiusServer(FailedLogin, RadmavisTestCase):
                 r = c.ascii_login(user, password)
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
+    def test_list_values(self):
+        """A quote, a comma or a line break in a Class value stays in that one value of TACMEMBER.
+
+        dan is not a member of netadmins, and erin can log in (the backend
+        skips her value).
+        """
+        _, a = self.start_pair()
+        for user in ("dan", "erin"):
+            with self.subTest(user=user), a.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+
     def test_access_accept_without_attributes(self):
         """B adds no attribute for carol, and radcli keeps no Message-Authenticator: radmavis-mt gets no pairs.
 
@@ -283,6 +301,15 @@ class Radmavis(FailedLogin, RadmavisTestCase):
     """The same with radmavis, in "mavis module = external"."""
 
     BACKEND = RADMAVIS
+
+
+@unittest.skipUnless(os.path.exists(RADMAVIS), "the build has no radmavis (radcli missing)")
+class RadmavisListValues(RadmavisTestCase):
+    """radmavis and the external module, test_list_values only."""
+
+    BACKEND = RADMAVIS
+    start_pair = RadiusServer.start_pair
+    test_list_values = RadiusServer.test_list_values
 
 
 if __name__ == "__main__":

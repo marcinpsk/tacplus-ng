@@ -200,23 +200,14 @@ int main(int argc, char **argv)
 		    printf("%d %s\n", AV_A_COMMENT, buf);
 		if (received && !mfa && (group_attribute_name || group_attribute > -1)) {
 		    // check for group attributes
-		    int mc = 0;
-		    VALUE_PAIR *r = received;
-		    while (r) {
-			if (!strcmp(r->name, group_attribute_name) || ((int) group_attribute == (int) r->attribute)) {
-			    if (strncmp("CACS:", r->strvalue, 4)) {
-				if (!mc)
-				    printf("%d ", AV_A_TACMEMBER);
-				else
-				    printf(",");
-				printf("\"%s\"", r->strvalue);
-				mc++;
-			    }
-			}
-			r = r->next;
-		    }
-		    if (mc)
-			printf("\n");
+		    av_ctx *ac = av_new(NULL, NULL);
+		    for (VALUE_PAIR *r = received; r; r = r->next)
+			if ((!strcmp(r->name, group_attribute_name) || ((int) group_attribute == (int) r->attribute))
+			    && strncmp("CACS:", r->strvalue, 4) && av_add_quoted(ac, AV_A_TACMEMBER, r->strvalue, strlen(r->strvalue)))
+			    fprintf(stderr, "user %s: TACMEMBER value skipped: the list cannot carry it\n", user);
+		    if (av_get(ac, AV_A_TACMEMBER))
+			printf("%d %s\n", AV_A_TACMEMBER, av_get(ac, AV_A_TACMEMBER));
+		    av_free(ac);
 		}
 
 	    } else
