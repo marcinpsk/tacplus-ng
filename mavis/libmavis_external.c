@@ -75,9 +75,10 @@ static const char rcsid[] __attribute__((used)) = "$Id$";
 struct context {
     mavis_ctx *mcx;
     pid_t pid;
-    char b_in[66536];
+    char *b_in;
     char b_out[66536];
     char b_err[8192];
+    size_t b_in_size;
     size_t b_in_len;
     size_t b_out_len;
     size_t b_err_len;
@@ -177,6 +178,7 @@ static void free_context(void *c)
 	io_close(ctx->mcx->io, ctx->fd_in);
     if (ctx->fd_out > -1)
 	io_close(ctx->mcx->io, ctx->fd_out);
+    free(ctx->b_in);
     free(ctx);
 }
 
@@ -367,6 +369,7 @@ static void mavis_drop_in(mavis_ctx *mcx)
 
 	    av_free(mcx->cx[i]->ac);
 
+	    free(mcx->cx[i]->b_in);
 	    free(mcx->cx[i]);
 	}
 
@@ -458,8 +461,10 @@ static void child_died(struct context *ctx, int cur __attribute__((unused)))
 	    start_query(ctx->mcx->cx[i]);
 	}
 
-	if (ctx->fd_err < 0)
+	if (ctx->fd_err < 0) {
+	    free(ctx->b_in);
 	    free(ctx);
+	}
 
 	DebugOut(DEBUG_PROC);
     }
@@ -470,7 +475,12 @@ static void read_from_child(struct context *ctx, int cur)
     ssize_t len;
     DebugIn(DEBUG_MAVIS);
 
-    len = Read(ctx->fd_in, ctx->b_in + ctx->b_in_len, sizeof(ctx->b_in) - ctx->b_in_len - 1);
+    // an answer can be larger than 64 KB (a user in many groups): grow the buffer, never read 0 bytes
+    if (ctx->b_in_size - ctx->b_in_len < 2) {
+	ctx->b_in_size = ctx->b_in_size ? 2 * ctx->b_in_size : 65536;
+	ctx->b_in = Xrealloc(ctx->b_in, ctx->b_in_size);
+    }
+    len = Read(ctx->fd_in, ctx->b_in + ctx->b_in_len, ctx->b_in_size - ctx->b_in_len - 1);
 
     if (len > 0) {
 	char *t;
