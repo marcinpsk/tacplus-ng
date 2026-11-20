@@ -84,7 +84,8 @@ static void mavis_switch(tac_session *session, av_ctx *avc, int result)
 	    if (session->user->avc)
 		av_free(session->user->avc);
 	    session->user->avc = avc;
-	}
+	} else
+	    av_free(avc);
 	session->mavis_data->mavisfn(session);
 	break;
     case MAVIS_TIMEOUT:
@@ -309,8 +310,22 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
     if ((t = av_get(avc, AV_A_TYPE)) && !strcmp(t, AV_V_TYPE_TACPLUS) &&	//
 	(t = av_get(avc, AV_A_TACTYPE)) && !strcmp(t, session->mavis_data->mavistype) &&	//
 	(t = av_get(avc, AV_A_USER)) && !strcmp(t, session->username.txt) &&	//
-	(t = av_get(avc, AV_A_TIMESTAMP)) && (atoi(t) == session->session_id) &&	//
-	(result = av_get(avc, AV_A_RESULT)) && !strcmp(result, AV_V_RESULT_OK)) {
+	(t = av_get(avc, AV_A_TIMESTAMP)) && (atoi(t) == session->session_id))
+	result = av_get(avc, AV_A_RESULT);
+
+    // password changes are supported for ASCII login and CHPASS only
+    if (result && !strcmp(result, AV_V_RESULT_OK) && av_get(avc, AV_A_PASSWORD_MUSTCHANGE) && !session->passwd_changeable) {
+	if (strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_INFO)) {
+	    tac_user *u = lookup_user(session);
+	    // expire the cached user: its cached password must not log in without the change
+	    if (u && u->dynamic)
+		u->dynamic = 1;
+	    result = AV_V_RESULT_FAIL;
+	}
+	av_set(avc, AV_A_PASSWORD_MUSTCHANGE, NULL);
+    }
+
+    if (result && !strcmp(result, AV_V_RESULT_OK)) {
 
 	if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_MFA))
 	    session->mavisauth_res = S_permit;
@@ -393,7 +408,8 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 		    default:;
 		    }
 
-		if (r->caching_period) {
+		// a refused user must not log in from the cache with the password of its profile
+		if (r->caching_period && session->mavisauth_res != S_deny) {
 		    if (!r->usertable)
 			r->usertable = RB_tree_new(compare_name, (void (*)(void *)) free_user);
 		    RB_insert(r->usertable, u);
@@ -419,11 +435,6 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	}
 
 	session->passwd_mustchange = av_get(avc, AV_A_PASSWORD_MUSTCHANGE) ? 1 : 0;
-	// password changes are supported for ASCII login and CHPASS only
-	if (session->passwd_mustchange && !session->passwd_changeable) {
-	    session->passwd_mustchange = 0;
-	    av_set(avc, AV_A_RESULT, AV_V_RESULT_FAIL);
-	}
 
 	t = av_get(avc, AV_A_PASSWORD_EXPIRY);
 	if (t)
@@ -441,7 +452,9 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 	    return;
 	}
 
-	if (!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_AUTH) || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHPW)) {
+	// S_deny: the profile conflicts with MAVIS authentication
+	if ((!strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_AUTH) || !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_CHPW))
+	    && session->mavisauth_res != S_deny) {
 	    session->mavisauth_res = S_permit;
 	    if (u->dynamic && (TRISTATE_YES != u->chalresp) && session->password && !u->passwd_oneshot) {
 		char *pass = session->password_new ? session->password_new : session->password;
@@ -502,6 +515,7 @@ static void mavis_ctx_switch(struct context *ctx, av_ctx *avc, int result)
     case MAVIS_FINAL:
 	ctx->mavis_pending = 0;
 	mavis_ctx_lookup_final(ctx, avc);
+	av_free(avc);
 	ctx->mavis_data->mavisfn(ctx);
 	break;
     case MAVIS_TIMEOUT:
@@ -758,7 +772,8 @@ static void mavis_dacl_switch(tac_session *session, av_ctx *avc, int result)
 	    if (session->user->avc)
 		av_free(session->user->avc);
 	    session->user->avc = avc;
-	}
+	} else
+	    av_free(avc);
 	session->mavis_data->mavisfn(session);
 	break;
     case MAVIS_TIMEOUT:

@@ -35,6 +35,7 @@ import pwd
 import re
 import resource
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -42,9 +43,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
-from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env
+from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
 	user backend = mavis
@@ -683,6 +685,206 @@ class ChallengeResponse(DaemonTestCase):
         """Only the challenge is unescaped: a control character in the user name from the client stays escaped."""
         prompt = self.prompt('\twelcome banner = "Hello $${user}.\\n"\n', user="otpuser\x07")
         self.assertEqual(prompt, "Hello otpuser\\007.\n\notp-md5 99 tactest\nResponse: ")
+
+
+SHADOW = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_shadow.pl")
+
+
+class MustChangeWithoutDialog(DaemonTestCase):
+    """The backend answers OK with PASSWORD_MUSTCHANGE to a login that has no dialog for a new password.
+
+    Only ASCII login and CHPASS can change a password. For PAP and CHAP
+    the daemon set the MAVIS result to FAIL, but permitted the login
+    anyway and cached the password. mavis_tacplus_shadow.pl sends
+    PASSWORD_MUSTCHANGE for an expired password whatever the caller can do.
+    """
+
+    CONFIG = None
+    MESSAGE = "Please change your password."
+
+    def daemon_and_stub(self, policy=BACKEND, template=config.BASE):
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + policy + PERMIT, template=template)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, message=self.MESSAGE)
+        return d, stub
+
+    def test_pap_fails_and_caches_nothing(self):
+        template = config.BASE.replace("mavis cache timeout = 0", "mavis cache timeout = 60")
+        d, stub = self.daemon_and_stub(template=template)
+        for _ in range(2):
+            with d.connect() as c:
+                r = c.pap("alice", "pw")
+            self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        # the second login was not answered from the cache
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK"), ("AUTH", "ACK")])
+
+    def test_pap_fails_and_drops_the_cached_login_password(self):
+        """An ASCII login cached the password before it expired; the next ASCII login must ask the backend again."""
+        template = config.BASE.replace("mavis cache timeout = 0", "mavis cache timeout = 60")
+        d, stub = self.daemon_and_stub(policy=BACKEND.replace("login backend = mavis", "login backend = mavis chpass"),
+                                       template=template)
+        stub.set(users={"alice": {"password": "pw"}})
+        with d.connect() as c:
+            self.assertEqual(c.ascii_login("alice", "pw").statuses, ["GETPASS", "PASS"])
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, message=self.MESSAGE)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "pw").status_name, "FAIL")
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH", "AUTH", "AUTH", "CHPW"])
+
+    def test_chap_fails(self):
+        d, stub = self.daemon_and_stub(policy=BACKEND + "\tchap backend = mavis\n")
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, result={"CHAP": "ACK"})
+        with d.connect() as c:
+            self.assertEqual(c.chap("alice", "pw").status_name, "FAIL")
+        self.assertEqual([e["type"] for e in stub.requests()], ["INFO", "CHAP"])
+
+    def test_ascii_login_still_changes_the_password(self):
+        d, stub = self.daemon_and_stub(policy=BACKEND.replace("login backend = mavis", "login backend = mavis chpass"))
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH", "CHPW"])
+
+    @unittest.skipUnless(shutil.which("perl"), "the backend is a Perl script")
+    def test_expired_shadow_password(self):
+        """lastchange 0 in the shadow file: the password has expired."""
+        shadow = self.scratch_file("shadow", "alice:%s:0:0:99999:7:::\n" % crypt_md5("pw"))
+        d = self.start_daemon("""
+	mavis module = external {
+		setenv SHADOWFILE = "%s"
+		exec = "%s"
+	}
+""" % (shadow, SHADOW) + BACKEND.replace("login backend = mavis", "login backend = mavis chpass") + PERMIT)
+        with d.connect() as c:
+            r = c.pap("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "new").status_name, "PASS")
+
+
+class ProfileConflict(DaemonTestCase):
+    """The backend authenticates the user, but the profile it sends sets a password that is not "mavis".
+
+    The daemon logged the conflict and set S_deny, but then permitted the
+    login anyway.
+    """
+
+    CONFIG = Stub.module(childs=(1, 1)) + BACKEND + PERMIT
+
+    def test_profile_with_its_own_password_fails(self):
+        Stub(self.daemon).set(users={"alice": {"password": "pw", "profile": "{ password pap = clear other }"}})
+        self.assertEqual(self.connect().pap("alice", "pw").status_name, "FAIL")
+        self.wait_log("authentication", "pap login failed")
+
+    def test_cached_profile_password_does_not_log_in(self):
+        """With a cache timeout, the refused user was cached with the clear text password of its profile."""
+        d = self.start_daemon(self.CONFIG, template=config.BASE.replace("mavis cache timeout = 0", "mavis cache timeout = 60"))
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "profile": "{ password pap = clear other }"}})
+        for password in ("pw", "other"):
+            with self.subTest(password=password), d.connect() as c:
+                self.assertEqual(c.pap("alice", password).status_name, "FAIL")
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK"), ("AUTH", "NAK")])
+
+
+@unittest.skipUnless(LINUX and "address" in sanitizers(), "LeakSanitizer needs an AddressSanitizer build on Linux")
+class MavisAnswerFreed(DaemonTestCase):
+    """mavis_switch() and mavis_dacl_switch() freed the MAVIS answer only when a user took it, mavis_ctx_switch() never."""
+
+    CONFIG = None
+
+    def start(self, policy, **kw):
+        # the slow unwinder finds av_new() in the stack through the module
+        with mock.patch.dict(os.environ, {"ASAN_OPTIONS": "detect_leaks=1:fast_unwind_on_malloc=0"}):
+            return self.start_daemon(Stub.module(childs=(1, 1)) + BACKEND + policy + PERMIT, check=False, **kw)
+
+    def worker(self, d):
+        """The one worker, as (pid, starttime): leaked_answers() checks that the same process ends."""
+        (worker,) = d.workers().items()
+        return worker
+
+    def leaked_answers(self, d, worker):
+        """The LeakSanitizer reports of av_new() of the worker, after it exits."""
+        self.assertEqual(self.worker(d), worker)
+        pid, start = worker
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 30
+        while daemon_alive(pid, start) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(daemon_alive(pid, start), "worker %d did not exit" % pid)
+        report = ""
+        for path in glob.glob(os.path.join(d.tmp, "*san.%d" % pid)):
+            with open(path) as f:
+                report += f.read()
+        # the configuration pools always leak: a complete, symbolized report has them
+        for text in ("ERROR: LeakSanitizer", " in main ", "SUMMARY: AddressSanitizer"):
+            self.assertIn(text, report)
+        return [b for b in re.split(r"\n(?=(?:Direct|Indirect) leak)", report) if " in av_new " in b]
+
+    def test_refused_logins_free_the_answer(self):
+        d = self.start("")
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}, "bob": {"password": "pw"}})
+        worker = self.worker(d)
+        for user, password in (("alice", "pw"), ("bob", "wrong"), ("nobody", "pw")):
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, "FAIL")
+        self.assertEqual([e["result"] for e in stub.requests(type="AUTH")], ["ACK", "NAK", "NOTFOUND"])
+        self.assertEqual(self.leaked_answers(d, worker), [])
+
+    def test_host_lookups_free_the_answer(self):
+        d = self.start("""
+	device mavis6 {
+		address = 127.0.0.6
+		mavis backend = yes
+	}
+	user alice {
+		password pap = clear alicepw
+	}
+""")
+        stub = Stub(d)
+        stub.set(hosts={"127.0.0.6": "{ key = hostkey }"})
+        worker = self.worker(d)
+        for _ in range(3):
+            with d.connect(source="127.0.0.6", key="hostkey") as c:
+                self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+        self.assertEqual([e["result"] for e in stub.requests(type="HOST")], ["ACK", "ACK", "ACK"])
+        self.assertEqual(self.leaked_answers(d, worker), [])
+
+    def test_dacl_downloads_free_the_answer(self):
+        d = self.start("""
+	include = "%s"
+	device radius-nas {
+		address = %s
+		radius.key = %s
+	}
+""" % (os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg"), DACL_NAS, DACL_SECRET))
+        stub = Stub(d)
+        stub.set(dacls={"demoacl": '{ data = "%s" }' % DACL_ACE})
+        worker = self.worker(d)
+        event = b"aaa:event=acl-download"
+        # RADIUS/TCP: the context ends with the connection, a UDP context lives for at least 60 s
+        c = self.radius(DACL_SECRET, daemon=d, source=DACL_NAS, tcp=True)
+        for name in ("demoacl", "demoacl", "unknown"):
+            r = c.access_request("#ACSACL#%s-00000000" % name, "", message_authenticator=True,
+                                 attributes=[(VENDOR_SPECIFIC, struct.pack("!IBB", CISCO_VENDOR, 1, len(event) + 2) + event)])
+            with self.subTest(name=name):
+                self.assertEqual(r.code_name, "Access-Accept" if name == "demoacl" else "Access-Reject", r)
+        c.close()
+        self.assertEqual([e["result"] for e in stub.requests(type="DACL")], ["ACK", "ACK", "NOTFOUND"])
+        self.assertEqual(self.leaked_answers(d, worker), [])
+
+
+def crypt_md5(password):
+    """An MD5-crypt hash from the crypt() of Perl (the crypt module of Python is gone in 3.13)."""
+    return subprocess.run(["perl", "-e", "print crypt($ARGV[0], q($1$tactest$))", password],
+                          check=True, capture_output=True, text=True).stdout
 
 
 def cpu_seconds(pid):
