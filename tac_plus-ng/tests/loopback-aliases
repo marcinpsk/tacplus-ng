@@ -1,0 +1,28 @@
+#!/bin/sh
+# Add the 127.0.0.0/8 addresses of the tests to lo0 (FreeBSD, OpenBSD; run as root).
+#
+# Linux makes all of 127.0.0.0/8 local. The BSDs have only 127.0.0.1 on lo0,
+# so a test that binds another loopback source fails there. The addresses
+# come from the tests themselves: 127.0.0.2-254, and each other 127.x.y.z
+# address that a test names (network addresses ending in .0 excepted).
+
+set -e
+
+TESTS=$(cd "$(dirname "$0")" && pwd)
+
+addrs() {
+	i=2
+	while [ $i -le 254 ]; do
+		echo 127.0.0.$i
+		i=$((i + 1))
+	done
+	grep -ohE '127\.[0-9]+\.[0-9]+\.[0-9]+' "$TESTS"/*.py "$TESTS"/tactest/*.py | grep -v '\.0$'
+}
+
+n=0
+for a in $(addrs | sort -u); do
+	[ "$a" = 127.0.0.1 ] && continue
+	ifconfig lo0 inet "$a/32" alias
+	n=$((n + 1))
+done
+echo "loopback-aliases: $n addresses on lo0"
