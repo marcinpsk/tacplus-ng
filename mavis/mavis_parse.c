@@ -1726,7 +1726,7 @@ void add_token_to_alias(struct token_list **p, struct sym *sym)
     while (*p)
 	p = &(*p)->next;
     len = strlen(sym->buf);
-    n = calloc(1, sizeof(struct alias) + len);
+    n = calloc(1, sizeof(struct token_list) + len);
     n->code = sym->code;
     memcpy(n->buf, sym->buf, len + 1);
     n->line = sym->line;
