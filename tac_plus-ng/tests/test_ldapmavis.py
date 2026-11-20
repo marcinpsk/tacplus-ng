@@ -48,7 +48,7 @@ $modules
 pidfile $pidfile
 argsfile $argsfile
 
-access to dn.base="" by * read
+access to dn.base="" $root_dse
 access to dn.base="cn=Subschema" by * read
 access to attrs=userPassword by self write by anonymous auth by * none
 access to * by users read by * none
@@ -185,7 +185,8 @@ def perl_ldap():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, root_dse="by * read"):
+        """root_dse: the "by" clauses of the root DSE."""
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
         self.dir = directory
@@ -201,7 +202,8 @@ class Slapd:
         paths.update(pidfile=os.path.join(directory, "slapd.pid"), argsfile=os.path.join(directory, "slapd.args"),
                      db=os.path.join(directory, "db"))
         with open(self.conf, "w") as f:
-            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), base=BASE))
+            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(),
+                                          root_dse=root_dse, base=BASE))
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
@@ -286,10 +288,11 @@ $module
 class LdapTests:
     """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
-    def start(self, **env):
-        """Start slapd and the daemon; env: more environment variables for the back-end."""
+    def start(self, root_dse="by * read", **env):
+        """Start slapd and the daemon; root_dse: see Slapd, env: more environment variables for the back-end."""
         # a directory of its own for every slapd: a test may start more than one
-        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))))
+        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))),
+                      root_dse)
         self.addCleanup(slapd.stop)
         slapd.start()
         extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
@@ -359,6 +362,15 @@ class LdapTests:
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
 
+    def test_no_root_dse(self):
+        """A server that does not give the root DSE to LDAP_USER: the generic server type, not a backend error."""
+        _, d = self.start(root_dse=f'by dn.exact="{READER}" none by * read')
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+            self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
@@ -374,10 +386,62 @@ class LdapMt(LdapTests, DaemonTestCase):
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
+    # with a file name, the back-end runs through a script that writes its stderr there; MAVIS logs it to syslog only
+    stderr_log = None
 
     def module(self, url, extra):
-        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra,
-                                 exec=f'"{PERL}" "perl" "{LDAP_PERL}"')
+        exe = f'"{PERL}" "perl" "{LDAP_PERL}"'
+        if self.stderr_log:
+            script = self.scratch_file("perl-ldap.sh",
+                                       f'#!/bin/sh\nexec "{PERL}" "{LDAP_PERL}" 2>>"{self.stderr_log}"\n')
+            os.chmod(script, 0o755)
+            exe = f'"{script}" "perl-ldap.sh"'
+        return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra, exec=exe)
+
+    def test_no_root_dse_message(self):
+        """Without the root DSE the back-end writes one line to stderr."""
+        self.stderr_log = self.scratch_file("perl-ldap.log", "")
+        _, d = self.start(root_dse=f'by dn.exact="{READER}" none by * read')
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+        with open(self.stderr_log, errors="replace") as f:
+            self.assertIn("no root DSE: the LDAP server type is generic", f.read())
+
+
+@unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
+@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
+class LdapPerlNoRootDse(DaemonTestCase):
+    """mavis_tacplus_ldap.pl with LDAP_SERVER_TYPE = generic, and a root DSE that the user cannot read."""
+
+    CONFIG = None
+
+    def test_no_root_dse_password_change(self):
+        """A server that does not give the root DSE to the user: the password change without the extension."""
+        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))),
+                      f'by dn.exact="uid=carol,ou=people,{BASE}" none by * read')
+        self.addCleanup(slapd.stop)
+        slapd.start()
+        d = self.start_daemon(f"""
+	mavis module = external {{
+		setenv LDAP_SERVER_TYPE = "generic"
+		setenv LDAP_HOSTS = "{slapd.url}"
+		setenv LDAP_BASE = "{BASE}"
+		setenv LDAP_USER = "{READER}"
+		setenv LDAP_PASSWD = "readerpw"
+		setenv FLAG_CHPW = "1"
+		exec = "{PERL}" "perl" "{LDAP_PERL_OLD}"
+	}}
+	user backend = mavis
+	login backend = mavis chpass
+	pap backend = mavis
+	ruleset {{ rule {{ script {{ permit }} }} }}
+""")
+        with d.connect() as c:
+            r = c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+        for password, status in (("newpw", "PASS"), ("carolpw", "FAIL")):
+            with self.subTest(password=password), d.connect() as c:
+                self.assertEqual(c.pap("carol", password).status_name, status)
 
 
 # mavis_tacplus_ldap.pl; one child, so a change of its state shows in its next request

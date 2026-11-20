@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 773cfc3e0d5b8522d5334d67fe9cdbc49119f2e5 $
+   $Id: 501b24220104bd1c9c38bb886f5c044debdd2045 $
      __________________________________________________________
 
    Table of Contents
@@ -2977,8 +2977,11 @@ int async 1
    mavis_tacplus-ng_ldap.pl is an authentication/authorization
    back-end for the external module. It interfaces to various
    kinds of LDAP servers, e.g. OpenLDAP, Fedora DS and Active
-   Directory. The server type is detected automatically. Its
-   behaviour is controlled by a list of environmental variables:
+   Directory. The server type is detected automatically from the
+   root DSE. If the server does not give the root DSE to
+   LDAP_USER, the server type is generic and the back-end does not
+   change passwords on it. A message goes to stderr. Its behaviour
+   is controlled by a list of environmental variables:
 
            Variable        Description
    LDAP_HOSTS

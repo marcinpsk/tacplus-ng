@@ -4698,7 +4698,9 @@ int async 1
       <para><literal>mavis_tacplus-ng_ldap.pl</literal> is an
         authentication/authorization back-end for the
         <emphasis>external</emphasis> module. It interfaces to various kinds
-        of LDAP servers, e.g. OpenLDAP, Fedora DS and Active Directory. The server type is detected automatically. Its
+        of LDAP servers, e.g. OpenLDAP, Fedora DS and Active Directory. The server type is detected automatically
+        from the root DSE. If the server does not give the root DSE to <literal>LDAP_USER</literal>, the server
+        type is generic and the back-end does not change passwords on it. A message goes to stderr. Its
         behaviour is controlled by a list of environmental variables:</para>
       <informaltable frame="all">
         <tgroup cols="2">
