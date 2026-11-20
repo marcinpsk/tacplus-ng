@@ -1911,7 +1911,7 @@ static int dtls_record_type(u_int versions, u_char *buf, size_t len)
     if (len < TLS_PEEK_LEN || (buf[0] != 0x16 && buf[0] != 0x17) || buf[1] != 0xfe)
 	return 0;
     // the record of a DTLS 1.2 ClientHello may carry version DTLS 1.0 (RFC 6347 4.1)
-    if (dtls_ver_ok(versions, buf[2]) || (buf[0] == 0x16 && buf[2] == (DTLS1_VERSION & 0xff)))
+    if (dtls_ver_ok(versions, buf[2]) || (versions && buf[0] == 0x16 && buf[2] == (DTLS1_VERSION & 0xff)))
 	return buf[0];
     return 0;
 }

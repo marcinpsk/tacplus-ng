@@ -840,6 +840,19 @@ class DtlsMinimumVersionRealmAutoDetect(DtlsMinimumVersion):
             self.request("plain", "-dtls1")
 
 
+class DtlsAutoDetectWithoutVersions(TlsTestCase):
+    """Realm auto-detection on a plain UDP listener, "tls psk = yes" and no certificate: no DTLS versions."""
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP"}
+    BODY = None
+
+    def test_dtls10_record_keeps_the_least_recently_used_connection(self):
+        """The record version DTLS 1.0 of a ClientHello counts only next to DTLS versions."""
+        self.assertDatagramsKeepTheConnection(PSK + DEVICES + RADSEC + "\ttls auto-detect = yes\n",
+                                              (("ClientHello record of DTLS 1.0", b"\x16\xfe\xff" + bytes(17)),))
+
+
 class DtlsVersionKeywords(unittest.TestCase):
     """spawnd "tls = DTLSv1.0" is a parse error; DTLSv1.2 is the oldest DTLS version."""
 
