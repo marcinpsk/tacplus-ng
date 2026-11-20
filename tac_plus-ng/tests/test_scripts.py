@@ -175,7 +175,7 @@ class RadiusConditions(DaemonTestCase):
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
 @unittest.skipUnless("pcre2" in features(), "rewrite profiles need PCRE2")
 class Rewrite(DaemonTestCase):
-    """The rewrite profile of a device script changes the user name before the daemon looks up the user to log in.
+    """The rewrite profile of a device script changes the user name before the daemon looks up the user.
 
     The first rule that matches wins. "rewritten-only" lets a user log in
     only under a name that a rewrite changed. user.original is the name
@@ -197,6 +197,7 @@ class Rewrite(DaemonTestCase):
 		script {
 			rewrite user = names
 			if (user.original == root) deny
+			set tactest-device = yes
 		}
 	}
 	user bob {
@@ -208,10 +209,12 @@ class Rewrite(DaemonTestCase):
 		password pap = login
 		rewritten-only
 	}
+	profile shell { script { if (service == shell) permit } }
 	ruleset {
 		rule {
 			script {
 				if (user.original == toor) deny
+				profile = shell
 				permit
 			}
 		}
@@ -245,6 +248,27 @@ class Rewrite(DaemonTestCase):
 
     def test_user_original_in_the_ruleset(self):
         self.assertEqual(self.pap("toor", "alicepw"), "FAIL")
+
+    def author(self, user, source=DEVICE):
+        return self.connect(source=source).author(user, ["service=shell", "cmd="]).status_name
+
+    def test_authorization_of_a_rewritten_name(self):
+        """There is no user admin: authorization finds alice under the rewritten name."""
+        self.assertEqual(self.author("admin"), "PASS_ADD")
+        self.assertEqual(self.author("ops-bob"), "PASS_ADD")
+        self.assertEqual(self.author("admin", source="127.0.0.1"), "FAIL")
+
+    def test_authorization_runs_the_other_device_script_actions_once(self):
+        r = self.connect(source=self.DEVICE).author("admin", ["service=shell", "cmd="])
+        self.assertEqual((r.status_name, r.args), ("PASS_ADD", ["tactest-device=yes"]), r)
+
+    def test_authorization_of_a_rewritten_only_user(self):
+        self.assertEqual(self.author("Shared"), "PASS_ADD")
+        self.assertEqual(self.author("shared"), "FAIL")
+
+    def test_user_original_in_authorization(self):
+        self.assertEqual(self.author("root"), "FAIL")
+        self.assertEqual(self.author("toor"), "FAIL")
 
 
 def users(*names):
