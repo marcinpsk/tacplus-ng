@@ -379,12 +379,14 @@ class Daemon:
         """
         ports = list(ports)
         for _ in range(START_ATTEMPTS):
-            self.port = ports.pop(0) if ports else free_port(self.address)
+            taken = set()
+            self.port = ports.pop(0) if ports else self._new_port(free_port, taken)
+            taken.add(self.port)
             if self.udp:
-                self.udp_port = free_udp_port(self.address)
+                self.udp_port = self._new_port(free_udp_port, taken)
             for name, options in self.listen.items():
                 udp = re.search(r"protocol\s*=\s*udp", options, re.I)
-                self.ports[name] = (free_udp_port if udp else free_port)(self.address)
+                self.ports[name] = self._new_port(free_udp_port if udp else free_port, taken)
             self.write_config()
             stderr = open(self.stderr_path, "ab")
             argv = [binary(self.program)]
@@ -402,6 +404,15 @@ class Daemon:
                 break
         raise DaemonError("%s exited with code %s during startup (attempts: %s)\n%s"
                           % (self.program, self.exit_codes[-1], self.exit_codes, self.stderr_tail()))
+
+    def _new_port(self, probe, taken):
+        """A port of probe that is not in taken; the kernel can give a closed probe port again."""
+        for _ in range(100):
+            port = probe(self.address)
+            if port not in taken:
+                taken.add(port)
+                return port
+        raise DaemonError("no new port after 100 probes, taken: %s" % sorted(taken))
 
     def _wait_ready(self):
         deadline = time.monotonic() + READY_TIMEOUT

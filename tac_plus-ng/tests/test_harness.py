@@ -46,8 +46,10 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from tactest import LINUX, SUPPRESSIONS, Closed, DaemonTestCase, ProtocolError, detect, sanitizers
+from tactest import daemon
 from tactest.daemon import proc_stat
 
 POLICY = """
@@ -365,6 +367,35 @@ def quoted_source_values(source, name="TLS_OPTIONS"):
                         and before.value.endswith(("'", '"'))):
                     found.add(value.lineno)
     return sorted(found)
+
+
+def repeating(probe):
+    """A port probe that gives each port twice, as the kernel can for two probes in a row."""
+    first = []
+
+    def again(address):
+        if len(first) == 1:
+            return first.pop()
+        port = probe(address)
+        first.append(port)
+        return port
+    return again
+
+
+class ListenerPorts(DaemonTestCase):
+    """Each listener of a daemon start gets its own port, also when the kernel gives a port twice."""
+
+    CONFIG = None
+    LISTEN = {"a": "", "b": "", "c": "", "u1": "protocol = UDP", "u2": "protocol = UDP"}
+
+    def test_distinct_ports(self):
+        with mock.patch.object(daemon, "free_port", repeating(daemon.free_port)), \
+                mock.patch.object(daemon, "free_udp_port", repeating(daemon.free_udp_port)):
+            d = self.start_daemon(POLICY, udp=True, listen=self.LISTEN)
+        tcp = [d.port] + [d.ports[n] for n in ("a", "b", "c")]
+        udp = [d.udp_port] + [d.ports[n] for n in ("u1", "u2")]
+        self.assertEqual(len(set(tcp)), len(tcp), tcp)
+        self.assertEqual(len(set(udp)), len(udp), udp)
 
 
 class TestFiles(unittest.TestCase):
