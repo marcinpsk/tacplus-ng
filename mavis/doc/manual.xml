@@ -1845,7 +1845,8 @@ Sample usage: mavistest -d -1  /usr/local/etc/tac_plus.cfg tac_plus TACPLUS joe 
     <title>Environmental Variables</title>
     <para>Text enclosed in double quotes may make use of environment variables, e.g.:</para>
     <screen xml:space="preserve">filename = "${HOME}/log.txt"</screen>
-    <para>The braces are required.</para>
+    <para>The braces are required. This applies to the configuration file only: tac_plus-ng does not replace
+    environment variables in a user profile or other text from a backend.</para>
   </section>
   <section>
     <title>Copyrights and Acknowledgements</title>

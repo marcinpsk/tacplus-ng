@@ -2,7 +2,7 @@ MAVIS - Modular Attribute-Value Interchange System
 
 Marc Huber
 
-   $Id: 7d95a415212ec7b336fafddbf6a12f2dcb0fe6fe $
+   $Id: b9bb530447e6e3db463e0abc55e44dd63617383c $
      __________________________________________________________
 
    Table of Contents
@@ -1254,7 +1254,9 @@ LUS joe p4ssw0rd
    variables, e.g.:
 filename = "${HOME}/log.txt"
 
-   The braces are required.
+   The braces are required. This applies to the configuration file
+   only: tac_plus-ng does not replace environment variables in a
+   user profile or other text from a backend.
      __________________________________________________________
 
 8. Copyrights and Acknowledgements
