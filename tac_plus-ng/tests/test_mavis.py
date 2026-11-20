@@ -179,6 +179,16 @@ CISCO_VENDOR = 9
 VENDOR_SPECIFIC = 26
 
 
+def download_dacl(case, d):
+    """A Cisco DACL download of demoacl, which must give DACL_ACE."""
+    event = b"aaa:event=acl-download"
+    r = case.radius(DACL_SECRET, daemon=d, source=DACL_NAS).access_request(
+        "#ACSACL#demoacl-00000000", "", message_authenticator=True,
+        attributes=[(VENDOR_SPECIFIC, struct.pack("!IBB", CISCO_VENDOR, 1, len(event) + 2) + event)])
+    case.assertEqual(r.code_name, "Access-Accept", r)
+    case.assertIn(b"ip:inacl#1=" + DACL_ACE.encode(), b"".join(r.get(VENDOR_SPECIFIC)), r)
+
+
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
 class DaclAnsweredAtOnce(DaemonTestCase):
     """A DACL from a MAVIS module that answers at once, without a back-end round trip (tacinfo_cache).
@@ -206,14 +216,9 @@ class DaclAnsweredAtOnce(DaemonTestCase):
         d = self.start_daemon(self.POLICY.replace("@CACHE@", cache), udp=True)
         stub = Stub(d)
         stub.set(dacls={"demoacl": '{ data = "%s" }' % DACL_ACE})
-        event = b"aaa:event=acl-download"
         for source in ("backend", "cache"):
             with self.subTest(source=source):
-                r = self.radius(DACL_SECRET, daemon=d, source=DACL_NAS).access_request(
-                    "#ACSACL#demoacl-00000000", "", message_authenticator=True,
-                    attributes=[(VENDOR_SPECIFIC, struct.pack("!IBB", CISCO_VENDOR, 1, len(event) + 2) + event)])
-                self.assertEqual(r.code_name, "Access-Accept", r)
-                self.assertIn(b"ip:inacl#1=" + DACL_ACE.encode(), b"".join(r.get(VENDOR_SPECIFIC)), r)
+                download_dacl(self, d)
         # the second answer came from tacinfo_cache
         self.assertEqual([e["type"] for e in stub.requests()], ["DACL"])
 
@@ -252,19 +257,70 @@ class DaclCacheExpired(DaemonTestCase):
         d = self.start_daemon(self.POLICY.replace("@CACHE@", cache), udp=True)
         stub = Stub(d)
         stub.set(dacls={"demoacl": '{ data = "%s" }' % DACL_ACE})
-        event = b"aaa:event=acl-download"
         for i in range(self.ROUNDS):
             if i:
                 time.sleep(2.1)     # mtime + 1 < now: the entry of the last round has expired
-            r = self.radius(DACL_SECRET, daemon=d, source=DACL_NAS).access_request(
-                "#ACSACL#demoacl-00000000", "", message_authenticator=True,
-                attributes=[(VENDOR_SPECIFIC, struct.pack("!IBB", CISCO_VENDOR, 1, len(event) + 2) + event)])
-            self.assertEqual(r.code_name, "Access-Accept", r)
+            download_dacl(self, d)
             self.assertTrue(d.workers(), "no worker found")
             with self.subTest(round=i):
                 self.assertEqual(open_files_under(d, cache), [])
         # every round after the first found an expired entry and asked the backend again
         self.assertEqual([e["type"] for e in stub.requests()], ["DACL"] * self.ROUNDS)
+
+
+@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+class TacinfoCache(DaemonTestCase):
+    """tacinfo_cache gives an answer from its cache only as the backend gave it."""
+
+    CONFIG = None
+    POLICY = """
+	include = "%s"
+	mavis module = tacinfo_cache { directory = "@CACHE@" }
+""" % os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg") + Stub.module(childs=(1, 1)) + BACKEND + """
+	device radius-nas {
+		address = %s
+		radius.key = %s
+	}
+	profile admin {
+		script { if (service == shell) { set priv-lvl = 15 permit } }
+	}
+	ruleset {
+		rule staff { script { if (memberof == "cn=staff,dc=example") { profile = admin permit } } }
+	}
+""" % (DACL_NAS, DACL_SECRET)
+
+    def start(self, **state):
+        # a short path: tacinfo_cache keeps only 36 characters of the cache file path (libmavis_tacinfo_cache.c)
+        cache = tempfile.mkdtemp(prefix="tacinfo-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, cache)
+        d = self.start_daemon(self.POLICY.replace("@CACHE@", cache), udp=True)
+        stub = Stub(d)
+        stub.set(**state)
+        return d, stub, cache
+
+    def test_line_break_in_a_value(self):
+        """A LF in a value is in the cache file as CR, so the cached answer has the whole value."""
+        d, stub, _ = self.start(dacls={"demoacl": '{\n\tdata = "%s"\n}' % DACL_ACE})
+        for source in ("backend", "cache"):
+            with self.subTest(source=source):
+                download_dacl(self, d)
+        self.assertEqual([e["type"] for e in stub.requests()], ["DACL"])
+
+    def test_truncated_entry_is_a_miss(self):
+        """A cache file cut after a complete line is not an answer: the request goes to the backend."""
+        d, stub, cache = self.start(users={"bob": {"password": "pw", "member": ["admins"],
+                                                   "memberof": ["cn=staff,dc=example"]}})
+        def author():
+            return self.connect(d).author("bob", ["service=shell", "cmd="]).status_name
+        self.assertEqual(author(), "PASS_ADD")
+        (path,) = glob.glob(os.path.join(cache, "*", "*"))
+        with open(path, "rb") as f:
+            data = f.read()
+        self.assertGreater(data.count(b"\n"), 1, data)
+        with open(path, "r+b") as f:
+            f.truncate(data.index(b"\n") + 1)
+        self.assertEqual(author(), "PASS_ADD")
+        self.assertEqual([e["type"] for e in stub.requests()], ["INFO", "INFO"])
 
 
 class Cache(DaemonTestCase):
