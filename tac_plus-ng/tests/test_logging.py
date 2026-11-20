@@ -30,7 +30,7 @@
 
 import unittest
 
-from tactest import DaemonTestCase
+from tactest import DaemonTestCase, needs_loopback_net
 
 USERS = """
 	device inbound {
@@ -76,6 +76,7 @@ class FailedLogins(DaemonTestCase):
     def test_issue242_failed_pap_login_is_logged(self):
         self.check(lambda: self.connect().pap("alice", "wrong"), "alice", "pap login failed")
 
+    @needs_loopback_net
     def test_issue242_failed_inbound_ascii_login_is_logged(self):
         """An ASCII START that carries the password (IOS-XR) goes to do_login(), where 3253342 moved report_auth().
 
