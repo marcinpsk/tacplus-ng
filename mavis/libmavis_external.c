@@ -527,7 +527,14 @@ static void read_from_child(struct context *ctx, int cur)
 		    av_ctx *ans = av_new(ctx->ac->app_cb, ctx->ac->app_ctx);
 		    *++t = 0;
 		    av_char_to_array(ans, ctx->b_in, NULL);
-		    int result = atoi(++t);
+		    // av_char_to_array() skips what is not a whole attribute line: such an answer is the request, refused
+		    int bad = av_wire_check(ctx->b_in, (size_t) (t - ctx->b_in));
+		    int result = bad ? MAVIS_FINAL : atoi(++t);
+		    if (bad && av_get(ans, AV_A_SERIAL) && !strcmp(av_get(ans, AV_A_SERIAL), serial_old)) {
+			logmsg("%s: %lu: malformed answer", ctx->mcx->argv[0], (u_long) ctx->pid);
+			av_copy(ans, ctx->ac);
+			av_list_set_malformed(ans, AV_A_MEMBEROF, ctx->mcx->identifier);
+		    }
 
 		    serial = av_get(ans, AV_A_SERIAL);
 
