@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 773cfc3e0d5b8522d5334d67fe9cdbc49119f2e5 $
+   $Id: 7379294d69073c0dedd0a35f353e4e133f247673 $
      __________________________________________________________
 
    Table of Contents
@@ -2999,6 +2999,11 @@ int async 1
    LDAP search scope for groups (base, one, sub)
 
    Default: sub
+   LDAP_SCOPE_POSIXGROUP
+
+   LDAP search scope for the posixGroup groups (base, one, sub)
+
+   Default: sub
    LDAP_BASE
 
    Base user search DN of your LDAP server
@@ -3009,6 +3014,11 @@ int async 1
    Base group search DN of your LDAP server
 
    Example: dc=example,dc=com
+   LDAP_BASE_POSIXGROUP
+
+   Base DN of the search for posixGroup groups
+
+   Default: the value of LDAP_BASE
    LDAP_CONNECT_TIMEOUT
 
    Timeout for initital connect to remote LDAP server.
@@ -3085,6 +3095,42 @@ int async 1
    unset.
 
    Example: 1
+   LDAP_SKIP_MEMBEROF
+
+   1: ignore the memberOf attribute of the user. The back-end then
+   handles the user as a user without memberOf, see
+   LDAP_SKIP_GROUPOFNAMES.
+
+   0 or unset: read memberOf and look up the nested groups.
+
+   Default: unset
+   LDAP_SKIP_GROUPOFNAMES
+
+   1: do not search for groupOfNames groups (LDAP_FILTER_GROUP
+   below LDAP_BASE_GROUP).
+
+   0: do the search. mavis_tacplus-ng_ldap.pl searches only for a
+   user without memberOf, ldapmavis-mt searches for each user.
+
+   Unset: as 1 for Active Directory. For other servers the
+   back-end searches until it gets a user with memberOf. After
+   that, it does not search again until it restarts.
+
+   Default: unset
+   LDAP_SKIP_POSIXGROUP
+
+   For a user with a gidNumber, the back-end searches below
+   LDAP_BASE_POSIXGROUP for posixGroup groups: the group with this
+   gidNumber, and the groups that have the user name in memberUid.
+   The cn values of these groups become group memberships
+   (TACMEMBER). GIDS gets the gidNumber of the user, then the
+   gidNumber values of the memberUid groups.
+
+   1: do not search. 0: search.
+
+   Unset: as 1 for Active Directory, else as 0.
+
+   Default: unset
      __________________________________________________________
 
 5.1.1. Multi-threaded LDAP Backend
