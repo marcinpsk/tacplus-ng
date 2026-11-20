@@ -2,7 +2,7 @@
 "http://www.w3.org/TR/html4/loose.dtd">
 <html>
 <head>
-<meta name="generator" content="HTML Tidy for HTML5 for Linux version 5.6.0">
+<meta name="generator" content="HTML Tidy for HTML5 for Linux version 5.8.0">
 <link rel="stylesheet" type="text/css" href="style.css">
 <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -14,7 +14,7 @@
 <div class="TITLEPAGE">
 <h1 class="title"><a name="AEN2" id="AEN2">TACACS+ NG</a></h1>
 <h3 class="author"><a name="AEN4" id="AEN4">Marc Huber</a></h3>
-<span class="releaseinfo">$Id: 773cfc3e0d5b8522d5334d67fe9cdbc49119f2e5 $<br></span>
+<span class="releaseinfo">$Id: 3aa3b7a9c17369a7bf4593cce93ae4300bdc4990 $<br></span>
 <hr></div>
 <div class="TOC">
 <dl>
@@ -2462,7 +2462,8 @@ profile A {
 <p><tt class="literal">acl</tt> <span class="emphasis"><i class="emphasis">aclName</i></span><tt class="literal">{</tt> tac_action ... <tt class="literal">}</tt></p>
 <p>Example:</p>
 <pre class="screen">    acl myacl123 {
-        if (nas == 1.2.3.4 || nac = SomeHostName || nac-dns =~ /\\.example\\.com$/) deny
+        if (nas == 1.2.3.4 || nac == SomeNetName || nac-name =~ /\\.example\\.com$/) deny
+        permit
     }</pre></li>
 <li>
 <p><tt class="literal">script</tt> ( <tt class="literal">=</tt> <span class="emphasis"><i class="emphasis">aclName</i></span> | <tt class="literal">{</tt> <span class="emphasis"><i class="emphasis">tacAction</i></span> <tt class="literal">}</tt> )</p>

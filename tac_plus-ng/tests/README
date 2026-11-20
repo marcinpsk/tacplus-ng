@@ -130,7 +130,8 @@ Layout
                        the installed mavis.py; tests change its answers
                        through a JSON file while the daemon runs
       sample.py        a shipped sample as the configuration template of
-                       a test daemon, with checked edits (test_samples.py)
+                       a test daemon, with checked edits (test_samples.py);
+                       an example of a doc/manual.xml as configuration text
     configs/         complete configurations for "tac_plus-ng -P":
                      good-*.cfg must parse, bad-*.cfg must be rejected
     samba-dc/        the Samba AD DC container of test_ldapmavis_ad.py
