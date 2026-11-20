@@ -1726,7 +1726,7 @@ void add_token_to_alias(struct token_list **p, struct sym *sym)
     while (*p)
 	p = &(*p)->next;
     len = strlen(sym->buf);
-    n = calloc(1, sizeof(struct alias) + len);
+    n = calloc(1, sizeof(struct token_list) + len);
     n->code = sym->code;
     memcpy(n->buf, sym->buf, len + 1);
     n->line = sym->line;
@@ -2627,6 +2627,12 @@ void mavis_script_parse(mavis_ctx *mcx, mem_t *mem, struct sym *sym)
 
 enum token mavis_script_eval(mavis_ctx *mcx, av_ctx *ac, struct mavis_action *m)
 {
+    // a script cannot decide on a malformed list: the answer is a FAIL and the script ends here
+    int a = av_lists_check(ac);
+    if (a > -1) {
+	av_list_refuse(ac, a, mcx->identifier);
+	return S_return;
+    }
 #ifdef WITH_PCRE2
     pcre_res = 0;
     pcre_arg = NULL;

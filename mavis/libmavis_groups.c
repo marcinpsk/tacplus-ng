@@ -298,10 +298,40 @@ static int good_name(struct regex_list *l, char *s)
     return 0;
 }
 
+// A group name into attr. For a list attribute: quoted, or plain if it cannot be quoted (a backslash at the end)
+// and a plain value can carry it. -1: the list cannot carry it
+static int add_group_name(av_ctx *ac, int attr, char *name)
+{
+    size_t len = strlen(name);
+    if (!av_list_attribute(attr))
+	av_list_append(ac, attr, name);
+    else if (av_add_quoted(ac, attr, name, len)) {
+	if (attr == AV_A_MEMBEROF || !len || strpbrk(name, ",\r\n") || strchr("\"' \t", *name) || strchr(" \t", name[len - 1]))
+	    return -1;
+	av_list_append(ac, attr, name);
+    }
+    return 0;
+}
+
+// A resolved group name that the list cannot carry: the answer fails
+static int group_name_refused(av_ctx *ac, int attr)
+{
+    logmsg("%s: a group name of user %s does not fit into %s", MAVIS_name, av_get(ac, AV_A_USER), av_char[attr].name);
+    av_list_set_malformed(ac, attr, MAVIS_name);
+    return MAVIS_FINAL;
+}
+
 #define HAVE_mavis_recv_out
 static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
 {
     char *s = NULL;
+
+    // the filter cannot say which values of a malformed list pass: the answer fails
+    int a = av_lists_check(*ac);
+    if (a > -1) {
+	av_list_refuse(*ac, a, MAVIS_name);
+	return MAVIS_FINAL;
+    }
     if (mcx->resolve_gid) {
 	s = av_get(*ac, AV_A_GID);
 
@@ -313,10 +343,9 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
 		    av_unset(*ac, AV_A_GID);
 		} else {
 		    g = getgrgid((gid_t) u);
-		    if (g && good_name(mcx->group_regex, g->gr_name))
-			av_set(*ac, mcx->resolve_gid_attr, g->gr_name);
-		    else
-			av_unset(*ac, mcx->resolve_gid_attr);
+		    av_unset(*ac, mcx->resolve_gid_attr);
+		    if (g && good_name(mcx->group_regex, g->gr_name) && add_group_name(*ac, mcx->resolve_gid_attr, g->gr_name))
+			return group_name_refused(*ac, mcx->resolve_gid_attr);
 		}
 	    } else
 		av_unset(*ac, mcx->resolve_gid_attr);
@@ -326,119 +355,52 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
     if (mcx->resolve_gids) {
 	s = av_get(*ac, AV_A_GIDS);
 	if (s) {
-	    char b[8192];
-	    char *p = b;
-	    *p = 0;
-
-	    while (*s)
-		if (isdigit((int) *s)) {
-		    u_long u = strtoul(s, &s, 10);
+	    char *gids = Xstrdup(s);
+	    av_unset(*ac, mcx->resolve_gids_attr);
+	    for (char *t = gids; *t;)
+		if (isdigit((int) *t)) {
+		    u_long u = strtoul(t, &t, 10);
 		    if (u || errno != EINVAL) {
 			struct group *g;
 			if (!good_gid(mcx->gids, u))
 			    continue;
 			g = getgrgid((gid_t) u);
-			if (g && good_name(mcx->groups_regex, g->gr_name)) {
-			    ssize_t l;
-			    l = strlen(g->gr_name);
-			    if (b + sizeof(b) - p - 2 > l) {
-				if (b[0])
-				    *p++ = ',';
-				memcpy(p, g->gr_name, l);
-				p += l;
-				*p = 0;
-			    }
+			if (g && good_name(mcx->groups_regex, g->gr_name) && add_group_name(*ac, mcx->resolve_gids_attr, g->gr_name)) {
+			    free(gids);
+			    return group_name_refused(*ac, mcx->resolve_gids_attr);
 			}
 		    }
 		} else
-		    s++;
-
-	    if (b[0])
-		av_set(*ac, mcx->resolve_gids_attr, b);
-	    else
-		av_unset(*ac, mcx->resolve_gids_attr);
+		    t++;
+	    free(gids);
 	}
     }
 
+    // the lists are well-formed here: a quoted value goes out quoted (a decoded one can always be quoted again), a
+    // plain one plain
     s = av_get(*ac, AV_A_TACMEMBER);
     if (s) {
-	size_t len = strlen(s) + 1;
-	char *v = alloca(len);
-	char *b = alloca(len);
-	char *p = b;
-	*p = 0;
-	memcpy(v, s, len);
-	while (*v) {
-	    char *e;
-	    int quoted = (*v == '"');
-	    if (quoted) {
-		v++;
-		for (e = v; *e && *e != '"'; e++);
-		*e++ = 0;
-		if (*e == ',')
-		    e++;
-		else if (*e)
-		    break;
-	    } else {
-		for (e = v; *e && *e != ','; e++);
-		if (*e)
-		    *e++ = 0;
-	    }
+	char *list = Xstrdup(s), *l = list, *v;
+	av_unset(*ac, AV_A_TACMEMBER);
+	int quoted;
+	while (av_list_next(&l, &v, &quoted) > 0)
 	    if (good_name(mcx->groups_regex, v)) {
-		if (*b)
-		    *p++ = ',';
 		if (quoted)
-		    *p++ = '"';
-		len = strlen(v);
-		memcpy(p, v, len);
-		p += len;
-		if (quoted)
-		    *p++ = '"';
-		*p = 0;
+		    add_group_name(*ac, AV_A_TACMEMBER, v);
+		else
+		    av_list_append(*ac, AV_A_TACMEMBER, v);
 	    }
-	    v = e;
-	}
-	if (b[0])
-	    av_set(*ac, AV_A_TACMEMBER, b);
-	else
-	    av_unset(*ac, AV_A_TACMEMBER);
+	free(list);
     }
 
     s = av_get(*ac, AV_A_MEMBEROF);
     if (s) {
-	size_t len = strlen(s) + 1;
-	char *v = alloca(len);
-	char *b = alloca(len);
-	char *p = b;
-	*p = 0;
-	memcpy(v, s, len);
-	while (*v) {
-	    char *e;
-	    if (*v != '"')
-		break;
-	    v++;
-	    for (e = v; *e && *e != '"'; e++);
-	    if (*e != '"')
-		break;
-	    *e++ = 0;
-	    if (*e == ',')
-		e++;
-	    if (good_name(mcx->memberof_regex, v)) {
-		if (*b)
-		    *p++ = ',';
-		*p++ = '"';
-		len = strlen(v);
-		memcpy(p, v, len);
-		p += len;
-		*p++ = '"';
-		*p = 0;
-	    }
-	    v = e;
-	}
-	if (b[0])
-	    av_set(*ac, AV_A_MEMBEROF, b);
-	else
-	    av_unset(*ac, AV_A_MEMBEROF);
+	char *list = Xstrdup(s), *l = list, *v;
+	av_unset(*ac, AV_A_MEMBEROF);
+	while (av_list_next(&l, &v, NULL) > 0)
+	    if (good_name(mcx->memberof_regex, v))
+		add_group_name(*ac, AV_A_MEMBEROF, v);
+	free(list);
     }
 
     return MAVIS_FINAL;

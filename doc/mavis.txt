@@ -2,7 +2,7 @@ MAVIS - Modular Attribute-Value Interchange System
 
 Marc Huber
 
-   $Id: 7d95a415212ec7b336fafddbf6a12f2dcb0fe6fe $
+   $Id: 826045f67ec2d604148ff8d7e2a48d67fbe4c17b $
      __________________________________________________________
 
    Table of Contents
@@ -483,6 +483,29 @@ cache expire FTP = 0
    custom modules, as external authentication programs may be
    implemented as easy-to-deploy Perl programs. Plus, you're
    likely to get get parallelism for free.
+
+   A program writes the list attributes (TACMEMBER, MEMBEROF,
+   SSHKEY, SSHKEYHASH and SSHKEYID) as a comma separated list of
+   values in double quotes, e.g. "admins","a \"quoted\" name". In
+   the quotes, put a backslash before each double quote of the
+   value. Any other backslash is part of the value, so a DN such
+   as "cn=a\,b,dc=example" goes as it is. Such a list cannot carry
+   a value that contains a line break or a NUL, or that ends with
+   a backslash.
+
+   tac_plus-ng and the groups module read the lists in the same
+   way. Blanks around a value are allowed. A value can also be in
+   single quotes, with a backslash before each single quote, or
+   without quotes; a value without quotes does not start with a
+   quote, cannot be empty and ends at the next comma. MEMBEROF
+   values must have quotes. tac_plus-ng takes each value literally
+   (no ${VAR} and no alias), as a value of that one attribute. A
+   malformed list (for example an empty value without quotes, text
+   after the closing quote, or a line break) makes the whole
+   answer a failure, and so does a group name of resolve gids that
+   the list cannot carry. libmavis makes such an answer a failure
+   too (RESULT is NAK): a script of a module does not run on it,
+   and the groups module does not filter it.
      __________________________________________________________
 
 5.2.5.1. Configuration directives

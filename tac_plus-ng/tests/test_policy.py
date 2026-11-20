@@ -352,5 +352,24 @@ class DeviceDnsNameFromDnsServer(PolicyTestCase):
         self.assertGreater(server.queries, 0)
 
 
+class Alias(PolicyTestCase):
+    """An alias puts its tokens where its name is: each token of the alias keeps its whole text."""
+
+    CONFIG = USER + """
+	alias shell_attributes { set tactest-alias-with-a-long-token = yes }
+	profile shell {
+		script {
+			if (service == shell) { shell_attributes permit }
+		}
+	}
+	ruleset {
+		rule { script { profile = shell permit } }
+	}
+"""
+
+    def test_alias(self):
+        self.assertEqual(self.holds(), ["alias-with-a-long-token"])
+
+
 if __name__ == "__main__":
     unittest.main()

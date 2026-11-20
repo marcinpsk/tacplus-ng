@@ -46,7 +46,7 @@ State, all keys optional:
   users         {name: {"password": str,
                         "member": [groups] or a string as it is,
                         "memberof": [LDAP group DNs] or a string as it is,
-                        "sshkey": str, "mustchange": bool,
+                        "sshkey": str, "gids": str, "mustchange": bool,
                         "new_password": str,
                         "profile": the user profile (AV_A_TACPROFILE) as it is}}
   hosts         {address: the host profile (AV_A_TACPROFILE) as it is}
@@ -234,6 +234,8 @@ def serve(libdir):
                 d.set_sshpubkey(known["sshkey"])
             if known.get("profile"):
                 d.set_tacprofile(known["profile"])
+            if known.get("gids"):
+                d.set_gids(known["gids"])
             d.password_mustchange(bool(known.get("mustchange")))
         verdict, code = answers[result]
         d.write(verdict, code, state.get("message"))

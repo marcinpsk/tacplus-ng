@@ -671,6 +671,7 @@ struct tac_session {
 	BISTATE(passwd_mustchange);
 	BISTATE(passwd_changeable);
 	BISTATE(user_is_session_specific);
+	BISTATE(bad_backend_data);	/* a malformed list or profile from MAVIS: no script, reply or MFA decision permits */
 	BISTATE(username_rewritten);
 	BISTATE(chpass);
 	BISTATE(authorized);
@@ -878,6 +879,8 @@ int cfg_get_enable(tac_session *, struct pwdat **);
 
 void parse_decls(struct sym *);
 void parse_user_final(tac_user *);
+int parse_user_profile_list(struct sym *, tac_user *, enum token, char *, size_t);
+int parse_user_profile_list_check(char *);
 int parse_user_profile_fmt(struct sym *, tac_user *, char *, ...)
     __attribute__((format(printf, 3, 4)));
 int parse_host_profile(struct sym *, tac_realm *, tac_host *);
