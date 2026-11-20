@@ -84,7 +84,8 @@ static void mavis_switch(tac_session *session, av_ctx *avc, int result)
 	    if (session->user->avc)
 		av_free(session->user->avc);
 	    session->user->avc = avc;
-	}
+	} else
+	    av_free(avc);
 	session->mavis_data->mavisfn(session);
 	break;
     case MAVIS_TIMEOUT:
@@ -514,6 +515,7 @@ static void mavis_ctx_switch(struct context *ctx, av_ctx *avc, int result)
     case MAVIS_FINAL:
 	ctx->mavis_pending = 0;
 	mavis_ctx_lookup_final(ctx, avc);
+	av_free(avc);
 	ctx->mavis_data->mavisfn(ctx);
 	break;
     case MAVIS_TIMEOUT:
@@ -770,7 +772,8 @@ static void mavis_dacl_switch(tac_session *session, av_ctx *avc, int result)
 	    if (session->user->avc)
 		av_free(session->user->avc);
 	    session->user->avc = avc;
-	}
+	} else
+	    av_free(avc);
 	session->mavis_data->mavisfn(session);
 	break;
     case MAVIS_TIMEOUT:

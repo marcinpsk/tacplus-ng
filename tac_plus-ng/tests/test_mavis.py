@@ -35,6 +35,7 @@ import pwd
 import re
 import resource
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -42,9 +43,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
-from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env
+from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
 	user backend = mavis
@@ -789,6 +791,94 @@ class ProfileConflict(DaemonTestCase):
             with self.subTest(password=password), d.connect() as c:
                 self.assertEqual(c.pap("alice", password).status_name, "FAIL")
         self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK"), ("AUTH", "NAK")])
+
+
+@unittest.skipUnless(LINUX and "address" in sanitizers(), "LeakSanitizer needs an AddressSanitizer build on Linux")
+class MavisAnswerFreed(DaemonTestCase):
+    """mavis_switch() and mavis_dacl_switch() freed the MAVIS answer only when a user took it, mavis_ctx_switch() never."""
+
+    CONFIG = None
+
+    def start(self, policy, **kw):
+        # the slow unwinder finds av_new() in the stack through the module
+        with mock.patch.dict(os.environ, {"ASAN_OPTIONS": "detect_leaks=1:fast_unwind_on_malloc=0"}):
+            return self.start_daemon(Stub.module(childs=(1, 1)) + BACKEND + policy + PERMIT, check=False, **kw)
+
+    def worker(self, d):
+        """The one worker, as (pid, starttime): leaked_answers() checks that the same process ends."""
+        (worker,) = d.workers().items()
+        return worker
+
+    def leaked_answers(self, d, worker):
+        """The LeakSanitizer reports of av_new() of the worker, after it exits."""
+        self.assertEqual(self.worker(d), worker)
+        pid, start = worker
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 30
+        while daemon_alive(pid, start) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(daemon_alive(pid, start), "worker %d did not exit" % pid)
+        report = ""
+        for path in glob.glob(os.path.join(d.tmp, "*san.%d" % pid)):
+            with open(path) as f:
+                report += f.read()
+        # the configuration pools always leak: a complete, symbolized report has them
+        for text in ("ERROR: LeakSanitizer", " in main ", "SUMMARY: AddressSanitizer"):
+            self.assertIn(text, report)
+        return [b for b in re.split(r"\n(?=(?:Direct|Indirect) leak)", report) if " in av_new " in b]
+
+    def test_refused_logins_free_the_answer(self):
+        d = self.start("")
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}, "bob": {"password": "pw"}})
+        worker = self.worker(d)
+        for user, password in (("alice", "pw"), ("bob", "wrong"), ("nobody", "pw")):
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, "FAIL")
+        self.assertEqual([e["result"] for e in stub.requests(type="AUTH")], ["ACK", "NAK", "NOTFOUND"])
+        self.assertEqual(self.leaked_answers(d, worker), [])
+
+    def test_host_lookups_free_the_answer(self):
+        d = self.start("""
+	device mavis6 {
+		address = 127.0.0.6
+		mavis backend = yes
+	}
+	user alice {
+		password pap = clear alicepw
+	}
+""")
+        stub = Stub(d)
+        stub.set(hosts={"127.0.0.6": "{ key = hostkey }"})
+        worker = self.worker(d)
+        for _ in range(3):
+            with d.connect(source="127.0.0.6", key="hostkey") as c:
+                self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+        self.assertEqual([e["result"] for e in stub.requests(type="HOST")], ["ACK", "ACK", "ACK"])
+        self.assertEqual(self.leaked_answers(d, worker), [])
+
+    def test_dacl_downloads_free_the_answer(self):
+        d = self.start("""
+	include = "%s"
+	device radius-nas {
+		address = %s
+		radius.key = %s
+	}
+""" % (os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg"), DACL_NAS, DACL_SECRET))
+        stub = Stub(d)
+        stub.set(dacls={"demoacl": '{ data = "%s" }' % DACL_ACE})
+        worker = self.worker(d)
+        event = b"aaa:event=acl-download"
+        # RADIUS/TCP: the context ends with the connection, a UDP context lives for at least 60 s
+        c = self.radius(DACL_SECRET, daemon=d, source=DACL_NAS, tcp=True)
+        for name in ("demoacl", "demoacl", "unknown"):
+            r = c.access_request("#ACSACL#%s-00000000" % name, "", message_authenticator=True,
+                                 attributes=[(VENDOR_SPECIFIC, struct.pack("!IBB", CISCO_VENDOR, 1, len(event) + 2) + event)])
+            with self.subTest(name=name):
+                self.assertEqual(r.code_name, "Access-Accept" if name == "demoacl" else "Access-Reject", r)
+        c.close()
+        self.assertEqual([e["result"] for e in stub.requests(type="DACL")], ["ACK", "ACK", "NOTFOUND"])
+        self.assertEqual(self.leaked_answers(d, worker), [])
 
 
 def crypt_md5(password):
