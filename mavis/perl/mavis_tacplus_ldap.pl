@@ -581,10 +581,10 @@ while ($in = <>) {
 			}
 
 			$val = $entry->get_value('tacacsClient', asref => 1);
-			$V[AV_A_TACCLIENT] = join(',', @$val) if $val;
+			$V[AV_A_TACCLIENT] = quote_list('TACCLIENT', $V[AV_A_USER], @$val) if $val;
 
 			$val = $entry->get_value('tacacsMember', asref => 1);
-			$V[AV_A_TACMEMBER] = join(',', @$val) if $val;
+			$V[AV_A_TACMEMBER] = quote_list('TACMEMBER', $V[AV_A_USER], @$val) if $val;
 
 			$val = $entry->get_value('tacacsProfile', asref => 1);
 			$V[AV_A_TACPROFILE] = join('_X#x_', @$val) if $val;
@@ -596,26 +596,18 @@ while ($in = <>) {
 			if ($#{$val} > -1) {
 				$val = expand_memberof($val)
 					if defined $expand_ad_group_membership;
-				my $m;
-				foreach $m (sort grep { /^CN=$tacacsGroupPrefix[^,]*,/i } @$val) {
+				my ($m, @M);
+				my @MO = sort grep { /^CN=$tacacsGroupPrefix[^,]*,/i } @$val;
+				foreach $m (@MO) {
 					my $m2 = "$m";
 					$m2 =~ s/^CN=$tacacsGroupPrefix([^,]*),.*$/$1/i;
 					if ($m2) {
-						if (exists $V[AV_A_TACMEMBER]) {
-							$V[AV_A_TACMEMBER] .= ',"' . $m2 . '"';
-						} else {
-							$V[AV_A_TACMEMBER] = '"' . $m2 . '"';
-						}
+						push @M, $m2;
 						last unless defined($unlimit_ad_group_membership);
 					}
 				}
-				foreach $m (sort grep { /^CN=$tacacsGroupPrefix[^,]*,/i } @$val) {
-					if (exists $V[AV_A_MEMBEROF]) {
-						$V[AV_A_MEMBEROF] .= ',"' . $m . '"';
-					} else {
-						$V[AV_A_MEMBEROF] = '"' . $m . '"';
-					}
-				}
+				$V[AV_A_TACMEMBER] = quote_list('TACMEMBER', $V[AV_A_USER], @M) if @M;
+				$V[AV_A_MEMBEROF] = quote_list('MEMBEROF', $V[AV_A_USER], @MO) if @MO;
 			}
 			if (defined ($require_tacacsGroupPrefix) && !defined($V[AV_A_TACMEMBER])){
 				goto fail;
