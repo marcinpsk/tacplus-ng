@@ -13,7 +13,7 @@ self-tests of those checks; run-tests uses gmake if there is one.
 Quick start on a fresh Ubuntu:
 
     sudo apt-get install build-essential perl libpcre2-dev libssl-dev \
-        libcrypt-dev python3 openssl
+        libcrypt-dev libldap-dev python3 openssl
     tac_plus-ng/tests/run-tests
 
 The openssl command makes the certificates of the TLS tests (in their
@@ -21,7 +21,9 @@ scratch directories; none are kept in the tree) and is the TLS-PSK client;
 without it those tests are skipped.
 
 test_ldapmavis.py starts an OpenLDAP slapd of its own on a free port.
-It needs the server (Debian, Ubuntu: slapd; Alpine: openldap and
+The build has ldapmavis-mt only with the OpenLDAP headers (libldap-dev;
+Alpine: openldap-dev); without them its tests are skipped.
+The tests need the server (Debian, Ubuntu: slapd; Alpine: openldap and
 openldap-back-mdb) and, for the Perl back-end, Net::LDAP and
 IO::Socket::SSL (libnet-ldap-perl libio-socket-ssl-perl; Alpine:
 perl-ldap perl-io-socket-ssl); without them those tests are skipped.

@@ -10,6 +10,7 @@ frank have the tacacs schema of mavis/perl; the password of frank expired.
 
 import glob
 import os
+import re
 import select
 import shutil
 import socket
@@ -32,6 +33,7 @@ LDAP_PERL_OLD = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_ldap.pl")
 TACACS_SCHEMA = os.path.join(prefix(), "lib", "mavis", "extra", "tacacs.schema")
 PERL = shutil.which("perl") or "/usr/bin/perl"
 START_TIMEOUT = 10.0
+CLOSE_TIMEOUT = 5.0
 
 BASE = "dc=example,dc=com"
 READER = "cn=reader," + BASE
@@ -214,6 +216,12 @@ class Slapd:
         with open(self.log, errors="replace") as f:
             raise AssertionError(f"slapd did not start on {self.url}:\n{f.read()[-3000:]}")
 
+    def open_connections(self):
+        """The IDs of the client connections that slapd accepted and did not close, from its log."""
+        with open(self.log, errors="replace") as f:
+            text = f.read()
+        return set(re.findall(r"conn=(\d+) fd=\d+ ACCEPT", text)) - set(re.findall(r"conn=(\d+) fd=\d+ closed", text))
+
     def stop(self):
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
@@ -293,6 +301,25 @@ class LdapTests:
         with d.connect() as c:
             self.assertEqual(c.pap("mallory", "alicepw").status_name, "FAIL")
 
+    def assert_connections_closed(self, slapd, d, logins=10):
+        """logins of unknown users through d leave no connection to slapd open."""
+        # the first request starts the back-end, which may keep a connection of its own
+        with d.connect(timeout=15.0) as c:
+            c.pap("nobody", "x")
+        before = slapd.open_connections()
+        for i in range(logins):
+            with d.connect(timeout=15.0) as c:
+                self.assertEqual(c.pap(f"nobody{i}", "x").status_name, "FAIL")
+        deadline = time.monotonic() + CLOSE_TIMEOUT
+        # compare IDs, not counts: a baseline connection that closes late must not hide a new one
+        while slapd.open_connections() - before and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertEqual(slapd.open_connections() - before, set())
+
+    def test_unknown_user_closes_the_connection(self):
+        slapd, d = self.start()
+        self.assert_connections_closed(slapd, d)
+
     def test_groups(self):
         """groupOfNames, nested: the group names become TACMEMBER, the group DNs MEMBEROF."""
         _, d = self.start()
@@ -349,6 +376,17 @@ class LdapMt(LdapTests, DaemonTestCase):
     def module(self, url, extra):
         return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, extra=extra,
                                  exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
+
+    def test_errors_close_the_connection(self):
+        """A failed search (no such base) and a failed bind of LDAP_USER leave no connection to slapd open."""
+        slapd, _ = self.start()
+        for name, base, reader in (("search", "ou=missing," + BASE, READER), ("bind", BASE, "cn=nobody," + BASE)):
+            with self.subTest(name):
+                module = MODULE.substitute(module="external-mt", url=slapd.url, base=base, reader=reader, extra="",
+                                           exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
+                d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF),
+                                      name=self.id().split(".")[-1] + "-" + name)
+                self.assert_connections_closed(slapd, d)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
