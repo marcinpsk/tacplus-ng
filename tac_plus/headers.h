@@ -732,6 +732,7 @@ tac_realm *cfg_get_mavis_realm(tac_session *);
 void parse_decls(struct sym *);
 void parse_user_final(tac_user *);
 int parse_user_profile(struct sym *, tac_user *);
+int parse_user_profile_list(struct sym *, tac_user *, enum token, char *);
 int parse_user_profile_fmt(struct sym *, tac_user *, char *, ...)
     __attribute__((format(printf, 3, 4)));
 void parse_log(struct sym *, tac_realm *);

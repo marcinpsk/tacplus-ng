@@ -155,8 +155,9 @@ void author(tac_session * session, tac_pak_hdr * hdr)
 
 #define is_separator(A) ((A) == '=' || (A) == '*')
 
-static int strcmp_a(char *a, char *b)
+static int strcmp_a(const void *va, const void *vb)
 {
+    const char *a = va, *b = vb;
     while (*a && ((*a == *b) || (is_separator(*a) && is_separator(*b)))) {
 	switch (*a) {
 	case 0:
@@ -170,8 +171,9 @@ static int strcmp_a(char *a, char *b)
     return (int) ((u_char) * a - (u_char) * b);
 }
 
-static int strcmp_av(char *a, char *b)
+static int strcmp_av(const void *va, const void *vb)
 {
+    const char *a = va, *b = vb;
     while (*a && ((*a == *b) || (is_separator(*a) && is_separator(*b))))
 	a++, b++;
 
@@ -373,12 +375,12 @@ static void authorize_svc(tac_session * session, enum token svc, char *svcname, 
 	return;
     }
 
-    tree_m_a = RB_tree_new((int (*)(const void *, const void *)) strcmp_a, NULL);
-    tree_m_av = RB_tree_new((int (*)(const void *, const void *)) strcmp_av, NULL);
-    tree_a_a = RB_tree_new((int (*)(const void *, const void *)) strcmp_a, NULL);
-    tree_a_av = RB_tree_new((int (*)(const void *, const void *)) strcmp_av, NULL);
-    tree_o_a = RB_tree_new((int (*)(const void *, const void *)) strcmp_a, NULL);
-    tree_o_av = RB_tree_new((int (*)(const void *, const void *)) strcmp_av, NULL);
+    tree_m_a = RB_tree_new(strcmp_a, NULL);
+    tree_m_av = RB_tree_new(strcmp_av, NULL);
+    tree_a_a = RB_tree_new(strcmp_a, NULL);
+    tree_a_av = RB_tree_new(strcmp_av, NULL);
+    tree_o_a = RB_tree_new(strcmp_a, NULL);
+    tree_o_av = RB_tree_new(strcmp_av, NULL);
 
     switch (cfg_get_svc_attrs(session, svc, svcname, protocol, tree_m_a, tree_a_a, tree_o_a, tree_m_av, tree_a_av, tree_o_av, &svc_dflt, &attr_dflt)) {
     case S_deny:

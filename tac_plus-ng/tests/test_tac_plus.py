@@ -27,6 +27,12 @@ class Smoke(TacPlusTestCase):
 		pap = clear alicepw
 		service = shell { default command = permit }
 	}
+	user = bob {
+		service = shell {
+			default command = permit
+			set priv-lvl = 15
+		}
+	}
 """
 
     def test_pap(self):
@@ -35,6 +41,11 @@ class Smoke(TacPlusTestCase):
     def test_author(self):
         r = self.connect().author("alice", ["service=shell", "cmd="])
         self.assertEqual(r.status_name, "PASS_ADD", r)
+
+    def test_author_with_an_attribute(self):
+        """The attribute trees of authorize_svc() call their compare function with the type of the tree."""
+        r = self.connect().author("bob", ["service=shell", "cmd="])
+        self.assertEqual((r.status_name, r.args), ("PASS_ADD", ["priv-lvl=15"]))
 
     def test_acct(self):
         self.assertTrue(self.connect().acct("alice", ["task_id=1", "service=shell"]).ok)
@@ -186,6 +197,60 @@ class GroupsFilterOnMalformedList(TacPlusTestCase):
         self.assertEqual(self.connect().author("carol", ["service=shell", "cmd="]).status_name, "PASS_ADD")
         stub.set(users={"dave": {"password": "pw", "member": '"guest",\n"blocked"'}})
         self.assertEqual(self.connect().author("dave", ["service=shell", "cmd="]).status_name, "FAIL")
+
+
+
+class MavisListValues(TacPlusTestCase):
+    """TACMEMBER and TACCLIENT of a backend: the list values of that one attribute, taken literally."""
+
+    CONFIG = Stub.module(childs=(1, 1)) + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = admin {
+		service = shell {
+			default command = permit
+			set priv-lvl = 15
+		}
+	}
+	group = guest {
+		service = shell {
+			default command = permit
+			set priv-lvl = 1
+		}
+	}
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        # the daemon gets the environment of the tests
+        os.environ["TACTEST_ENV_GROUP"] = "admin"
+        cls.addClassCleanup(os.environ.pop, "TACTEST_ENV_GROUP")
+        super().setUpClass()
+
+    count = 0
+
+    def author(self, **attributes):
+        """A user of its own for each request: the daemon keeps the users of the backend for a while."""
+        MavisListValues.count += 1
+        user = "user%d" % MavisListValues.count
+        Stub(self.daemon).set(users={user: dict(password="pw", **attributes)})
+        r = self.connect().author(user, ["service=shell", "cmd="])
+        return r.status_name, r.args
+
+    def test_list(self):
+        self.assertEqual(self.author(member='"admin"'), ("PASS_ADD", ["priv-lvl=15"]))
+        self.assertEqual(self.author(member="guest"), ("PASS_ADD", ["priv-lvl=1"]))
+
+    def test_value_is_literal(self):
+        """No ${VAR} in a value."""
+        self.assertNotEqual(self.author(member='"${TACTEST_ENV_GROUP}"'), ("PASS_ADD", ["priv-lvl=15"]))
+
+    def test_value_has_only_entries_of_its_attribute(self):
+        """Text after the list is a parse error: no authorization."""
+        for member in ('"guest" member = admin', '"guest" }', '"guest",'):
+            with self.subTest(member=member):
+                self.assertNotIn(self.author(member=member)[0], ("PASS_ADD", "PASS_REPL"))
 
 
 if __name__ == "__main__":
