@@ -293,6 +293,17 @@ class LdapTests:
         with d.connect() as c:
             self.assertEqual(c.pap("mallory", "alicepw").status_name, "FAIL")
 
+    def test_invalid_user_name(self):
+        """A user name with a filter character: FAIL, not a back-end error, so no fallback for the next logins."""
+        _, d = self.start()
+        for user in ("x,y", "x&y"):
+            with self.subTest(user=user), d.connect() as c:
+                self.assertEqual(c.pap(user, "alicepw").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+
     def test_groups(self):
         """groupOfNames, nested: the group names become TACMEMBER, the group DNs MEMBEROF."""
         _, d = self.start()

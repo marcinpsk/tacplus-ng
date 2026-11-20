@@ -317,7 +317,7 @@ while ($in = <>) {
 	}
 	if ($V[AV_A_USER] =~ /\(|\)|,|\||&|=|\*/){
 		$V[AV_A_USER_RESPONSE] = "Username not valid.";
-		goto fatal;
+		goto fail;
 	}
 	if ($V[AV_A_TACTYPE] eq AV_V_TACTYPE_AUTH && !defined $V[AV_A_PASSWORD]){
 		$V[AV_A_USER_RESPONSE] = "Password not set.";
