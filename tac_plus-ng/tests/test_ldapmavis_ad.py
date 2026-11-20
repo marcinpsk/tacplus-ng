@@ -11,16 +11,20 @@ sAMAccountName.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
 import secrets
 import shutil
+import ssl
 import string
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+import urllib.parse
 from typing import ClassVar
 from unittest import mock
 
@@ -125,10 +129,11 @@ def ldap_attributes(dn, *attributes):
 class Domain:
     """The users and groups of one test class, in OU=tactest-<tag>; the login name of a user is <cn>-<tag>.
 
-    alice is a member of netadmins, netadmins of staff, dave of staff;
-    posix has the gidNumber of the posixGroup unix. The account states
-    of the BIND_ERRORS users, of inactive (533), and of reset (773) and
-    aged (532), give the bind errors of AD.
+    alice and grouped are members of netadmins, netadmins of staff, dave
+    of staff; posix has the gidNumber of the posixGroup unix. The account
+    states of the BIND_ERRORS users, of inactive (533), and of reset,
+    renew, refused and grouped (773) and aged (532), give the bind errors
+    of AD.
     """
 
     # cn: (userAccountControl, more LDIF lines); 512: a normal account, 514: disabled
@@ -141,6 +146,9 @@ class Domain:
         "posix": (512, f"gidNumber: {POSIX_GID}\n"),
         "mustchange": (512, "pwdLastSet: 0\n"),
         "reset": (512, "pwdLastSet: 0\n"),
+        "renew": (512, "pwdLastSet: 0\n"),
+        "grouped": (512, "pwdLastSet: 0\n"),
+        "refused": (512, "pwdLastSet: 0\n"),
         "disabled": (514, ""),
         "inactive": (514, ""),
         "expired": (512, "accountExpires: 1\n"),
@@ -178,7 +186,7 @@ class Domain:
         for cn, (uac, more) in self.USERS.items():
             ldif.append(f"dn: {self.dn(cn)}\nobjectClass: user\nsAMAccountName: {self.login(cn)}\n"
                         f"unicodePwd:: {unicode_pwd(self.password(cn))}\nuserAccountControl: {uac}\n{more}")
-        for cn, members in (("netadmins", ["alice"]), ("staff", ["netadmins", "dave"])):
+        for cn, members in (("netadmins", ["alice", "grouped"]), ("staff", ["netadmins", "dave"])):
             ldif.append(f"dn: {self.dn(cn)}\nobjectClass: group\nsAMAccountName: {self.login(cn)}\n"
                         + "".join(f"member: {self.dn(m)}\n" for m in members))
         ldif.append(f"dn: {self.dn('unix')}\nobjectClass: group\nobjectClass: posixGroup\n"
@@ -208,6 +216,109 @@ class Domain:
 
     def wait_password_expired(self):
         time.sleep(max(0.0, self.created + PASSWORD_MAX_AGE + 1 - time.monotonic()))
+
+
+def ber(data, i=0):
+    """(tag, value, end) of the BER element at data[i]; None while it is incomplete."""
+    if len(data) < i + 2:
+        return None
+    length, start = data[i + 1], i + 2
+    if length & 0x80:
+        start += length & 0x7F
+        length = int.from_bytes(data[i + 2:start], "big")
+    if len(data) < start + length:
+        return None
+    return data[i], data[start:start + length], start + length
+
+
+class Relay:
+    """An LDAPS relay to the DC; it records the bind, search and modify requests and the bind results of each connection.
+
+    refuse: a DN. The relay itself answers the first bind of this DN that
+    follows a failed bind on the same connection, with resultCode 49
+    (invalidCredentials); the DC does not get that bind.
+    """
+
+    def __init__(self, ca, refuse=None):
+        # (connection, "bind" and the DN | "bound" and the result code | "search" or "modify" and the DN)
+        self.events = []
+        self.count = 0
+        self.refuse = refuse
+        self.refused = False
+        server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.load_cert_chain(*ca.server)
+        self.dc = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.dc.load_verify_locations(settings()["TACTEST_SAMBA_CA"])
+        self.loop = asyncio.new_event_loop()
+        self.server = self.loop.run_until_complete(asyncio.start_server(self.serve, "127.0.0.1", 0, ssl=server))
+        self.url = f"ldaps://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+
+    async def serve(self, client_reader, client_writer):
+        self.count += 1
+        conn = self.count
+        dc = urllib.parse.urlsplit(URL)
+        dc_reader, dc_writer = await asyncio.open_connection(dc.hostname, dc.port or 636, ssl=self.dc)
+        copies = [asyncio.ensure_future(self.copy(conn, reader, writer, back))
+                  for reader, writer, back in ((client_reader, dc_writer, client_writer),
+                                               (dc_reader, client_writer, dc_writer))]
+        await asyncio.wait(copies, return_when=asyncio.FIRST_COMPLETED)
+        for writer in (client_writer, dc_writer):
+            writer.close()
+
+    async def copy(self, conn, reader, writer, back):
+        """Copy each complete LDAPMessage from reader to writer, or send the answer of the relay to back."""
+        data = b""
+        while True:
+            chunk = await reader.read(65536)
+            if not chunk:
+                return
+            data += chunk
+            while (message := ber(data)) is not None:
+                end = message[2]
+                answer = self.record(conn, data[:end])
+                out = back if answer else writer
+                out.write(answer or data[:end])
+                await out.drain()
+                data = data[end:]
+
+    def record(self, conn, message):
+        """Record one LDAPMessage (SEQUENCE: messageID, protocolOp); return the answer of the relay, or None."""
+        _, body, _ = ber(message)
+        tag, op, _ = ber(body, ber(body)[2])
+        if tag == 0x60:     # BindRequest: version, name
+            dn = ber(op, ber(op)[2])[1].decode()
+            results = [value for c, kind, value in self.events if c == conn and kind == "bound"]
+            self.events.append((conn, "bind", dn))
+            if (self.refuse and not self.refused and dn.lower() == self.refuse.lower()
+                    and results and results[-1] != 0):
+                self.refused = True
+                self.events.append((conn, "bound", 49))
+                # BindResponse: resultCode 49, matchedDN and diagnosticMessage empty
+                op = b"\x61\x07\x0a\x01\x31\x04\x00\x04\x00"
+                msgid = body[:ber(body)[2]]
+                return bytes([0x30, len(msgid) + len(op)]) + msgid + op
+        elif tag == 0x61:   # BindResponse: resultCode
+            self.events.append((conn, "bound", int.from_bytes(ber(op)[1], "big")))
+        elif tag == 0x63:   # SearchRequest: baseObject
+            self.events.append((conn, "search", ber(op)[1].decode()))
+        elif tag == 0x66:   # ModifyRequest: object
+            self.events.append((conn, "modify", ber(op)[1].decode()))
+        return None
+
+    async def stop(self):
+        self.server.close()
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def close(self):
+        asyncio.run_coroutine_threadsafe(self.stop(), self.loop).result(60)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join()
+        self.loop.close()
 
 
 MODULE = string.Template("""
@@ -248,10 +359,12 @@ $module
 
 
 class AdTests:
-    """The tests for both back-ends; a subclass sets MODULE, EXEC and env() (its TLS settings)."""
+    """The tests for both back-ends; a subclass sets MODULE, EXEC, MESSAGE (its bind error text) and env(ca) (TLS)."""
 
     # the back-end checks the certificate of the DC with the CA of env()
     CHECKS_CA = True
+    # the password change of a 773 or 532 account binds as the user, then again as LDAP_USER
+    CHPW_REBIND = True
 
     @classmethod
     def setUpClass(cls):
@@ -263,14 +376,23 @@ class AdTests:
             cls.addClassCleanup(cls.domain.remove_pso, dn)
         cls.domain.create()
 
-    def start(self, config="", **env):
+    def start(self, url=URL, ca=None, config="", **env):
         """Start the daemon; config goes in front of the MAVIS module, env into its setenv lines."""
         d = self.domain
+        tls = self.env(ca or settings()["TACTEST_SAMBA_CA"])
         # the daemon reads a quoted string as slapd.conf does
-        lines = "\n".join(f"\t\tsetenv {k} = {slapd_arg(v)}" for k, v in {**self.env(), **env}.items())
-        module = MODULE.substitute(module=self.MODULE, url=URL, base=d.ou, reader=d.dn("reader"),
+        lines = "\n".join(f"\t\tsetenv {k} = {slapd_arg(v)}" for k, v in {**tls, **env}.items())
+        module = MODULE.substitute(module=self.MODULE, url=url, base=d.ou, reader=d.dn("reader"),
                                    readerpw=d.password("reader"), env=lines, exec=self.EXEC)
         return self.start_daemon(POLICY.substitute(module=config + module, staff=d.dn("staff")))
+
+    def start_relay(self, refuse=None):
+        """Start a Relay (refuse: see there) and the daemon with the relay as its DC; return both."""
+        ca = CA("ad-relay")
+        self.addCleanup(ca.remove)
+        relay = Relay(ca, refuse)
+        self.addCleanup(relay.close)
+        return relay, self.start(url=relay.url, ca=ca.cert)
 
     def login(self, cn):
         return self.domain.login(cn)
@@ -378,42 +500,11 @@ class AdTests:
         for user, code, _ in BIND_ERRORS:
             with self.subTest(user=user, code=code), d.connect() as c:
                 self.assertEqual(c.pap(self.login(user), user + "-pw").status_name, "FAIL")
-            if code in ("773", "533", "532"):
+            if code in ("773", "532"):
                 continue
             with self.subTest(user=user, code=code, login="ascii"), d.connect() as c:
                 self.assertEqual(c.ascii_login(self.login(user), user + "-pw").statuses, ["GETPASS", "FAIL"])
 
-
-@unittest.skipUnless(URL, SKIP_REASON)
-@unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
-class AdMt(AdTests, DaemonTestCase):
-    CONFIG = None
-    MODULE = "external-mt"
-    EXEC = f'"{LDAPMAVIS}" "ldapmavis-mt"'
-    # ldapmavis-mt makes its TLS context before it reads the LDAP_OPT_X_TLS_* settings
-    CHECKS_CA = False
-
-    def env(self):
-        return {"LDAP_OPT_X_TLS_CACERTFILE": settings()["TACTEST_SAMBA_CA"],
-                "LDAP_OPT_X_TLS_REQUIRE_CERT": "LDAP_OPT_X_TLS_DEMAND"}
-
-    @unittest.expectedFailure
-    def test_filter_characters(self):
-        """ldapmavis-mt puts the user name into the filter without escapes: the name with "*" finds alice."""
-        super().test_filter_characters()
-
-
-@unittest.skipUnless(URL, SKIP_REASON)
-@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
-class AdPerl(AdTests, DaemonTestCase):
-    CONFIG = None
-    MODULE = "external"
-    EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
-
-    def env(self):
-        # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
-        return {"TLS_OPTIONS": f"verify => 'require', cafile => {perl_string(settings()['TACTEST_SAMBA_CA'])}",
-                "LDAP_CONNECT_TIMEOUT": "5"}
 
     def test_bind_error_messages(self):
         """The text for the "data" code of the AD bind error goes to the client."""
@@ -425,7 +516,7 @@ class AdPerl(AdTests, DaemonTestCase):
             password = "wrong" if user == "alice" else user + "-pw"
             with self.subTest(user=user, code=code), d.connect() as c:
                 r = c.pap(self.login(user), password)
-                self.assertEqual((r.status_name, r.server_msg), ("FAIL", text + "\n"), r)
+                self.assertEqual((r.status_name, r.server_msg), ("FAIL", self.MESSAGE % text + "\n"), r)
 
     def test_must_change(self):
         """A password that must change (773) or that expired (532) starts the password change dialog."""
@@ -441,6 +532,92 @@ class AdPerl(AdTests, DaemonTestCase):
             with self.subTest(password=password), d.connect() as c:
                 self.assertEqual(c.pap(self.login("reset"), password).status_name, status)
 
+    def test_must_change_bound(self):
+        """After a 773 bind error, the password change runs bound: a failed bind leaves no identity (RFC 4511 4.2.1)."""
+        # Samba keeps the identity of the earlier bind, so only the LDAP messages show the error
+        relay, d = self.start_relay()
+        with d.connect() as c:
+            r = c.ascii_login(self.login("renew"), "renew-pw", data=["renew-new", "renew-new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        dn = self.domain.dn("renew")
+        events = relay.events
+        modifies = [k for k, (_, op, value) in enumerate(events) if op == "modify" and value.lower() == dn.lower()]
+        self.assertTrue(modifies, f"no modify of {dn}: {events}")
+        for k in modifies:
+            results = [value for conn, op, value in events[:k] if conn == events[k][0] and op == "bound"]
+            self.assertEqual(results[-1:], [0], f"event {k}, the modify of {dn}, follows a failed bind: {events}")
+        with d.connect() as c:
+            self.assertEqual(c.pap(self.login("renew"), "renew-new").status_name, "PASS")
+
+    def test_must_change_groups_bound(self):
+        """After a 773 bind error, the group searches of the AUTH request run bound, as the password change."""
+        relay, d = self.start_relay()
+        with d.connect() as c:
+            r = c.ascii_login(self.login("grouped"), "grouped-pw", data=["grouped-new", "grouped-new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "PASS"], r)
+        events = relay.events
+        searches = [k for k, (_, op, _) in enumerate(events) if op == "search"]
+        self.assertTrue(searches, events)
+        for k in searches:
+            results = [value for conn, op, value in events[:k] if conn == events[k][0] and op == "bound"]
+            self.assertIn(results[-1:], ([], [0]), f"event {k}, a search, follows a failed bind: {events}")
+
+    def test_must_change_rebind_fails(self):
+        """A failed LDAP_USER bind after the 773 bind error gives a backend error (ERROR), and no change."""
+        # the change dialog (empty password) sends no AUTH: only the LDAP_USER bind before the change follows a 773
+        relay, d = self.start_relay(refuse=self.domain.dn("reader"))
+        with d.connect() as c:
+            r = c.ascii_login(self.login("refused"), "", data=["refused-pw", "refused-new", "refused-new"])
+        dn = self.domain.dn("refused")
+        events = relay.events
+        modifies = [k for k, (_, op, value) in enumerate(events) if op == "modify" and value.lower() == dn.lower()]
+        self.assertEqual(relay.refused, self.CHPW_REBIND, events)
+        if self.CHPW_REBIND:
+            # the client gets FAIL also for a backend error; the log tells them apart
+            self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "FAIL"], r)
+            line = f"\t{self.login('refused')}\ttty0\t127.0.0.1\tpassword change failed (backend error)"
+            self.wait_log("authentication", line, daemon=d)
+            self.assertEqual(modifies, [], events)
+            self.assertEqual(self.domain.bind_code("refused", "refused-pw"), "773")
+        else:
+            self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+            self.assertEqual(self.domain.bind_code("refused", "refused-new"), "")
+
+
+@unittest.skipUnless(URL, SKIP_REASON)
+@unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
+class AdMt(AdTests, DaemonTestCase):
+    CONFIG = None
+    MODULE = "external-mt"
+    EXEC = f'"{LDAPMAVIS}" "ldapmavis-mt"'
+    MESSAGE = "Permission denied: %s"
+    # ldapmavis-mt makes its TLS context before it reads the LDAP_OPT_X_TLS_* settings
+    CHECKS_CA = False
+
+    def env(self, ca):
+        return {"LDAP_OPT_X_TLS_CACERTFILE": ca,
+                "LDAP_OPT_X_TLS_REQUIRE_CERT": "LDAP_OPT_X_TLS_DEMAND"}
+
+    @unittest.expectedFailure
+    def test_filter_characters(self):
+        """ldapmavis-mt puts the user name into the filter without escapes: the name with "*" finds alice."""
+        super().test_filter_characters()
+
+
+@unittest.skipUnless(URL, SKIP_REASON)
+@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
+class AdPerl(AdTests, DaemonTestCase):
+    CONFIG = None
+    MODULE = "external"
+    EXEC = f'"{PERL}" "perl" "{LDAP_PERL}"'
+    MESSAGE = "%s"
+    # it changes the AD password as LDAP_USER, with no user bind
+    CHPW_REBIND = False
+
+    def env(self, ca):
+        # IO::Socket::SSL counts the timeout in whole seconds: with 1 s, an LDAPS handshake over a second boundary fails
+        return {"TLS_OPTIONS": f"verify => 'require', cafile => {perl_string(ca)}",
+                "LDAP_CONNECT_TIMEOUT": "5"}
 
 
 @unittest.skipUnless(URL, SKIP_REASON)
@@ -451,14 +628,11 @@ class AdPython(AdTests, DaemonTestCase):
     CONFIG = None
     MODULE = "external"
     EXEC = f'"{PYTHON}" "python3" "{LDAP_PYTHON}"'
+    MESSAGE = "Permission denied: %s"
     CHECKS_CA = False
 
-    def env(self):
+    def env(self, ca):
         return {}
-
-    @unittest.skip("mavis_tacplus_ldap.py gives ldap3 the old and the new password in the wrong order for AD")
-    def test_password_change(self):
-        pass
 
 
 class DomainCleanup(unittest.TestCase):
