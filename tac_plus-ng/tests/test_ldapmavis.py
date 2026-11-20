@@ -347,6 +347,17 @@ class LdapTests:
                 r = c.ascii_login(user, password)
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
+    def test_deep_groups(self):
+        """groupOfNames without LDAP_NESTED_GROUP_DEPTH: a chain of 12 levels, the user gets the top group l3."""
+        chain = [f"deep-{i}" for i in range(1, 12)] + ["l3"]
+        ldif = person("deep")
+        for name, member in zip(chain, [f"uid=deep,ou=people,{BASE}"] + [f"cn={g},ou=groups,{BASE}" for g in chain]):
+            ldif += f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: {name}\nmember: {member}\n"
+        _, d = self.start(ldif=ldif)
+        with d.connect() as c:
+            r = c.ascii_login("deep", "deeppw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
+
     def test_scope(self):
         """LDAP_SCOPE takes the documented values; the users are two levels below LDAP_BASE."""
         for scope, status in (("sub", "PASS"), ("one", "FAIL"), ("base", "FAIL")):
