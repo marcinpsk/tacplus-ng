@@ -240,7 +240,6 @@ class Slapd:
                 self.proc.wait()
 
 
-# ldapmavis-mt skips the groupOfNames search while LDAP_NESTED_GROUP_DEPTH is unset
 MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
@@ -248,7 +247,6 @@ MODULE = string.Template("""
 		setenv LDAP_USER = "$reader"
 		setenv LDAP_PASSWD = "readerpw"
 		setenv LDAP_FILTER = "(&(objectClass=inetOrgPerson)(uid=%s))"
-		setenv LDAP_NESTED_GROUP_DEPTH = "10"
 $extra		exec = $exec
 	}
 """)
@@ -341,13 +339,24 @@ class LdapTests:
             self.assertEqual(c.pap("mallory", "alicepw").status_name, "FAIL")
 
     def test_groups(self):
-        """groupOfNames, nested: the group names become TACMEMBER, the group DNs MEMBEROF."""
+        """groupOfNames, nested without a limit (no LDAP_NESTED_GROUP_DEPTH): names become TACMEMBER, DNs MEMBEROF."""
         _, d = self.start()
         for user, password, motd in (("alice", "alicepw", "netadmins in staff\n"), ("dave", "davepw", "staff\n"),
                                      ("bob", "bobpw", "")):
             with self.subTest(user=user), d.connect() as c:
                 r = c.ascii_login(user, password)
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
+    def test_deep_groups(self):
+        """groupOfNames without LDAP_NESTED_GROUP_DEPTH: a chain of 12 levels, the user gets the top group l3."""
+        chain = [f"deep-{i}" for i in range(1, 12)] + ["l3"]
+        ldif = person("deep")
+        for name, member in zip(chain, [f"uid=deep,ou=people,{BASE}"] + [f"cn={g},ou=groups,{BASE}" for g in chain]):
+            ldif += f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: {name}\nmember: {member}\n"
+        _, d = self.start(ldif=ldif)
+        with d.connect() as c:
+            r = c.ascii_login("deep", "deeppw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
 
     def test_scope(self):
         """LDAP_SCOPE takes the documented values; the users are two levels below LDAP_BASE."""
@@ -465,6 +474,13 @@ member: cn=xylophone,ou=groups,$base
         for name in chain:
             searches = re.findall(rf'SRCH base="cn={name},ou=groups,{BASE}" scope=0 ', log, re.IGNORECASE)
             self.assertEqual(len(searches), 1, name)
+
+    def test_group_depth(self):
+        """LDAP_NESTED_GROUP_DEPTH = 1: only the groups that have the user as a member, not staff."""
+        _, d = self.start(LDAP_NESTED_GROUP_DEPTH="1")
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
