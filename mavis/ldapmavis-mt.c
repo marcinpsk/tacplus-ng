@@ -49,7 +49,6 @@ static char *ldap_filter = NULL;
 static char *ldap_filter_group = NULL;
 static char *ldap_dn = NULL;
 static char *ldap_pw = NULL;
-static size_t ldap_filter_len = 0;
 static size_t ldap_filter_group_len = 0;
 static int ldap_group_depth = -2;
 static pcre2_code *ldap_memberof_regex = NULL;
@@ -211,11 +210,6 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
 
-    i = 0;
-    rc = ldap_set_option(*ldap, LDAP_OPT_X_TLS_NEWCTX, &i);
-    if (rc != LDAP_SUCCESS)
-	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
-
     rc = ldap_set_option(*ldap, LDAP_OPT_REFERRALS, LDAP_OPT_OFF);
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
@@ -254,7 +248,7 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_CERTFILE
     tmp = getenv("LDAP_OPT_X_TLS_CERTFILE");
     if (tmp)
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_CACERTFILE, tmp);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_CERTFILE, tmp);
 #endif
 
 #ifdef LDAP_OPT_X_TLS_CIPHER_SUITE
@@ -304,16 +298,16 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_PROTOCOL_MAX
     tmp = getenv("LDAP_OPT_X_TLS_PROTOCOL_MAX");
     if (tmp) {
-	int val = atoi(tmp);
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_KEYFILE, &val);
+	int val = (int) strtol(tmp, NULL, 0);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_PROTOCOL_MAX, &val);
     }
 #endif
 
 #ifdef LDAP_OPT_X_TLS_PROTOCOL_MIN
     tmp = getenv("LDAP_OPT_X_TLS_PROTOCOL_MIN");
     if (tmp) {
-	int val = atoi(tmp);
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_KEYFILE, &val);
+	int val = (int) strtol(tmp, NULL, 0);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_PROTOCOL_MIN, &val);
     }
 #endif
 
@@ -356,9 +350,19 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 #ifdef LDAP_OPT_X_TLS_PEERKEY_HASH
     tmp = getenv("LDAP_OPT_X_TLS_PEERKEY_HASH");
     if (tmp)
-	ldap_set_option(*ldap, LDAP_OPT_X_TLS_KEYFILE, tmp);
+	ldap_set_option(*ldap, LDAP_OPT_X_TLS_PEERKEY_HASH, tmp);
 #endif
 
+    // the TLS context takes the options above only when it is made
+    i = 0;
+    rc = ldap_set_option(*ldap, LDAP_OPT_X_TLS_NEWCTX, &i);
+    if (rc != LDAP_SUCCESS) {
+	// without a context of its own, libldap would use its global context
+	fprintf(stderr, "%d: TLS context: %s\n", __LINE__, ldap_err2string(rc));
+	ldap_unbind_ext_s(*ldap, NULL, NULL);
+	*ldap = NULL;
+	return rc;
+    }
 
     rc = LDAP_bind(*ldap, ldap_dn, ldap_pw);
     if (rc != LDAP_SUCCESS)
@@ -385,8 +389,16 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
 	    *capabilities = LDAP_eval_rootdse(*ldap, res);
 	ldap_msgfree(res);
     }
-    if (*capabilities & CAP_STARTTLS)
-	ldap_start_tls_s(*ldap, NULL, NULL);
+    if ((*capabilities & CAP_STARTTLS) && !ldap_tls_inplace(*ldap)) {
+	int tls_rc = ldap_start_tls_s(*ldap, NULL, NULL);
+	if (tls_rc != LDAP_SUCCESS) {
+	    // libldap removes TLS from the connection after a failed handshake
+	    fprintf(stderr, "%d: StartTLS: %s\n", __LINE__, ldap_err2string(tls_rc));
+	    ldap_unbind_ext_s(*ldap, NULL, NULL);
+	    *ldap = NULL;
+	    return tls_rc;
+	}
+    }
 
     if (rc != LDAP_SUCCESS)
 	fprintf(stderr, "%d: %s\n", __LINE__, ldap_err2string(rc));
@@ -785,9 +797,11 @@ static void *run_thread(void *arg)
     char *username = av_get(ac, AV_A_USER);
     char username_escaped[FILTER_ESCAPED_LEN(username)];
     filter_escape(username, username_escaped);
-    size_t filter_len = ldap_filter_len + strlen(username_escaped);
+    // a worker can find the server type after a failed start, so choose the default filter for each request
+    const char *user_filter = ldap_filter ? ldap_filter : (capabilities & CAP_AD) ? "(&(objectclass=user)(sAMAccountName=%s))" : "(uid=%s)";
+    size_t filter_len = strlen(user_filter) + strlen(username_escaped);
     char filter[filter_len];
-    snprintf(filter, filter_len, ldap_filter, username_escaped);
+    snprintf(filter, filter_len, user_filter, username_escaped);
 
     LDAPMessage *res = NULL;
     int rc = ldap_search_ext_s(ldap, base_dn, scope, filter, attrs, 0, NULL, NULL, NULL, ldap_sizelimit, &res);
@@ -1245,10 +1259,6 @@ int main(int argc, char **argv __attribute__((unused)))
     if (capabilities & CAP_389DS && (!ldap_dn || !ldap_pw))
 	fprintf(stderr, "The 389 directory server will not return the memberOf attribute for anonymous binds. "
 		"Please set the LDAP_USER and LDAP_PASSWD environment variables.\n");
-    if (!ldap_filter)
-	ldap_filter = (capabilities & CAP_AD) ? "(&(objectclass=user)(sAMAccountName=%s))" : "(uid=%s)";
-    ldap_filter_len = strlen(ldap_filter);
-
     if (!ldap_filter_group)
 	ldap_filter_group = "(&(objectclass=groupOfNames)(member=%s))";
     ldap_filter_group_len = strlen(ldap_filter_group);

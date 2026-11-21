@@ -8,12 +8,17 @@ staff; dave is a direct member of staff; bob is in no group. erin and
 frank have the tacacs schema of mavis/perl; the password of frank expired.
 """
 
+import base64
+import ctypes
+import ctypes.util
 import glob
+import hashlib
 import os
 import re
 import select
 import shutil
 import socket
+import ssl
 import string
 import struct
 import subprocess
@@ -21,8 +26,9 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 
-from tactest import DaemonTestCase, Stub, prefix
+from tactest import DaemonTestCase, Stub, prefix, tls
 from tactest.daemon import free_port, sanitizer_env
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
@@ -35,6 +41,7 @@ LDAP_PERL_OLD = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_ldap.pl")
 TACACS_SCHEMA = os.path.join(prefix(), "lib", "mavis", "extra", "tacacs.schema")
 PERL = shutil.which("perl") or "/usr/bin/perl"
 START_TIMEOUT = 10.0
+LDAP_OPT_X_TLS_PACKAGE = 0x6011  # from ldap.h
 
 BASE = "dc=example,dc=com"
 READER = "cn=reader," + BASE
@@ -52,6 +59,7 @@ include $tacacs
 include $memberof
 $modules
 sizelimit unlimited
+$tls
 pidfile $pidfile
 argsfile $argsfile
 
@@ -177,10 +185,51 @@ def perl_ldap():
         return False
 
 
+def libldap():
+    """The libldap of ldapmavis-mt; ctypes.util.find_library needs the development files on some systems."""
+    try:
+        out = subprocess.run(["ldd", LDAPMAVIS], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout
+    except OSError:  # no ldd, e.g. on macOS
+        out = b""
+    m = re.search(rb"^\s*libldap\S*\s+=>\s+(/\S+)", out, re.M)
+    return m.group(1).decode() if m else ctypes.util.find_library("ldap")
+
+
+def accepts_tls12(port):
+    """True if the TLS server on 127.0.0.1:port completes a TLS 1.2 handshake."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5.0) as sock, ctx.wrap_socket(sock):
+            return True
+    except (ssl.SSLError, ConnectionResetError):  # an alert, or a reset without one
+        return False
+
+
+def libldap_tls_package():
+    """The TLS library that libldap uses, for example "OpenSSL" or "GnuTLS"."""
+    name = libldap()
+    if name is None:
+        raise AssertionError("cannot find libldap")
+    lib = ctypes.CDLL(name)
+    lib.ldap_get_option.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)
+    value = ctypes.c_char_p()
+    if lib.ldap_get_option(None, LDAP_OPT_X_TLS_PACKAGE, ctypes.byref(value)) != 0 or value.value is None:
+        raise AssertionError("libldap does not tell its TLS package")
+    package = value.value.decode()
+    lib.ldap_memfree(value)
+    return package
+
+
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, entries=""):
+    def __init__(self, directory, entries="", tls=""):
+        """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only."""
+        self.scheme = "ldaps" if tls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
         self.dir = directory
@@ -196,7 +245,8 @@ class Slapd:
         paths.update(pidfile=os.path.join(directory, "slapd.pid"), argsfile=os.path.join(directory, "slapd.args"),
                      db=os.path.join(directory, "db"), memberof=os.path.join(directory, "memberof.schema"))
         with open(self.conf, "w") as f:
-            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), base=BASE))
+            f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
+                                          base=BASE))
         with open(paths["memberof"], "w") as f:
             f.write(MEMBEROF_SCHEMA)
         os.mkdir(os.path.join(directory, "db"))
@@ -210,7 +260,7 @@ class Slapd:
 
     @property
     def url(self):
-        return f"ldap://127.0.0.1:{self.port}"
+        return f"{self.scheme}://127.0.0.1:{self.port}"
 
     def start(self):
         self.port = free_port("127.0.0.1")
@@ -238,6 +288,162 @@ class Slapd:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+
+
+def ber(tag, *parts):
+    """A BER element with a definite length."""
+    body = b"".join(parts)
+    size = (len(body).bit_length() + 7) // 8
+    length = bytes([len(body)]) if len(body) < 0x80 else bytes([0x80 | size]) + len(body).to_bytes(size, "big")
+    return bytes([tag]) + length + body
+
+
+def ber_split(data):
+    """(tag, value, rest) of the first BER element of data, None while data holds only a part of it."""
+    if len(data) < 2:
+        return None
+    tag, size, start = data[0], data[1], 2
+    if size & 0x80:
+        start += size & 0x7F
+        if len(data) < start:
+            return None
+        size = int.from_bytes(data[2:start], "big")
+    return (tag, data[start:start + size], data[start + size:]) if len(data) >= start + size else None
+
+
+class StartTlsPeer:
+    """An LDAP peer on ldap:// that accepts StartTLS, fails the handshake, and keeps the connection open.
+
+    after_failure lists the operation tags that a client sent after the failed handshake (an unbind excepted),
+    hellos counts the ClientHello records.
+    """
+
+    SUCCESS = ber(0x0A, b"\0") + ber(0x04) + ber(0x04)
+    ROOT_DSE = ber(0x64, ber(0x04), ber(0x30, ber(0x30, ber(0x04, b"supportedExtension"),
+                                                  ber(0x31, ber(0x04, b"1.3.6.1.4.1.1466.20037")))))
+    TLS_ALERT = bytes.fromhex("15030300020228")  # fatal handshake_failure
+
+    def __init__(self):
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = "ldap://127.0.0.1:%d" % self.sock.getsockname()[1]
+        self.after_failure = []
+        self.hellos = 0
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    def serve(self, conn):
+        data, failed = b"", False
+        with conn:
+            while True:
+                size = 5 + int.from_bytes(data[3:5], "big") if len(data) >= 5 else None
+                if data[:1] in (b"\x15", b"\x16") and size and len(data) >= size:
+                    # a TLS record: the ClientHello after the StartTLS response, or an alert of the client
+                    if data[:1] == b"\x16":
+                        self.hellos += 1
+                        conn.sendall(self.TLS_ALERT)
+                        failed = True
+                    data = data[size:]
+                    continue
+                if data[:1] not in (b"", b"\x15", b"\x16", b"\x30"):
+                    data = b""
+                element = ber_split(data) if data[:1] == b"\x30" else None
+                if element is None:
+                    try:
+                        chunk = conn.recv(65536)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    data += chunk
+                    continue
+                _, message, data = element
+                _, msgid, op = ber_split(message)
+                msgid = ber(0x02, msgid)
+                if failed and op[0] != 0x42:
+                    self.after_failure.append(op[0])
+                if op[0] == 0x42:  # unbind
+                    return
+                if op[0] == 0x60:  # bind
+                    conn.sendall(ber(0x30, msgid, ber(0x61, self.SUCCESS)))
+                elif op[0] == 0x63:  # search
+                    conn.sendall(ber(0x30, msgid, self.ROOT_DSE) + ber(0x30, msgid, ber(0x65, self.SUCCESS)))
+                elif op[0] == 0x77:  # extended: StartTLS
+                    conn.sendall(ber(0x30, msgid, ber(0x78, self.SUCCESS, ber(0x8A, b"1.3.6.1.4.1.1466.20037"))))
+
+    def stop(self):
+        self.sock.close()
+
+
+class AdPeer:
+    """An LDAP peer on ldap:// with the root DSE of Active Directory and a user alice without a uid attribute.
+
+    While down is set, the peer closes each new connection at once. The user search finds alice only with a
+    sAMAccountName filter; the bind takes the passwords readerpw and alicepw.
+    """
+
+    ROOT_DSE = ber(0x64, ber(0x04), ber(0x30, ber(0x30, ber(0x04, b"supportedCapabilities"),
+                                                  ber(0x31, ber(0x04, b"1.2.840.113556.1.4.800")))))
+    ALICE = ber(0x64, ber(0x04, b"cn=alice,cn=users," + BASE.encode()),
+                ber(0x30, ber(0x30, ber(0x04, b"sAMAccountName"), ber(0x31, ber(0x04, b"alice")))))
+
+    def __init__(self):
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = "ldap://127.0.0.1:%d" % self.sock.getsockname()[1]
+        self.down = True
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            if self.down:
+                conn.close()
+            else:
+                threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    def serve(self, conn):
+        data = b""
+        with conn:
+            while True:
+                element = ber_split(data)
+                if element is None:
+                    try:
+                        chunk = conn.recv(65536)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    data += chunk
+                    continue
+                _, message, data = element
+                _, msgid, op = ber_split(message)
+                msgid = ber(0x02, msgid)
+                tag, value, _ = ber_split(op)
+                fields = []
+                while value and ber_split(value):
+                    _, field, value = ber_split(value)
+                    fields.append(field)
+                if tag == 0x42:  # unbind
+                    return
+                if tag == 0x60:  # bind: version, name, simple password
+                    code = b"\0" if fields[2] in (b"readerpw", b"alicepw") else b"\x31"
+                    conn.sendall(ber(0x30, msgid, ber(0x61, ber(0x0A, code), ber(0x04), ber(0x04))))
+                elif tag == 0x63:  # search: base, scope, deref, size, time, types only, filter, attributes
+                    entry = self.ROOT_DSE if not fields[0] else self.ALICE if b"sAMAccountName" in fields[6] else b""
+                    conn.sendall((ber(0x30, msgid, entry) if entry else b"") +
+                                 ber(0x30, msgid, ber(0x65, StartTlsPeer.SUCCESS)))
+
+    def stop(self):
+        self.sock.close()
 
 
 # ldapmavis-mt skips the groupOfNames search while LDAP_NESTED_GROUP_DEPTH is unset
@@ -308,17 +514,36 @@ $module
 class LdapTests:
     """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
 
-    def slapd(self, ldif=""):
-        """A running slapd; ldif: more entries."""
+    def login(self, d):
+        with d.connect(timeout=15.0) as c:
+            return c.pap("alice", "alicepw").status_name
+
+    def test_failed_starttls_stops_the_connection(self):
+        """After a failed StartTLS the back-end does not use the connection again, also if the peer keeps it open."""
+        peer = StartTlsPeer()
+        self.addCleanup(peer.stop)
+        d = self.start_daemon(POLICY.substitute(module=self.module(peer.url, '\t\tsetenv USE_STARTTLS = "1"\n'),
+                                                staff=STAFF, base=BASE, last=WIDE - 1))
+        for _ in range(2):
+            self.assertEqual(self.login(d), "FAIL")
+            with d.connect() as c:
+                self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+        # a new connection and handshake in each round: the logins failed in the handshake, not before it
+        self.assertGreaterEqual(peer.hellos, 2)
+        self.assertEqual(peer.after_failure, [])
+
+    def slapd(self, ldif="", tls=""):
+        """A running slapd; ldif: more entries, tls: TLS lines for slapd.conf."""
         # a directory of its own for every slapd: a test may start more than one
-        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif)
+        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif,
+                      tls)
         self.addCleanup(slapd.stop)
         slapd.start()
         return slapd
 
-    def start(self, ldif="", policy="", **env):
-        """Start slapd and the daemon; ldif: more entries, policy: more lines for the daemon, env: for the back-end."""
-        slapd = self.slapd(ldif)
+    def start(self, ldif="", policy="", tls="", **env):
+        """Start slapd (ldif, tls: see slapd()) and the daemon; policy: more lines for the daemon, env: for the back-end."""
+        slapd = self.slapd(ldif, tls)
         extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
         return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
                                                                             base=BASE, last=WIDE - 1) + policy)
@@ -570,6 +795,94 @@ class LdapMt(LdapTests, DaemonTestCase):
             with self.subTest(user=user), d.connect() as c:
                 r = c.ascii_login(user, user + "pw")
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
+
+    def test_ad_filter_after_a_failed_start(self):
+        """The server is down at the start: the AD default filter comes with the first root DSE, LDAP_FILTER stays."""
+        for env, status in (("", "PASS"), ('\t\tsetenv LDAP_FILTER = "(uid=%s)"\n', "FAIL")):
+            with self.subTest(env=env):
+                peer = AdPeer()
+                self.addCleanup(peer.stop)
+                module = (f'\tmavis module = external-mt {{\n\t\tsetenv LDAP_HOSTS = "{peer.url}"\n'
+                          f'\t\tsetenv LDAP_BASE = "{BASE}"\n\t\tsetenv LDAP_USER = "{READER}"\n'
+                          f'\t\tsetenv LDAP_PASSWD = "readerpw"\n{env}\t\texec = "{LDAPMAVIS}" "ldapmavis-mt"\n\t}}\n')
+                # no authentication fallback: after the failed first login the daemon asks the backend again
+                d = self.start_daemon(module + "\tuser backend = mavis\n\tpap backend = mavis\n"
+                                               "\truleset { rule everyone { script { permit } } }\n")
+                self.assertEqual(self.login(d), "FAIL")
+                peer.down = False
+                self.assertEqual(self.login(d), status)
+
+    def ca(self):
+        """A CA with a server certificate for 127.0.0.1 and a client certificate."""
+        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
+        self.addCleanup(ca.remove)
+        ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
+        return ca
+
+    @staticmethod
+    def ldaps(ca, more=""):
+        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
+                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_client_certificate(self):
+        """slapd demands a client certificate: LDAP_OPT_X_TLS_CERTFILE and LDAP_OPT_X_TLS_KEYFILE give it."""
+        ca = self.ca()
+        conf = self.ldaps(ca, "TLSVerifyClient demand\n")
+        client = {"LDAP_OPT_X_TLS_CERTFILE": ca.client[0], "LDAP_OPT_X_TLS_KEYFILE": ca.client[1]}
+        for env, status in (({}, "FAIL"), (client, "PASS")):
+            with self.subTest(env=sorted(env)):
+                _, d = self.start(tls=conf, LDAP_OPT_X_TLS_CACERTFILE=ca.cert, **env)
+                self.assertEqual(self.login(d), status)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_protocol_max(self):
+        """slapd takes TLS 1.3 only: LDAP_OPT_X_TLS_PROTOCOL_MAX = TLS 1.2 (0x303) cannot connect."""
+        ca = self.ca()
+        conf = self.ldaps(ca, "TLSProtocolMin 3.4\n")
+        for env, status in (({}, "PASS"), ({"LDAP_OPT_X_TLS_PROTOCOL_MAX": "0x303"}, "FAIL")):
+            with self.subTest(env=env):
+                if env and libldap_tls_package() == "GnuTLS":
+                    self.skipTest("libldap with GnuTLS ignores LDAP_OPT_X_TLS_PROTOCOL_MAX")
+                slapd, d = self.start(tls=conf, LDAP_OPT_X_TLS_CACERTFILE=ca.cert, **env)
+                # TACTEST_PREFIX can give ldapmavis-mt another libldap than slapd
+                if env and accepts_tls12(slapd.port):
+                    self.skipTest("slapd accepts TLS 1.2: its libldap (GnuTLS) ignores TLSProtocolMin")
+                self.assertEqual(self.login(d), status)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_peerkey_hash(self):
+        """LDAP_OPT_X_TLS_PEERKEY_HASH pins the key of the server: the right hash connects, another one does not."""
+        ca = self.ca()
+        der = subprocess.run(["openssl", "pkey", "-in", ca.server[1], "-pubout", "-outform", "DER"],
+                             stdout=subprocess.PIPE, check=True).stdout
+        right = "sha256:" + base64.b64encode(hashlib.sha256(der).digest()).decode()
+        wrong = "sha256:" + base64.b64encode(hashlib.sha256(b"another key").digest()).decode()
+        for pin, status in ((right, "PASS"), (wrong, "FAIL")):
+            with self.subTest(pin=pin):
+                _, d = self.start(tls=self.ldaps(ca), LDAP_OPT_X_TLS_CACERTFILE=ca.cert,
+                                  LDAP_OPT_X_TLS_PEERKEY_HASH=pin)
+                self.assertEqual(self.login(d), status)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_context_error(self):
+        """A TLS setting that libldap cannot load is a backend error: the global TLS context of libldap is not used."""
+        ca = self.ca()
+        # LDAPTLS_CACERT: the global TLS context of libldap trusts the server
+        _, d = self.start(tls=self.ldaps(ca), LDAPTLS_CACERT=ca.cert,
+                          LDAP_OPT_X_TLS_CACERTFILE=os.path.join(os.path.dirname(ca.cert), "no such ca.pem"))
+        self.assertEqual(self.login(d), "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS")
+
+
+@unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
+@unittest.skipUnless(shutil.which("ldd"), "no ldd")
+class Libldap(unittest.TestCase):
+    def test_without_development_files(self):
+        """Without the development files of libldap, ctypes.util.find_library finds no libldap."""
+        with unittest.mock.patch("ctypes.util.find_library", return_value=None):
+            self.assertTrue(libldap_tls_package())
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")

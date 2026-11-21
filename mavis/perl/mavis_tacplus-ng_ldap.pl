@@ -369,6 +369,9 @@ retry_once:
 			if ($mesg->code) {
 				$V[AV_A_USER_RESPONSE] = "TLS negotiation failed.";
 				debug_timer_stop;
+				# the socket is plain TCP again: do not use it for the next request
+				$ldap->disconnect;
+				$ldap = undef;
 				goto fatal;
 			}
 		}

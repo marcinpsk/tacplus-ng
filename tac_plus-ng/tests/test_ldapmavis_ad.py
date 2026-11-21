@@ -370,8 +370,6 @@ class AdMt(AdTests, DaemonTestCase):
     CONFIG = None
     MODULE = "external-mt"
     EXEC = f'"{LDAPMAVIS}" "ldapmavis-mt"'
-    # ldapmavis-mt makes its TLS context before it reads the LDAP_OPT_X_TLS_* settings
-    CHECKS_CA = False
 
     def env(self):
         return {"LDAP_OPT_X_TLS_CACERTFILE": settings()["TACTEST_SAMBA_CA"],
