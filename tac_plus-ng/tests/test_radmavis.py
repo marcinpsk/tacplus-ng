@@ -18,14 +18,17 @@ error.
 import hashlib
 import os
 import select
+import shlex
+import shutil
 import socket
 import string
 import subprocess
+import tempfile
 import threading
 import unittest
 
 from tactest import SOURCE, DaemonTestCase, features, prefix, radius, tls
-from tactest.daemon import sanitizer_env
+from tactest.daemon import build_os, sanitizer_env
 
 RADMAVIS_MT = os.path.join(prefix(), "sbin", "radmavis-mt")
 RADMAVIS = os.path.join(prefix(), "sbin", "radmavis")
@@ -94,6 +97,10 @@ tls-key-file {key}
 """
 
 NETADMINS_MOTD = "Member of netadmins.\n"
+
+# The radcli messages of a failed TLS start (lib/tls.c), through syslog with LOG_PERROR
+TLS_START_ERROR = r"error in certificate verification|error in handshake|cannot connect to"
+REQUEST = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
 
 # "mavis module = external-mt { exec = ... }" with radmavis-mt, or "external" with radmavis
 MODULE = string.Template("""
@@ -373,8 +380,7 @@ class RadiusTests(FailedLogin):
     def test_bad_option_on_the_command_line(self):
         """The backend exits when radcli cannot apply an option of the command line."""
         conf = self.radcli_conf(self.start_server().udp_port)
-        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
-        p = exchange(self.BACKEND, conf, request, ["serv-type=bogus"])
+        p = exchange(self.BACKEND, conf, REQUEST, ["serv-type=bogus"])
         self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
         self.assertIn(b"Applying the command line options failed.", p.stderr)
 
@@ -382,28 +388,47 @@ class RadiusTests(FailedLogin):
         """Over TLS the backend starts a second session for the options: "tls-ca-file" of another CA fails it."""
         b = self.start_server("tls")
         conf = self.radcli_conf(b.ports.get("tls"), "tls")
-        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
-        p = exchange(self.BACKEND, conf, request, ["radius_timeout=2"])
+        p = exchange(self.BACKEND, conf, REQUEST, ["radius_timeout=2"])
         self.assertEqual(reply_pairs(p).get("6"), "ACK", p)
-        p = exchange(self.BACKEND, conf, request, ["tls-ca-file=" + self.tls_ca("other").cert])
+        p = exchange(self.BACKEND, conf, REQUEST, ["tls-ca-file=" + self.tls_ca("other").cert])
         self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
         self.assertIn(b"Applying the command line options failed.", p.stderr)
+
+    def radcli_start_error(self, conf, reason):
+        """The backend exits at start. stderr has the radcli reason, then the line of the backend; returns stderr."""
+        p = exchange(self.BACKEND, conf, REQUEST)
+        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
+        err = p.stderr.decode(errors="replace")
+        failed = err.find(f"Reading or applying {conf} failed, see the radcli message before this line.\n")
+        self.assertGreater(failed, -1, err)
+        self.assertRegex(err[:failed], r"radmavis\[\d+\]: radcli: .*(" + reason + ")")
+        return err
 
     def test_tls_server_not_trusted(self):
         """radcli does the TLS handshake when it reads its configuration: without trust in B, the backend exits.
 
         Through A, such a login waits until A closes the connection, so the
-        backend runs here without A.
+        backend runs here without A. stderr has the reason of radcli.
         """
         b = self.start_server("tls")
-        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
         port = b.ports.get("tls")
-        p = exchange(self.BACKEND, self.radcli_conf(port, "tls"), request)
+        p = exchange(self.BACKEND, self.radcli_conf(port, "tls"), REQUEST)
         self.assertEqual(reply_pairs(p).get("6"), "ACK", p)
-        conf = self.radcli_conf(port, "tls", trust=self.tls_ca("other"))
-        p = exchange(self.BACKEND, conf, request)
-        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
-        self.assertIn(b"Parsing %s failed." % conf.encode(), p.stderr)
+        self.radcli_start_error(self.radcli_conf(port, "tls", trust=self.tls_ca("other")),
+                                "error in certificate verification|error in handshake")
+
+    def test_tls_server_down(self):
+        """B stops before the backend starts: stderr has the connect error of radcli."""
+        b = self.start_server("tls", check=False)
+        conf = self.radcli_conf(b.ports.get("tls"), "tls")
+        self.assertEqual(b.stop(remove=False), [])
+        self.radcli_start_error(conf, "cannot connect to")
+
+    def test_config_file_error(self):
+        """An unknown keyword: stderr has the config error of radcli and no TLS error."""
+        conf = self.scratch_file("radiusclient.conf", "no-such-keyword yes\n")
+        err = self.radcli_start_error(conf, "unrecognized keyword: no-such-keyword")
+        self.assertNotRegex(err, TLS_START_ERROR)
 
     def test_server_stopped(self):
         """No answer from the RADIUS server is a backend error: the fallback-only user can log in."""
@@ -479,6 +504,41 @@ class Radmavis(RadiusTests, RadmavisTestCase):
     """The same tests with radmavis, in "mavis module = external"."""
 
     BACKEND = RADMAVIS
+
+
+def build_flags():
+    """The DEF and INC* flags of the build of run-tests, or None for an installation from elsewhere."""
+    if prefix() != os.path.join(SOURCE, "build", build_os(), "tests-prefix"):
+        return None
+    with open(os.path.join(SOURCE, "build", "Makefile.inc." + build_os())) as f:
+        values = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line and not line.startswith("#"))
+    return [flag for key, value in values.items() if key == "DEF" or key.startswith("INC")
+            for flag in shlex.split(value)]
+
+
+@unittest.skipUnless(os.path.exists(RADMAVIS) or os.path.exists(RADMAVIS_MT), "the build has no radmavis")
+class NoLogPerror(unittest.TestCase):
+    """LOG_PERROR is not POSIX, and some syslog.h files do not define it: the backends must compile without it."""
+
+    def test_backends_compile_without_log_perror(self):
+        flags = build_flags()
+        if flags is None:
+            self.skipTest("no build flags for TACTEST_PREFIX")
+        cc = shutil.which(os.environ.get("CC", "").split(" ")[0] or "cc") or shutil.which("cc")
+        if not cc:
+            self.skipTest("no C compiler")
+        with tempfile.TemporaryDirectory(prefix="tactest-logperror-") as tmp:
+            shim = os.path.join(tmp, "no_log_perror.h")
+            with open(shim, "w") as f:
+                f.write("#include <syslog.h>\n#undef LOG_PERROR\n")
+            for name, binary in (("radmavis.c", RADMAVIS), ("radmavis-mt.c", RADMAVIS_MT)):
+                if not os.path.exists(binary):
+                    continue
+                with self.subTest(source=name):
+                    source = os.path.join(SOURCE, "mavis", name)
+                    p = subprocess.run([cc, "-fsyntax-only", "-include", shim, *flags, source],
+                                       capture_output=True, text=True, check=False)
+                    self.assertEqual(p.returncode, 0, p.stderr[-2000:])
 
 
 if __name__ == "__main__":
