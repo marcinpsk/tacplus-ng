@@ -1,8 +1,9 @@
 """radmavis-mt and radmavis: daemon A authenticates through external-mt or external against daemon B.
 
-B is a tac_plus-ng that answers RADIUS. The backend sends an Access-Request
-with PAP to B and maps the Class attribute of the Access-Accept to
-TACMEMBER ("group_attribute=Class"). For the answers B does not give
+B is a tac_plus-ng that answers RADIUS over UDP, RADIUS/TCP or RADIUS over
+TLS. The backend sends an Access-Request with PAP to B and maps the Class
+attribute of the Access-Accept to TACMEMBER ("group_attribute=Class").
+For the answers B does not give
 -- none at all, an Access-Challenge -- a RADIUS responder of the test
 takes the place of B. All tests run with radmavis (one request at a
 time, module "external") as well.
@@ -19,10 +20,12 @@ import os
 import select
 import socket
 import string
+import subprocess
 import threading
 import unittest
 
-from tactest import SOURCE, DaemonTestCase, prefix, radius
+from tactest import SOURCE, DaemonTestCase, features, prefix, radius, tls
+from tactest.daemon import sanitizer_env
 
 RADMAVIS_MT = os.path.join(prefix(), "sbin", "radmavis-mt")
 RADMAVIS = os.path.join(prefix(), "sbin", "radmavis")
@@ -44,10 +47,12 @@ SERVER = string.Template("""
 	user alice { password login = clear alicepw }
 	user bob { password login = clear bobpw }
 	user carol { password login = clear carolpw }
+	user erin { password login = clear push }
 	profile reply {
 		script {
 			if (user == carol) permit
 			if (user == alice) set radius[Class] = "netadmins"
+			if (user == erin) set radius[Class] = "netadmins"
 			set radius[Reply-Message] = "welcome"
 			permit
 		}
@@ -57,10 +62,18 @@ SERVER = string.Template("""
 	}
 """).substitute(dictionary=DICTIONARY, nas=NAS, secret=SECRET)
 
+# RADIUS over TLS (RFC 6614): the certificate selects the device of B, and the shared secret is "radsec"
+SERVER_TLS = """
+	tls cert-file = "{server_crt}"
+	tls key-file = "{server_key}"
+	tls ca-file = "{ca}"
+	device certnas.tactest {{ }}
+"""
+
 RADIUSCLIENT_CONF = """\
 nas-identifier tactest
-authserver 127.0.0.1:{port}:{secret}
-acctserver 127.0.0.1:{port}:{secret}
+authserver {server}
+acctserver {server}
 bindaddr {nas}
 dictionary {dictionary}
 seqfile {seqfile}
@@ -69,7 +82,15 @@ auth_order radius
 login_tries 1
 radius_timeout 1
 radius_retries 1
-serv-type udp
+serv-type {transport}
+"""
+
+# rc_send_server() takes the secret from authserver or the servers file, then uses "radsec" over TLS
+RADIUSCLIENT_TLS = """\
+servers {servers}
+tls-ca-file {ca}
+tls-cert-file {cert}
+tls-key-file {key}
 """
 
 NETADMINS_MOTD = "Member of netadmins.\n"
@@ -113,6 +134,43 @@ MFA_CLIENT = string.Template("""$module
 	ruleset { rule { script { permit } } }
 """)
 
+# local first factor of erin and bob; B accepts the second factor ("push") for erin only
+CLIENT_MFA = string.Template("""$module
+	user erin {
+		password login = clear erinpw
+		password pap = clear erinpw
+		mfa = yes
+	}
+	user bob {
+		password login = clear bobpw
+		password pap = clear bobpw
+		mfa = yes
+	}
+	ruleset { rule { script { permit } } }
+""")
+
+
+def need_tls():
+    if not tls.openssl_available():
+        raise unittest.SkipTest("no openssl command to make certificates")
+    if "openssl" not in features():
+        raise unittest.SkipTest("tac_plus-ng built without OpenSSL: B has no RADIUS over TLS")
+
+
+def exchange(backend, conf, body):
+    """One request to the backend in the legacy protocol, without tac_plus-ng."""
+    return subprocess.run([backend, "-c", conf, "group_attribute=Class"], input=body + b"=\n", capture_output=True,
+                          timeout=30, env=sanitizer_env(), check=False)
+
+
+def reply_pairs(p):
+    """The AV pairs of a legacy reply, {attribute number: value}; None without a result line."""
+    lines = p.stdout.decode(errors="replace").splitlines()
+    if not lines or not lines[-1].startswith("="):
+        return None
+    # radmavis adds a newline to the Reply-Message text of radcli, which ends with one already
+    return dict(line.split(" ", 1) for line in lines[:-1] if line)
+
 
 class Responder:
     """A RADIUS server on a free UDP port that answers every request with reply = (code, attributes).
@@ -154,17 +212,47 @@ class RadmavisTestCase(DaemonTestCase):
     CONFIG = None
     BACKEND = RADMAVIS_MT
 
-    def start_client(self, port, template=CLIENT, dictionary=RADCLI_DICTIONARY):
+    def tls_ca(self, name="ca"):
+        need_tls()
+        ca = tls.CA(self.id().split(".")[-1] + "-" + name)
+        self.addCleanup(ca.remove)
+        return ca
+
+    def start_server(self, transport="udp", check=True):
+        """B, the tac_plus-ng that answers RADIUS; with a TLS listener for transport "tls"."""
+        body, listen = SERVER, {}
+        if transport == "tls":
+            self.ca = self.tls_ca()
+            body = SERVER_TLS.format(ca=self.ca.cert, server_crt=self.ca.server[0], server_key=self.ca.server[1]) + body
+            listen = {"tls": "tls = yes"}
+        return self.start_daemon(body, udp=True, listen=listen, name=self.id().split(".")[-1] + "-server",
+                                 check=check)
+
+    def radcli_conf(self, port, transport="udp", dictionary=RADCLI_DICTIONARY, trust=None):
+        """trust: the CA whose certificates A accepts from B (radcli "tls-ca-file"), for transport "tls"."""
+        text = RADIUSCLIENT_CONF.format(server=f"127.0.0.1:{port}" + ("" if transport == "tls" else ":" + SECRET),
+                                        transport=transport, nas=NAS, dictionary=dictionary,
+                                        seqfile=self.scratch_file("radius.seq", ""))
+        if transport == "tls":
+            crt, key = self.ca.issue("certnas", "/CN=certnas.tactest")
+            text += RADIUSCLIENT_TLS.format(servers=self.scratch_file("servers", "127.0.0.1 radsec\n"),
+                                            ca=(trust or self.ca).cert, cert=crt, key=key)
+        return self.scratch_file("radiusclient.conf", text)
+
+    def start_client(self, port, template=CLIENT, dictionary=RADCLI_DICTIONARY, transport="udp"):
         """Daemon A, with the backend asking the RADIUS server on port."""
-        seqfile = self.scratch_file("radius.seq", "")
-        conf = self.scratch_file("radiusclient.conf",
-                                 RADIUSCLIENT_CONF.format(port=port, secret=SECRET, nas=NAS, seqfile=seqfile,
-                                                          dictionary=dictionary))
+        conf = self.radcli_conf(port, transport, dictionary)
         name = os.path.basename(self.BACKEND)
         module = MODULE.substitute(module="external-mt" if name == "radmavis-mt" else "external",
                                    path=self.BACKEND, name=name, conf=conf,
-                                   args='"group_attribute=Class"' if template is CLIENT else "")
+                                   args='"group_attribute=Class"' if template in (CLIENT, CLIENT_MFA) else "")
         return self.start_daemon(template.substitute(module=module))
+
+    def start_pair(self, check_server=True, dictionary=RADCLI_DICTIONARY, transport="udp", template=CLIENT):
+        """B first, then A with a radcli configuration that points at B over the transport of the test."""
+        server = self.start_server(transport, check_server)
+        port = {"udp": server.udp_port, "tcp": server.port, "tls": server.ports.get("tls")}[transport]
+        return server, self.start_client(port, template=template, dictionary=dictionary, transport=transport)
 
     def responder(self, reply=None):
         r = Responder(reply)
@@ -209,10 +297,6 @@ class FailedLogin:
 class RadiusTests(FailedLogin):
     """Each test starts B first, then A with a radcli configuration that points at the RADIUS port of B."""
 
-    def start_pair(self, check_server=True, dictionary=RADCLI_DICTIONARY):
-        server = self.start_daemon(SERVER, udp=True, name=self.id().split(".")[-1] + "-server", check=check_server)
-        return server, self.start_client(server.udp_port, dictionary=dictionary)
-
     def test_pap(self):
         _, a = self.start_pair()
         for password, status in (("alicepw", "PASS"), ("wrong", "FAIL")):
@@ -250,6 +334,42 @@ class RadiusTests(FailedLogin):
         with a.connect() as c:
             self.assertEqual(c.pap("carol", "carolpw").status_name, "PASS")
 
+    def test_pap_over_tcp(self):
+        """RADIUS/TCP (RFC 6613) on the TACACS+ port of B. radcli sends no Message-Authenticator here either."""
+        _, a = self.start_pair(transport="tcp")
+        for password, status in (("alicepw", "PASS"), ("wrong", "FAIL")):
+            with self.subTest(password=password), a.connect() as c:
+                self.assertEqual(c.pap("alice", password).status_name, status)
+
+    def test_pap_over_tls(self):
+        """RADIUS over TLS: A checks the certificate of B against the test CA, B checks the one of A."""
+        _, a = self.start_pair(transport="tls")
+        for password, status in (("alicepw", "PASS"), ("wrong", "FAIL")):
+            with self.subTest(password=password), a.connect() as c:
+                self.assertEqual(c.pap("alice", password).status_name, status)
+
+    def test_class_attribute_over_tls(self):
+        _, a = self.start_pair(transport="tls")
+        with a.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+            self.assertEqual((r.status_name, r.server_msg), ("PASS", NETADMINS_MOTD), r)
+
+    def test_tls_server_not_trusted(self):
+        """radcli does the TLS handshake when it reads its configuration: without trust in B, the backend exits.
+
+        Through A, such a login waits until A closes the connection, so the
+        backend runs here without A.
+        """
+        b = self.start_server("tls")
+        request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
+        port = b.ports.get("tls")
+        p = exchange(self.BACKEND, self.radcli_conf(port, "tls"), request)
+        self.assertEqual(reply_pairs(p).get("6"), "ACK", p)
+        conf = self.radcli_conf(port, "tls", trust=self.tls_ca("other"))
+        p = exchange(self.BACKEND, conf, request)
+        self.assertEqual((p.returncode, reply_pairs(p)), (255, None), p)
+        self.assertIn(b"Parsing %s failed." % conf.encode(), p.stderr)
+
     def test_server_stopped(self):
         """No answer from the RADIUS server is a backend error: the fallback-only user can log in."""
         b, a = self.start_pair(check_server=False)
@@ -278,6 +398,45 @@ class RadiusTests(FailedLogin):
 @unittest.skipUnless(os.path.exists(RADMAVIS_MT), "the build has no radmavis-mt (radcli or pthreads missing)")
 class RadiusServer(RadiusTests, RadmavisTestCase):
     """The tests with radmavis-mt, in "mavis module = external-mt"."""
+
+
+@unittest.skipUnless(os.path.exists(RADMAVIS_MT), "the build has no radmavis-mt (radcli or pthreads missing)")
+class RadiusMfa(RadmavisTestCase):
+    """MFA: after the local password of A, radmavis-mt sends B an Access-Request with the password "push".
+
+    B is the MFA proxy: it accepts "push" for erin (the user confirms) and
+    not for bob (the user declines). radmavis sends the first factor
+    again in place of "push".
+    """
+
+    def test_pap_with_the_second_factor(self):
+        _, a = self.start_pair(template=CLIENT_MFA)
+        for user, password, status in (("erin", "erinpw", "PASS"), ("bob", "bobpw", "FAIL")):
+            with self.subTest(user=user), a.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status)
+
+    def test_ascii_login_with_the_second_factor(self):
+        _, a = self.start_pair(template=CLIENT_MFA)
+        for user, password, status in (("erin", "erinpw", "PASS"), ("bob", "bobpw", "FAIL")):
+            with self.subTest(user=user), a.connect() as c:
+                r = c.ascii_login(user, password)
+                self.assertEqual(r.statuses, ["GETPASS", status], r)
+
+    def test_mfa_reply_has_no_groups(self):
+        """B sends the same Access-Accept with Class for both: only the AUTH reply has TACMEMBER.
+
+        tac_plus-ng ignores TACMEMBER in an MFA reply, so the backend runs
+        here without A. For MFA, radmavis-mt sends "push" and leaves PASSWORD
+        out of the reply: the first factor does not come back.
+        """
+        conf = self.radcli_conf(self.start_server().udp_port)
+        auth = exchange(RADMAVIS_MT, conf, b"0 TACPLUS\n4 erin\n8 push\n49 AUTH\n")
+        self.assertEqual(reply_pairs(auth), {"0": "TACPLUS", "4": "erin", "8": "push", "49": "AUTH",
+                                             "17": "welcome", "47": '"netadmins"', "52": "1", "36": "push",
+                                             "6": "ACK"}, auth)
+        mfa = exchange(RADMAVIS_MT, conf, b"0 TACPLUS\n4 erin\n8 erinpw\n49 MFA\n")
+        self.assertEqual(reply_pairs(mfa), {"0": "TACPLUS", "4": "erin", "49": "MFA", "17": "welcome", "6": "ACK"},
+                         mfa)
 
 
 @unittest.skipUnless(os.path.exists(RADMAVIS), "the build has no radmavis (radcli missing)")
