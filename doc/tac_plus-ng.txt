@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: e8bb53b768ec2733ce4e06298d4b6c6ef64ca445 $
+   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
      __________________________________________________________
 
    Table of Contents
@@ -3110,6 +3110,26 @@ int async 1
    LDAP_OPT_X_TLS_REQUIRE_CERT to LDAP_OPT_X_TLS_NEVER to turn the
    check off.
 setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
+
+   StartTLS: on an ldap:// URL, ldapmavis-mt reads the root DSE
+   without a bind. If the server offers StartTLS there, the
+   back-end starts TLS before the first bind. A failed StartTLS is
+   a backend error. Two variables change this:
+
+     * USE_STARTTLS (any value): StartTLS is mandatory, also if
+       the server does not offer it. A server without StartTLS
+       then gives a backend error. This also prevents a system in
+       the path to the server from removing the StartTLS offer
+       from the root DSE, which has no authentication.
+     * LDAP_SKIP_STARTTLS = 1: no StartTLS. The binds send the
+       passwords in clear text.
+
+   ldapmavis-mt does not start if both are set. If the server does
+   not let the back-end read the root DSE without a bind, set one
+   of them. When a connection has no TLS before the bind, the
+   back-end logs the connection to the LDAP server has no TLS: the
+   binds send the passwords in clear text. ldaps:// URLs do not
+   use StartTLS.
      __________________________________________________________
 
 5.2. PAM back-end

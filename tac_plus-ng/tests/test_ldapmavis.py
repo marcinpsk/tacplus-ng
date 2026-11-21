@@ -28,7 +28,7 @@ import time
 import unittest
 import unittest.mock
 
-from tactest import DaemonTestCase, Stub, prefix, tls
+from tactest import LINUX, DaemonTestCase, Stub, prefix, tls
 from tactest.daemon import free_port, sanitizer_env
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
@@ -49,6 +49,9 @@ STAFF = "cn=staff,ou=groups," + BASE
 WIDE = 2000                 # groups of one user, above the 1024 of the old fixed array
 # memberOf as a plain attribute, the way Active Directory has it; no overlay needed
 MEMBEROF_SCHEMA = "attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' SUP distinguishedName )\n"
+# slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
+CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
+TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn="([^"]*)" method=128)')
 
 SLAPD_CONF = string.Template("""\
 include $core
@@ -181,6 +184,17 @@ def modules():
     return ""
 
 
+def backend_fds(d):
+    """The number of open files of the ldapmavis-mt process of daemon d."""
+    for pid in d.descendants():
+        try:
+            if os.readlink(f"/proc/{pid}/exe").endswith("/ldapmavis-mt"):
+                return len(os.listdir(f"/proc/{pid}/fd"))
+        except OSError:
+            continue
+    raise AssertionError("no ldapmavis-mt process")
+
+
 def perl_ldap():
     """The Perl back-end needs Net::LDAP and IO::Socket::SSL."""
     try:
@@ -232,9 +246,10 @@ def libldap_tls_package():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, entries="", tls=""):
-        """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only."""
-        self.scheme = "ldaps" if tls else "ldap"
+    def __init__(self, directory, entries="", tls="", starttls=False):
+        """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only,
+        or on ldap:// for StartTLS."""
+        self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
         self.dir = directory
@@ -284,6 +299,18 @@ class Slapd:
         self.stop()
         with open(self.log, errors="replace") as f:
             raise AssertionError(f"slapd did not start on {self.url}:\n{f.read()[-3000:]}")
+
+    def binds(self):
+        """(DN, TLS) for each simple bind with a name, from the log; TLS: the connection had TLS before the bind."""
+        with open(self.log, errors="replace") as f:
+            events = TLS_OR_BIND.findall(f.read())
+        tls, binds = set(), []
+        for conn, established, dn in events:
+            if established:
+                tls.add(conn)
+            elif dn:
+                binds.append((dn, conn in tls))
+        return binds
 
     def stop(self):
         if self.proc is not None and self.proc.poll() is None:
@@ -564,18 +591,41 @@ class LdapTests:
         self.assertGreaterEqual(peer.hellos, 2)
         self.assertEqual(peer.after_failure, [])
 
-    def slapd(self, ldif="", tls=""):
-        """A running slapd; ldif: more entries, tls: TLS lines for slapd.conf."""
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def assert_login(self, d, status):
+        """alice gets status; the fallback-only user can log in only if it is the backend error (FAIL)."""
+        self.assertEqual(self.login(d), status)
+        with d.connect() as c:
+            self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS" if status == "FAIL" else "FAIL")
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_starttls_required(self):
+        """USE_STARTTLS: StartTLS before all binds; a server without StartTLS is a backend error."""
+        ca = self.ca()
+        with self.subTest("StartTLS"):
+            # slapd refuses simple binds without TLS
+            slapd, d = self.start(tls=self.ldaps(ca, "security simple_bind=1\n"), starttls=True, USE_STARTTLS="1",
+                                  **self.TRUST(ca.cert))
+            self.assert_login(d, "PASS")
+            self.assertTrue(slapd.binds())
+            self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
+        with self.subTest("no StartTLS"):
+            slapd, d = self.start(USE_STARTTLS="1")
+            self.assert_login(d, "FAIL")
+            self.assertEqual(slapd.binds(), [])
+
+    def slapd(self, ldif="", tls="", starttls=False):
+        """A running slapd; ldif: more entries, tls, starttls: see Slapd."""
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif,
-                      tls)
+                      tls, starttls)
         self.addCleanup(slapd.stop)
         slapd.start()
         return slapd
 
-    def start(self, ldif="", policy="", tls="", **env):
-        """Start slapd (ldif, tls: see slapd()) and the daemon; policy: more lines for the daemon, env: for the back-end."""
-        slapd = self.slapd(ldif, tls)
+    def start(self, ldif="", policy="", tls="", starttls=False, **env):
+        """Start slapd (ldif, tls, starttls: see slapd()) and the daemon; policy: more daemon lines, env: for the back-end."""
+        slapd = self.slapd(ldif, tls, starttls)
         extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in env.items())
         return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
                                                                             base=BASE, last=WIDE - 1) + policy)
@@ -757,9 +807,84 @@ class LdapMt(LdapTests, DaemonTestCase):
     def TRUST(cafile):
         return {"LDAP_OPT_X_TLS_CACERTFILE": cafile}
 
+    exe = LDAPMAVIS
+
     def module(self, url, extra):
         return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, extra=extra,
-                                 exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
+                                 exec=f'"{self.exe}" "ldapmavis-mt"')
+
+    def capture_stderr(self, name):
+        """The next start() runs ldapmavis-mt through a script that writes its stderr to the file name.
+
+        MAVIS logs the stderr of the back-end to syslog only.
+        """
+        log = self.scratch_file(name + ".log", "")
+        self.exe = self.scratch_file(name + ".sh", f'#!/bin/sh\nexec "{LDAPMAVIS}" 2>>"{log}"\n')
+        os.chmod(self.exe, 0o755)
+        return log
+
+    def assert_clear_text_warning(self, log, expected):
+        with open(log, errors="replace") as f:
+            text = f.read()
+        (self.assertIn if expected else self.assertNotIn)(CLEAR_TEXT_WARNING, text)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_starttls_offered(self):
+        """ldap:// to a server that offers StartTLS: StartTLS before all binds, a failure is a backend error.
+
+        LDAP_SKIP_STARTTLS=1 sends the binds in clear text.
+        """
+        ca = self.ca()
+        refuse_clear = self.ldaps(ca, "security simple_bind=1\n")
+        with self.subTest("CA not trusted"):
+            slapd, d = self.start(tls=refuse_clear, starttls=True)
+            self.assert_login(d, "FAIL")
+            self.assertEqual(slapd.binds(), [])
+        with self.subTest("CA trusted"):
+            log = self.capture_stderr("trusted")
+            slapd, d = self.start(tls=refuse_clear, starttls=True, LDAP_OPT_X_TLS_CACERTFILE=ca.cert)
+            self.assert_login(d, "PASS")
+            self.assertTrue(slapd.binds())
+            self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
+            self.assert_clear_text_warning(log, False)
+        with self.subTest("LDAP_SKIP_STARTTLS"):
+            log = self.capture_stderr("skip")
+            slapd, d = self.start(tls=self.ldaps(ca), starttls=True, LDAP_SKIP_STARTTLS="1")
+            self.assert_login(d, "PASS")
+            self.assertIn((READER, False), slapd.binds())
+            self.assert_clear_text_warning(log, True)
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_ldaps_root_dse_after_bind(self):
+        """ldaps:// to a server that refuses the root DSE before a bind: TLS is in place, so the bind follows."""
+        ca = self.ca()
+        _, d = self.start(tls=self.ldaps(ca, "require authc\n"), LDAP_OPT_X_TLS_CACERTFILE=ca.cert)
+        self.assert_login(d, "PASS")
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_clear_text_warning(self):
+        """A connection without TLS gives a warning on stderr before the bind; ldaps:// gives none."""
+        log = self.capture_stderr("ldap")
+        _, d = self.start()
+        self.assert_login(d, "PASS")
+        self.assert_clear_text_warning(log, True)
+        ca = self.ca()
+        log = self.capture_stderr("ldaps")
+        _, d = self.start(tls=self.ldaps(ca), LDAP_OPT_X_TLS_CACERTFILE=ca.cert)
+        self.assert_login(d, "PASS")
+        self.assert_clear_text_warning(log, False)
+
+    @unittest.skipUnless(LINUX, "the open files of the back-end are found through /proc")
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_failed_starttls_closes_the_connection(self):
+        """slapd closes the connection after the failed handshake; the back-end must close its socket too."""
+        ca = self.ca()
+        _, d = self.start(tls=self.ldaps(ca), starttls=True)
+        self.assertEqual(self.login(d), "FAIL")
+        before = backend_fds(d)
+        for _ in range(10):
+            self.assertEqual(self.login(d), "FAIL")
+        self.assertEqual(backend_fds(d), before)
 
     def test_request_without_a_user_name(self):
         """No or an empty user name: FAIL, and the backend answers the next request.
