@@ -4884,8 +4884,9 @@ int async 1
               </entry>
               <entry>
                 <para>Extra options for use with LDAPS or start_tls, in Perl hash syntax. See <ulink url="https://metacpan.org/pod/Net::LDAP">the Net::LDLAP documentation</ulink> for details.</para>
-                <para>Default: unset</para>
-                <para>Example: <literal>"sslversion =&gt; 'tlsv1_3'"</literal></para>
+                <para>The back-end checks the certificate of the server (<literal>verify =&gt; 'require'</literal>), unless <literal>TLS_OPTIONS</literal> sets <literal>verify</literal>. Name the CA of the server with <literal>cafile</literal>. <literal>verify =&gt; 'none'</literal> turns the check off.</para>
+                <para>Default: unset (the certificate of the server is checked)</para>
+                <para>Example: <literal>"sslversion =&gt; 'tlsv1_3'"</literal>, <literal>"cafile =&gt; '/path/to/ca.pem'"</literal></para>
               </entry>
             </row>
             <row>
@@ -4912,6 +4913,8 @@ int async 1
       <section>
         <title>Multi-threaded LDAP Backend</title>
         <para><literal>ldapmavis-mt</literal> (<emphasis>mt</emphasis> stands for <emphasis>multi-threaded</emphasis>) basically evaluates the same envrionment variables as <literal>mavis_tacplus-ng_ldap.pl</literal>. It needs to be be invoked via the <literal>external-mt</literal> module and is suited for long-lasting authentication session, e.g. due to multi-factor authentication.</para>
+        <para><literal>ldapmavis-mt</literal> does not read <literal>TLS_OPTIONS</literal>. It sets the TLS options of libldap from environment variables of the same names, e.g. <literal>LDAP_OPT_X_TLS_CACERTFILE</literal> or <literal>LDAP_OPT_X_TLS_PROTOCOL_MIN</literal>; see the <literal>ldap_set_option</literal> manual page and <literal>ldapmavis-mt -h</literal> for the list. The back-end checks the certificate of the server: <literal>LDAP_OPT_X_TLS_REQUIRE_CERT</literal> defaults to <literal>LDAP_OPT_X_TLS_DEMAND</literal>. Set <literal>LDAP_OPT_X_TLS_CACERTFILE</literal> to the CA of the server, or set <literal>LDAP_OPT_X_TLS_REQUIRE_CERT</literal> to <literal>LDAP_OPT_X_TLS_NEVER</literal> to turn the check off.</para>
+        <screen xml:space="preserve">setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"</screen>
       </section>
     </section>
     <section>

@@ -164,6 +164,11 @@ def person(uid, extra=""):
             f"uid: {uid}\ncn: {uid}\nsn: {uid}\nuserPassword: {uid}pw\n")
 
 
+def perl_string(value):
+    """value as a Perl string literal: TLS_OPTIONS of the Perl back-end is Perl source."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def first_existing(paths):
     return next((p for p in paths if os.path.isdir(p)), None)
 
@@ -512,11 +517,38 @@ $module
 
 
 class LdapTests:
-    """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block."""
+    """The tests for both back-ends; a subclass sets module(url, extra) to its "mavis module" block.
+
+    TRUST and NO_CHECK are the environment variables of the back-end that
+    trust a CA file and that turn the check of the server certificate off.
+    """
+
+    def ca(self):
+        """A CA with a server certificate for 127.0.0.1 and a client certificate."""
+        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
+        self.addCleanup(ca.remove)
+        ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
+        return ca
+
+    @staticmethod
+    def ldaps(ca, more=""):
+        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
+                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
 
     def login(self, d):
         with d.connect(timeout=15.0) as c:
             return c.pap("alice", "alicepw").status_name
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_tls_server_certificate_is_checked(self):
+        """By default the back-end checks the certificate of the server: a CA it does not trust is a backend error."""
+        ca = self.ca()
+        for env, status in (({}, "FAIL"), (self.TRUST(ca.cert), "PASS"), (dict(self.NO_CHECK), "PASS")):
+            with self.subTest(env=sorted(env)):
+                _, d = self.start(tls=self.ldaps(ca), **env)
+                self.assertEqual(self.login(d), status)
+                with d.connect() as c:
+                    self.assertEqual(c.pap("rescue", "rescuepw").status_name, "PASS" if status == "FAIL" else "FAIL")
 
     def test_failed_starttls_stops_the_connection(self):
         """After a failed StartTLS the back-end does not use the connection again, also if the peer keeps it open."""
@@ -719,6 +751,11 @@ member: cn=xylophone,ou=groups,$base
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
 class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
+    NO_CHECK = (("LDAP_OPT_X_TLS_REQUIRE_CERT", "LDAP_OPT_X_TLS_NEVER"),)
+
+    @staticmethod
+    def TRUST(cafile):
+        return {"LDAP_OPT_X_TLS_CACERTFILE": cafile}
 
     def module(self, url, extra):
         return MODULE.substitute(module="external-mt", url=url, base=BASE, reader=READER, extra=extra,
@@ -812,18 +849,6 @@ class LdapMt(LdapTests, DaemonTestCase):
                 peer.down = False
                 self.assertEqual(self.login(d), status)
 
-    def ca(self):
-        """A CA with a server certificate for 127.0.0.1 and a client certificate."""
-        ca = tls.CA("ldap ca")  # the blank tests the quoting in slapd.conf
-        self.addCleanup(ca.remove)
-        ca.client = ca.issue("client", "/O=tactest/CN=ldapmavis-mt")
-        return ca
-
-    @staticmethod
-    def ldaps(ca, more=""):
-        return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(ca.server[0])}\n"
-                f"TLSCertificateKeyFile {slapd_arg(ca.server[1])}\n{more}")
-
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_tls_client_certificate(self):
         """slapd demands a client certificate: LDAP_OPT_X_TLS_CERTFILE and LDAP_OPT_X_TLS_KEYFILE give it."""
@@ -889,6 +914,11 @@ class Libldap(unittest.TestCase):
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
+    NO_CHECK = (("TLS_OPTIONS", "verify => 'none'"),)
+
+    @staticmethod
+    def TRUST(cafile):
+        return {"TLS_OPTIONS": f"cafile => {perl_string(cafile)}"}
 
     def module(self, url, extra):
         return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra,

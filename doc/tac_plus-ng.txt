@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 773cfc3e0d5b8522d5334d67fe9cdbc49119f2e5 $
+   $Id: e8bb53b768ec2733ce4e06298d4b6c6ef64ca445 $
      __________________________________________________________
 
    Table of Contents
@@ -3071,9 +3071,14 @@ int async 1
    Extra options for use with LDAPS or start_tls, in Perl hash
    syntax. See the Net::LDLAP documentation for details.
 
-   Default: unset
+   The back-end checks the certificate of the server (verify =>
+   'require'), unless TLS_OPTIONS sets verify. Name the CA of the
+   server with cafile. verify => 'none' turns the check off.
 
-   Example: "sslversion => 'tlsv1_3'"
+   Default: unset (the certificate of the server is checked)
+
+   Example: "sslversion => 'tlsv1_3'", "cafile =>
+   '/path/to/ca.pem'"
    FLAG_AUTHORIZE_ONLY
 
    Don't attempt to authenticate users.
@@ -3094,6 +3099,17 @@ int async 1
    needs to be be invoked via the external-mt module and is suited
    for long-lasting authentication session, e.g. due to
    multi-factor authentication.
+
+   ldapmavis-mt does not read TLS_OPTIONS. It sets the TLS options
+   of libldap from environment variables of the same names, e.g.
+   LDAP_OPT_X_TLS_CACERTFILE or LDAP_OPT_X_TLS_PROTOCOL_MIN; see
+   the ldap_set_option manual page and ldapmavis-mt -h for the
+   list. The back-end checks the certificate of the server:
+   LDAP_OPT_X_TLS_REQUIRE_CERT defaults to LDAP_OPT_X_TLS_DEMAND.
+   Set LDAP_OPT_X_TLS_CACERTFILE to the CA of the server, or set
+   LDAP_OPT_X_TLS_REQUIRE_CERT to LDAP_OPT_X_TLS_NEVER to turn the
+   check off.
+setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
      __________________________________________________________
 
 5.2. PAM back-end

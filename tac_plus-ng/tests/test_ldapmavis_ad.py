@@ -25,7 +25,7 @@ from unittest import mock
 
 from tactest import DaemonTestCase, prefix
 from tactest.tls import CA
-from test_ldapmavis import LDAP_PERL, LDAPMAVIS, PERL, perl_ldap, slapd_arg
+from test_ldapmavis import LDAP_PERL, LDAPMAVIS, PERL, perl_ldap, perl_string, slapd_arg
 
 URL = os.environ.get("TACTEST_SAMBA_DC")
 LDAP_PYTHON = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_ldap.py")
@@ -85,11 +85,6 @@ def python_ldap3():
                               check=False).returncode == 0
     except OSError:
         return False
-
-
-def perl_string(value):
-    """value as a Perl string literal: TLS_OPTIONS of the Perl back-end is Perl source."""
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def unicode_pwd(password):
