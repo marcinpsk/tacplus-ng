@@ -190,7 +190,17 @@ static void mavis_lookup_final(tac_session * session, av_ctx * avc)
 
     if ((t = av_get(avc, AV_A_TYPE)) && !strcmp(t, AV_V_TYPE_TACPLUS) &&
 	(t = av_get(avc, AV_A_USER)) && !strcmp(t, session->username) &&
-	(t = av_get(avc, AV_A_TIMESTAMP)) && (atoi(t) == session->session_id) && (result = av_get(avc, AV_A_RESULT)) && !strcmp(result, AV_V_RESULT_OK)) {
+	(t = av_get(avc, AV_A_TIMESTAMP)) && (atoi(t) == session->session_id))
+	result = av_get(avc, AV_A_RESULT);
+
+    // password changes are supported for ASCII login and CHPASS only
+    if (result && !strcmp(result, AV_V_RESULT_OK) && av_get(avc, AV_A_PASSWORD_MUSTCHANGE) && !session->passwd_changeable) {
+	if (strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_INFO))
+	    result = AV_V_RESULT_FAIL;
+	av_set(avc, AV_A_PASSWORD_MUSTCHANGE, NULL);
+    }
+
+    if (result && !strcmp(result, AV_V_RESULT_OK)) {
 	tac_user *u = lookup_user(ar->usertable, session->username);
 	struct pwdat **pp = NULL;
 
