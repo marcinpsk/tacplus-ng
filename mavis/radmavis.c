@@ -85,8 +85,12 @@ int main(int argc, char **argv)
     if (argc < 2)
 	usage();
 
+#ifdef LOG_PERROR
     // rc_openlog() plus LOG_PERROR: the daemon log gets the radcli messages too
     openlog("radmavis", LOG_PID | LOG_PERROR, LOG_DAEMON);
+#else
+    rc_openlog("radmavis");
+#endif
 
     while (*a && strcmp(*a, "-c"))
 	a++;
