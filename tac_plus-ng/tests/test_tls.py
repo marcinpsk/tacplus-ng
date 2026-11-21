@@ -26,7 +26,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 
-"""TACACS+ over TLS (RFC 9887), TLS 1.3 PSK and RADIUS over TLS.
+"""TACACS+ over TLS (RFC 9887), TLS 1.3 PSK, RADIUS over TLS and over DTLS.
 
 The certificates come from a CA made for the test class (tactest.tls.CA,
 the openssl command); nothing is kept in the tree. Skipped without the
@@ -36,6 +36,7 @@ openssl command or in a build without OpenSSL.
 import os
 import socket
 import ssl
+import struct
 import time
 import unittest
 
@@ -152,6 +153,16 @@ class TlsTestCase(DaemonTestCase):
         r = conn.author("alice", ["service=shell", "cmd="])
         self.assertTrue(r.ok, r)
         return dict(a.split("=", 1) for a in r.args if a.startswith("tactest-"))
+
+    def assertDatagramsKeepTheConnection(self, body, datagrams):
+        """users_inc() at "last-recently-used limit" evicts the oldest context; a dropped datagram must not."""
+        d = self.start_daemon(body + "\tlast-recently-used limit = 1\n", udp=True, listen=self.LISTEN)
+        for name, datagram in datagrams:
+            with self.subTest(name):
+                c = self.connect(daemon=d)
+                c.pap("alice", "alicepw")   # the answer shows that the worker has the connection
+                self.radius("radsecret", daemon=d, listener="dtls", source="127.0.0.9").send_raw(datagram)
+                self.assertFalse(c.closed(timeout=2.0), "the datagram evicted the TACACS+ connection")
 
 
 class TacacsOverTls(TlsTestCase):
@@ -630,6 +641,152 @@ class ListenerAaaProtocol(TlsTestCase):
     def test_radius_tls(self):
         self.assertEqual(self.radsec("radius-tls").access_request("alice", "alicepw").code_name, "Access-Accept")
         self.assertRefused(lambda: self.connect_tls(listener="radius-tls"))
+
+
+class RadiusOverDtls(TlsTestCase):
+    """RADIUS over DTLS (RFC 7360) on a "protocol = UDP tls = yes" listener, through "openssl s_client -dtls1_2"."""
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP tls = yes"}
+    BODY = TLS_REALM + DEVICES.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") + RADSEC
+
+    @classmethod
+    def setUpClass(cls):
+        if not tls.dtls_client_available():
+            raise unittest.SkipTest("openssl s_client has no DTLS")
+        super().setUpClass()
+
+    def dtls(self, client="certnas"):
+        sock = tls.DtlsSocket((self.daemon.address, self.daemon.ports["dtls"]), self.ca.cert, self.certs[client],
+                              timeout=10.0)
+        return self.radius("radius/dtls", listener="dtls", sock=sock, timeout=10.0)
+
+    def test_access_accept(self):
+        r = self.dtls().access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
+
+    def test_access_reject(self):
+        self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
+
+    def test_several_requests_in_one_session(self):
+        c = self.dtls()
+        for password, code in (("alicepw", "Access-Accept"), ("wrong", "Access-Reject"), ("alicepw", "Access-Accept")):
+            with self.subTest(password=password):
+                self.assertEqual(c.access_request("alice", password).code_name, code)
+
+    def test_unknown_certificate_name_falls_back_to_the_address(self):
+        r = self.dtls("nobody").access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [], "a device other than localhost selected")
+
+    def test_accounting(self):
+        r = self.dtls().accounting_request([(radius.USER_NAME, b"alice"),
+                                            (radius.ACCT_STATUS_TYPE, struct.pack("!I", 1))])
+        self.assertEqual(r.code_name, "Accounting-Response", r)
+
+    def test_plain_radius_on_the_dtls_listener_gets_no_answer(self):
+        """The same request that the plain UDP listener accepts."""
+        plain = self.radius("radsecret", source="127.0.0.9")
+        self.assertEqual(plain.access_request("alice", "alicepw", message_authenticator=True).code_name,
+                         "Access-Accept")
+        c = self.radius("radsecret", listener="dtls", source="127.0.0.9", timeout=2.0)
+        with self.assertRaises(TimeoutError):
+            c.access_request("alice", "alicepw", message_authenticator=True)
+
+
+class RadiusDtlsAutoDetect(RadiusOverDtls):
+    """"tls = auto" on the UDP listener: DTLS and plain RADIUS on the same port."""
+
+    LISTEN = {"dtls": "protocol = UDP tls = auto"}
+
+    test_plain_radius_on_the_dtls_listener_gets_no_answer = None    # the port takes plain RADIUS too
+
+    def test_plain_radius_on_the_same_port(self):
+        c = self.radius("radsecret", listener="dtls", source="127.0.0.9")
+        self.assertEqual(c.access_request("alice", "alicepw", message_authenticator=True).code_name, "Access-Accept")
+
+    def test_datagram_the_dtls_check_refuses_keeps_the_least_recently_used_connection(self):
+        """Only a record that accept_control_check_tls() takes for DTLS skips the RADIUS length check."""
+        self.assertDatagramsKeepTheConnection(self.CONFIG, (
+            ("handshake of no DTLS version", b"\x16\xfe\x01" + bytes(17)),
+            ("application data of no DTLS version", b"\x17\xfe\x01" + bytes(17)),
+            ("shorter than the header check", b"\x16\xfe\xfd\x00\x00")))
+
+
+class RadiusDtlsRealmAutoDetect(RadiusDtlsAutoDetect):
+    """"tls auto-detect = yes" in the realm: a plain UDP listener takes DTLS too."""
+
+    LISTEN = {"dtls": "protocol = UDP"}
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
+
+
+class RadiusDtlsListenerRealmAutoDetect(RadiusDtlsAutoDetect):
+    """"tls auto-detect = yes" in the realm also on a "tls = yes" UDP listener: plain RADIUS works there too."""
+
+    LISTEN = {"dtls": "protocol = UDP tls = yes"}
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
+
+
+class RadiusDtlsRealmAutoDetectOff(RadiusOverDtls):
+    """"tls auto-detect = no" in the realm on a "tls = auto" UDP listener: the listener takes DTLS only."""
+
+    LISTEN = {"dtls": "protocol = UDP tls = auto"}
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = no\n"
+
+
+class RadiusOverDtlsPsk(TlsTestCase):
+    """DTLS 1.2 with a pre-shared key in a realm without a certificate, through "openssl s_client -psk"."""
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP tls = yes tls psk = yes", "auto": "protocol = UDP tls = auto tls psk = yes"}
+    CIPHER = "PSK-AES128-GCM-SHA256"
+    BODY = PSK + DEVICES + RADSEC + '\ttls ciphers = "%s"\n' % CIPHER
+    CLIENTS = {}
+
+    @classmethod
+    def setUpClass(cls):
+        if not tls.dtls_client_available():
+            raise unittest.SkipTest("openssl s_client has no DTLS")
+        super().setUpClass()
+
+    def test_access_accept(self):
+        for listener in ("dtls", "auto"):
+            with self.subTest(listener=listener):
+                sock = tls.SClientSocket((self.daemon.address, self.daemon.ports[listener]),
+                                         ["-dtls1_2", "-timeout", "-psk_identity", "psknas", "-psk", PSK_KEY,
+                                          "-cipher", self.CIPHER], timeout=10.0)
+                c = self.radius("radius/dtls", listener=listener, sock=sock, timeout=10.0)
+                self.assertEqual(c.access_request("alice", "alicepw").code_name, "Access-Accept")
+
+
+class DtlsAutoDetectWithoutContext(TlsTestCase):
+    """"tls = auto" in a realm without a certificate or a PSK: the worker cannot take DTLS."""
+
+    UDP = True
+    LISTEN = {"dtls": "protocol = UDP tls = auto"}
+    BODY = None
+
+    def test_dtls_record_keeps_the_least_recently_used_connection(self):
+        self.assertDatagramsKeepTheConnection(DEVICES + RADSEC, (("ClientHello record", b"\x16\xfe\xfd" + bytes(17)),))
+
+
+class PskRealmWithoutCertificate(TlsTestCase):
+    """"tls psk = yes" and no certificate: a handshake without a PSK has no SSL context and is refused."""
+
+    UDP = True
+    LISTEN = {"tls": "tls = yes", "dtls": "protocol = UDP tls = yes"}
+    BODY = PSK + DEVICES + RADSEC
+    CLIENTS = {}
+
+    def test_tls_without_psk_is_refused(self):
+        self.assertRefused(lambda: self.connect_tls(client=None))
+
+    def test_dtls_without_psk_is_refused(self):
+        c = self.radius("radius/dtls", listener="dtls", timeout=2.0)
+        c.send_raw(b"\x16\xfe\xfd" + bytes(10))
+        with self.assertRaises(TimeoutError):
+            c.recv_raw()
 
 
 @unittest.skipUnless(LINUX, "CPU time from /proc")
