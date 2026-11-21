@@ -6,6 +6,7 @@ anonymous user can only bind, so the backend must bind as LDAP_USER to
 search. alice is a member of netadmins, and netadmins is a member of
 staff; dave is a direct member of staff; bob is in no group. erin and
 frank have the tacacs schema of mavis/perl; the password of frank expired.
+The password of grace does not expire (shadowExpire -1), that of heidi expired.
 """
 
 import glob
@@ -141,6 +142,24 @@ uid: frank
 cn: Frank
 sn: Frank
 userPassword: frankpw
+shadowExpire: 1
+
+dn: uid=grace,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: shadowAccount
+uid: grace
+cn: Grace
+sn: Grace
+userPassword: gracepw
+shadowExpire: -1
+
+dn: uid=heidi,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: shadowAccount
+uid: heidi
+cn: Heidi
+sn: Heidi
+userPassword: heidipw
 shadowExpire: 1
 """).substitute(base=BASE, reader=READER, staff=STAFF)
 
@@ -635,6 +654,37 @@ class LdapPerlTacacsSchema(DaemonTestCase):
         Stub(d).set(users={"erin": {"password": "stubpw"}, "frank": {"password": "stubpw"}})
         for user, password, status in (("erin", "wrong", "FAIL"), ("erin", "erinpw", "FAIL"),
                                        ("erin", "stubpw", "PASS"), ("frank", "stubpw", "PASS")):
+            with self.subTest(user=user, password=password), d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status)
+
+
+@unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
+@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
+class LdapPerlGeneric(DaemonTestCase):
+    """mavis_tacplus_ldap.pl with LDAP_SERVER_TYPE = generic."""
+
+    CONFIG = None
+
+    def test_shadow_expire(self):
+        """shadowExpire -1 does not expire (shadow(5)), shadowExpire 1 expired in 1970."""
+        slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))))
+        self.addCleanup(slapd.stop)
+        slapd.start()
+        d = self.start_daemon(f"""
+	mavis module = external {{
+		setenv LDAP_SERVER_TYPE = "generic"
+		setenv LDAP_HOSTS = "{slapd.url}"
+		setenv LDAP_BASE = "{BASE}"
+		setenv LDAP_USER = "{READER}"
+		setenv LDAP_PASSWD = "readerpw"
+		exec = "{PERL}" "perl" "{LDAP_PERL_OLD}"
+	}}
+	user backend = mavis
+	pap backend = mavis
+	ruleset {{ rule {{ script {{ permit }} }} }}
+""")
+        for user, password, status in (("grace", "gracepw", "PASS"), ("grace", "wrong", "FAIL"),
+                                       ("heidi", "heidipw", "FAIL")):
             with self.subTest(user=user, password=password), d.connect() as c:
                 self.assertEqual(c.pap(user, password).status_name, status)
 

@@ -627,7 +627,7 @@ while ($in = <>) {
 			goto down;
 		} else {
 			my $val = $entry->get_value('shadowExpire');
-			if ($val && $val * 86400 < time){
+			if ($val && $val > -1 && $val * 86400 < time){
 				$V[AV_A_USER_RESPONSE] = "Password has expired.";
 				goto fail;
 			}
