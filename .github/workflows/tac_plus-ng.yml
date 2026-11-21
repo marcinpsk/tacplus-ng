@@ -91,7 +91,7 @@ jobs:
       # no Docker in this container: test_ldapmavis_ad.py skips (no TACTEST_SAMBA_DC)
       - run: tac_plus-ng/tests/run-tests
       # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
-      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt build/*/tests-prefix/sbin/tac_plus
+      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt build/*/tests-prefix/sbin/radmavis build/*/tests-prefix/sbin/tac_plus
       - run: test -x /usr/sbin/slapd && perl -MNet::LDAP -MIO::Socket::SSL -e 1
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
       - if: failure()
@@ -123,7 +123,7 @@ jobs:
         run: until [ -f build/samba-dc.rc ]; do sleep 1; done; cat build/samba-dc.log; [ "$(cat build/samba-dc.rc)" = 0 ] && cat build/samba-dc.env >> "$GITHUB_ENV"
       - run: TACTEST_PREFIX=$(echo "$PWD"/build/*/tests-prefix) tac_plus-ng/tests/run-tests
       # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
-      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt build/*/tests-prefix/sbin/tac_plus
+      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/radmavis-mt build/*/tests-prefix/sbin/radmavis build/*/tests-prefix/sbin/tac_plus
       - run: test -x /usr/sbin/slapd && perl -MNet::LDAP -MIO::Socket::SSL -e 1 && /usr/bin/python3 -c 'import ldap3'
       - run: build/*/tests-prefix/sbin/tac_plus-ng -v 2>&1 | grep /ARES
       - if: failure()
