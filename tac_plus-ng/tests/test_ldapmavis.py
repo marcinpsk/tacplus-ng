@@ -807,11 +807,16 @@ member: cn=xylophone,ou=groups,$base
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "labs and xparent\n"), r)
 
     def test_filter_characters_in_the_user_name(self):
-        """A "*" in the user name matches no other user (RFC 4515), also when "mavis user filter" lets it through."""
-        _, d = self.start(policy="\tacl any-user { permit }\n\tmavis user filter = any-user\n")
+        """A "*" in the user name matches no other user (RFC 4515), also when "mavis user filter" lets it through.
+
+        The user alic* exists: the escaped filter finds this user only.
+        """
+        _, d = self.start(ldif=person("alic*"), policy="\tacl any-user { permit }\n\tmavis user filter = any-user\n")
         for user in ("alic*", "*"):
             with self.subTest(user=user), d.connect() as c:
                 self.assertEqual(c.pap(user, "alicepw").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alic*", "alic*pw").status_name, self.LITERAL_STAR_USER)
 
     def test_empty_user_name(self):
         """tac_plus-ng passes no empty user name on (PAP: ERROR, ASCII: it asks again); the next login works."""
@@ -900,6 +905,7 @@ member: cn=xylophone,ou=groups,$base
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
 class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
+    LITERAL_STAR_USER = "PASS"
     NO_CHECK = (("LDAP_OPT_X_TLS_REQUIRE_CERT", "LDAP_OPT_X_TLS_NEVER"),)
 
     @staticmethod
@@ -1158,6 +1164,7 @@ class Libldap(unittest.TestCase):
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
+    LITERAL_STAR_USER = "FAIL"      # the Perl back-end refuses a user name with "*" before the search
     NO_CHECK = (("TLS_OPTIONS", "verify => 'none'"),)
 
     @staticmethod
