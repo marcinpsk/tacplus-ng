@@ -673,6 +673,17 @@ class LdapTests:
                 with d.connect() as c:
                     self.assertEqual(c.pap("alice", "alicepw").status_name, status)
 
+    def test_setenv_twice(self):
+        """A variable set twice for the module: the back-end gets the last value only."""
+        for scopes, status in ((("base", "sub"), "PASS"), (("sub", "base"), "FAIL")):
+            with self.subTest(scopes=scopes):
+                slapd = self.slapd()
+                extra = "".join(f'\t\tsetenv LDAP_SCOPE = "{scope}"\n' for scope in scopes)
+                d = self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
+                                                        base=BASE, last=WIDE - 1))
+                with d.connect() as c:
+                    self.assertEqual(c.pap("alice", "alicepw").status_name, status)
+
     def test_group_scope(self):
         """LDAP_SCOPE_GROUP = one below LDAP_BASE_GROUP = ou=groups finds both groups of alice."""
         _, d = self.start(LDAP_SCOPE_GROUP="one", LDAP_BASE_GROUP="ou=groups," + BASE)
