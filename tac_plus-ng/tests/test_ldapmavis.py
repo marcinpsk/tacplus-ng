@@ -479,6 +479,79 @@ class AdPeer:
         self.sock.close()
 
 
+def recv_exact(sock, n):
+    """n bytes from sock, fewer only at the end of the stream."""
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def ldap_message(sock):
+    """The next LDAP message (BER) from sock as (bytes, message ID, protocol op tag), None at the end."""
+    head = recv_exact(sock, 2)
+    if len(head) < 2:
+        return None
+    length = recv_exact(sock, head[1] & 0x7f) if head[1] & 0x80 else b""
+    body = recv_exact(sock, int.from_bytes(length, "big") if length else head[1])
+    id_len = body[1]
+    return head + length + body, int.from_bytes(body[2:2 + id_len], "big"), body[2 + id_len]
+
+
+class HoldingProxy:
+    """A TCP proxy to slapd that holds the answer to a search with `hold` in its request.
+
+    The proxy gives the held answer to the client before it sends the next
+    search on, so the late answer arrives before the answer to that search.
+    """
+
+    def __init__(self, port, hold):
+        self.upstream = ("127.0.0.1", port)
+        self.hold = hold.encode()
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = f"ldap://127.0.0.1:{self.sock.getsockname()[1]}"
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def close(self):
+        self.sock.close()
+
+    def accept(self):
+        while True:
+            try:
+                client, _ = self.sock.accept()
+            except OSError:
+                return
+            server = socket.create_connection(self.upstream)
+            state = {"ids": set(), "held": [], "lock": threading.Lock()}
+            threading.Thread(target=self.to_server, args=(client, server, state), daemon=True).start()
+            threading.Thread(target=self.to_client, args=(server, client, state), daemon=True).start()
+
+    def to_server(self, client, server, state):
+        while (m := ldap_message(client)) is not None:
+            data, msgid, op = m
+            with state["lock"]:
+                if op == 0x63 and self.hold in data:      # SearchRequest
+                    state["ids"].add(msgid)
+                elif op == 0x63 and state["held"]:
+                    client.sendall(b"".join(state["held"]))
+                    state["held"].clear()
+            server.sendall(data)
+        server.close()
+
+    def to_client(self, server, client, state):
+        while (m := ldap_message(server)) is not None:
+            data, msgid, _ = m
+            with state["lock"]:
+                if msgid in state["ids"]:
+                    state["held"].append(data)
+                else:
+                    client.sendall(data)
+        client.close()
+
+
 MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
@@ -911,6 +984,35 @@ class LdapMt(LdapTests, DaemonTestCase):
         for _ in range(10):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(backend_fds(d), before)
+
+    def test_late_group_answer(self):
+        """A group search that times out: its late answer does not take the place of the next search.
+
+        The direct groups are late-slow and late-direct, late-direct is in
+        late-parent, late-parent in l3. The proxy holds the answer for
+        late-slow longer than LDAP_TIMEOUT, so only late-slow is lost.
+        """
+        def group(name, extra=""):
+            return (f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: groupOfNames\nobjectClass: extensibleObject\n"
+                    f"cn: {name}\nmember: cn=nobody,{BASE}\n{extra}")
+        memberof = (person("late", f"objectClass: extensibleObject\nmemberOf: cn=late-slow,ou=groups,{BASE}\n"
+                                   f"memberOf: cn=late-direct,ou=groups,{BASE}\n")
+                    + group("late-slow") + group("late-direct", f"memberOf: cn=late-parent,ou=groups,{BASE}\n")
+                    + group("late-parent", f"memberOf: cn=l3,ou=groups,{BASE}\n") + group("l3"))
+        member = (person("late") + group("late-slow", f"member: uid=late,ou=people,{BASE}\n")
+                  + group("late-direct", f"member: uid=late,ou=people,{BASE}\n")
+                  + group("late-parent", f"member: cn=late-direct,ou=groups,{BASE}\n")
+                  + group("l3", f"member: cn=late-parent,ou=groups,{BASE}\n"))
+        for walk, ldif in (("memberOf", memberof), ("groupOfNames", member)):
+            with self.subTest(walk=walk):
+                slapd = self.slapd(ldif)
+                proxy = HoldingProxy(slapd.port, f"cn=late-slow,ou=groups,{BASE}")
+                self.addCleanup(proxy.close)
+                module = self.module(proxy.url, '\t\tsetenv LDAP_TIMEOUT = "1"\n')
+                d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF, base=BASE, last=WIDE - 1))
+                with d.connect(timeout=30.0) as c:
+                    r = c.ascii_login("late", "latepw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
 
     def test_request_without_a_user_name(self):
         """No or an empty user name: FAIL, and the backend answers the next request.

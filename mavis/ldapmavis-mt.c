@@ -631,11 +631,11 @@ static void dnhash_add_entry(LDAP *ldap, struct dnhash **h, struct berval **dire
 	int next = cur ^ 1;
 
 	for (size_t first = 0; first < list[cur].count; first += GROUP_SEARCHES_PENDING) {
-	    int msgid_dummy;
+	    int msgid[GROUP_SEARCHES_PENDING];
 	    int success = 0;
 	    for (size_t i = first; i < list[cur].count && i < first + GROUP_SEARCHES_PENDING; i++) {
 		int rc = ldap_search_ext(ldap, list[cur].dn[i], LDAP_SCOPE_BASE, "(objectClass=*)", attrs, 0, NULL, NULL, NULL, ldap_sizelimit,
-					 &msgid_dummy);
+					 &msgid[success]);
 		if (rc == LDAP_SUCCESS)
 		    success++;
 		else
@@ -645,9 +645,13 @@ static void dnhash_add_entry(LDAP *ldap, struct dnhash **h, struct berval **dire
 		struct timeval tv = {.tv_sec = ldap_timeout };
 		LDAPMessage *res = NULL;
 
-		int rc = ldap_result(ldap, LDAP_RES_ANY, 1, &tv, &res);
+		// a late result of a search that timed out must not take the place of the next one
+		int rc = ldap_result(ldap, msgid[i], LDAP_MSG_ALL, &tv, &res);
+		if (rc == 0)
+		    ldap_abandon_ext(ldap, msgid[i], NULL, NULL);
 
-		if (rc == LDAP_RES_SEARCH_RESULT && ldap_count_entries(ldap, res) == 1) {
+		// a result read while waiting for another search has the type of its first message
+		if (rc > 0 && ldap_count_entries(ldap, res) == 1) {
 		    LDAPMessage *entry = ldap_first_entry(ldap, res);
 
 		    BerElement *be = NULL;
@@ -690,7 +694,7 @@ static int dnhash_add_entry_groupOfNames(LDAP *ldap, struct dnhash **h, char *dn
 	int next = cur ^ 1;
 
 	for (size_t first = 0; first < list[cur].count; first += GROUP_SEARCHES_PENDING) {
-	    int msgid_dummy;
+	    int msgid[GROUP_SEARCHES_PENDING];
 	    int success = 0;
 	    for (size_t i = first; i < list[cur].count && i < first + GROUP_SEARCHES_PENDING; i++) {
 		char value[FILTER_ESCAPED_LEN(list[cur].dn[i])];
@@ -698,7 +702,7 @@ static int dnhash_add_entry_groupOfNames(LDAP *ldap, struct dnhash **h, char *dn
 		size_t filter_len = strlen(value) + ldap_filter_group_len;
 		char filter[filter_len];
 		snprintf(filter, filter_len, ldap_filter_group, value);
-		int rc = ldap_search_ext(ldap, base_dn_group, scope_group, filter, attrs, 0, NULL, NULL, NULL, ldap_sizelimit, &msgid_dummy);
+		int rc = ldap_search_ext(ldap, base_dn_group, scope_group, filter, attrs, 0, NULL, NULL, NULL, ldap_sizelimit, &msgid[success]);
 		if (rc == LDAP_SUCCESS)
 		    success++;
 		else
@@ -708,9 +712,13 @@ static int dnhash_add_entry_groupOfNames(LDAP *ldap, struct dnhash **h, char *dn
 		struct timeval tv = {.tv_sec = ldap_timeout };
 		LDAPMessage *res = NULL;
 
-		int rc = ldap_result(ldap, LDAP_RES_ANY, 1, &tv, &res);
+		// a late result of a search that timed out must not take the place of the next one
+		int rc = ldap_result(ldap, msgid[i], LDAP_MSG_ALL, &tv, &res);
+		if (rc == 0)
+		    ldap_abandon_ext(ldap, msgid[i], NULL, NULL);
 
-		if (rc == LDAP_RES_SEARCH_RESULT && ldap_count_entries(ldap, res) > 0) {
+		// a result read while waiting for another search has the type of its first message
+		if (rc > 0 && ldap_count_entries(ldap, res) > 0) {
 		    for (LDAPMessage * entry = ldap_first_entry(ldap, res); entry; entry = ldap_next_entry(ldap, entry)) {
 			char *gdn = ldap_get_dn(ldap, entry);
 			if (!dnhash_match(h, gdn))
