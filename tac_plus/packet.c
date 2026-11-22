@@ -452,6 +452,15 @@ void tac_read(struct context *ctx, int cur)
     tac_session *session = RB_lookup_session(ctx->sessions, ctx->hdr.session_id);
 
     if (session) {
+	// RFC 8907 4.1: a client sends odd numbers only, and the number must not wrap
+	if (session->seq_no >= 254 || !(ctx->hdr.seq_no & 1)) {
+	    report(session, LOG_ERR, ~0, "%s: sequence number %d ends session %.8x", ctx->nas_address_ascii, (int) ctx->hdr.seq_no, ntohl(ctx->hdr.session_id));
+	    // no use of ctx after cleanup_session(), which may free it
+	    mem_free(ctx->mem, &ctx->in);
+	    ctx->hdroff = 0;
+	    cleanup_session(session, 1);
+	    return;
+	}
 	session->seq_no++;
 	if (!session->user_is_session_specific)
 	    session->user = NULL;	/* may be outdated */

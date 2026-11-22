@@ -242,6 +242,77 @@ class SingleConnectionMayClose(TacPlusTestCase):
         self.assertEqual(keep.pap("alice", "alicepw").status_name, "PASS")
 
 
+class SequenceNumber(TacPlusTestCase):
+    """RFC 8907 4.1: the daemon ends the session at packet 255, it does not answer with sequence number 0."""
+
+    CONFIG = """
+	single-connection = yes
+	password max-attempts = 200
+	user = alice {
+		login = clear alicepw
+		pap = clear alicepw
+	}
+"""
+
+    def test_the_sequence_number_does_not_wrap(self):
+        with self.connect() as c:
+            s = c.session()
+            r = s.start(authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                self.assertEqual(r.status_name, "GETUSER", r)
+                r = s.cont()
+            s.send(Packet.authen_continue())
+            self.assertTrue(c.silent(), "the daemon answered packet 255")
+
+    def test_the_right_password_in_packet_255_does_not_pass(self):
+        with self.connect() as c:
+            s = c.session()
+            r = s.start(user="alice", authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                self.assertEqual(r.status_name, "GETPASS", r)
+                r = s.cont(user_msg="wrong%d" % s.seq_no)
+            s.send(Packet.authen_continue(user_msg="alicepw"))
+            self.assertTrue(c.silent(), "the daemon answered packet 255")
+
+    def test_the_limit_with_single_connection_may_close(self):
+        """The end of the last session closes the connection; the context is freed once."""
+        d = self.start_daemon(self.CONFIG + "\thost = may-close { address = 127.0.0.1/32 single-connection may-close = yes }\n")
+        with d.connect() as c:
+            s = c.session()
+            r = s.start(authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                r = s.cont()
+            s.send(Packet.authen_continue())
+            self.assertTrue(c.closed(), "the daemon answered packet 255")
+
+    def test_other_sessions_on_a_single_connection_go_on(self):
+        with self.connect(single_connect=True) as c:
+            s = c.session()
+            r = s.start(authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                r = s.cont()
+            s.send(Packet.authen_continue())
+            self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+
+    def test_an_even_number_while_a_reply_is_due_ends_the_session(self):
+        """A packet that the client sends before the reply to its previous packet."""
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + MAVIS_BACKEND)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw"}}, hold=1)
+        with d.connect() as c:
+            s = c.session()
+            self.assertEqual(s.start(user="alice", authen_type=AUTHEN_TYPE_ASCII).status_name, "GETPASS")
+            s.send(Packet.authen_continue(user_msg="pw"))
+            deadline = time.monotonic() + 5
+            while not stub.requests() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            s.send(Packet.authen_continue(user_msg="pw"))
+            time.sleep(0.5)
+            stub.release(1)
+            self.assertTrue(c.silent(), "the daemon answered")
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH"])
+
+
 MAVIS_BACKEND = """
 	user backend = mavis
 	login backend = mavis chpass

@@ -62,8 +62,10 @@ State, all keys optional:
                 test released that request (see release)
   double_write  answer every request a second time, once the test released
                 it, and journal that as result "again" (#228)
+  hold          answer the n-th request of a child only once the test
+                released that request (see release)
   release       the number of the request (n in the journal) up to which a
-                child may go on with "quit" or "double_write"; Stub.release()
+                child may go on with "hold", "quit" or "double_write"; Stub.release()
                 sets it. Until then the child waits, so the test decides when
                 the child acts -- after the client got the first answer --
                 instead of a pause that a loaded host may stretch.
@@ -137,7 +139,7 @@ class Stub:
         os.replace(tmp, self.state_path)
 
     def release(self, n):
-        """Let a child go on with "quit" or "double_write" after its request n."""
+        """Let a child go on with "hold", "quit" or "double_write" after its request n."""
         state = _load(self.state_path)
         state["release"] = n
         self.set(**state)
@@ -249,6 +251,8 @@ def serve(libdir):
             if "expiry" in known:
                 d.set_expiry(known["expiry"])
         verdict, code = answers[result]
+        if state.get("hold") == n:
+            _wait_release(state_path, n)
         d.write(verdict, code, state.get("message"))
         if state.get("double_write"):
             _wait_release(state_path, n)

@@ -1740,6 +1740,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 	session->authen_data = mem_alloc(session->mem, sizeof(struct authen_data));
 
     if (hdr->seq_no == 1) {
+	session->passwd_changeable = 0;
 	switch (start->action) {
 	case TAC_PLUS_AUTHEN_LOGIN:
 	    switch (start->service) {
