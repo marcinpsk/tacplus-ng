@@ -47,7 +47,7 @@ State, all keys optional:
                         "member": [groups] or a string as it is,
                         "memberof": [LDAP group DNs] or a string as it is,
                         "sshkey": str, "mustchange": bool,
-                        "new_password": str,
+                        "new_password": str, "challenge": str,
                         "profile": the user profile (AV_A_TACPROFILE) as it is,
                         "expiry": the password expiry, seconds since the epoch}}
   hosts         {address: the host profile (AV_A_TACPROFILE) as it is}
@@ -72,7 +72,8 @@ State, all keys optional:
                 test-only variables (Stub.module(setenv=...)), never a password
 
 Without a forced result: an unknown user is NOTFOUND; INFO is ACK with
-the user's attributes; AUTH and CHPW are ACK if the password matches,
+the user's attributes; CHAL is ACK with them and the user's "challenge"
+(AV_A_CHALLENGE); AUTH and CHPW are ACK if the password matches,
 else NAK; HOST is ACK with the profile of a known address; DACL is ACK
 for a name in "dacls"; other request types are NOTFOUND. A CHPW for a
 user with "new_password" is ACK only if the new password is that one
@@ -207,9 +208,9 @@ def serve(libdir):
         if result is None:
             if host is not None or dacl is not None:
                 result = "ACK"
-            elif known is None or tactype not in ("INFO", "AUTH", "CHPW"):
+            elif known is None or tactype not in ("INFO", "CHAL", "AUTH", "CHPW"):
                 result = "NOTFOUND"
-            elif tactype == "INFO" or av.get(M.AV_A_PASSWORD) == known.get("password"):
+            elif tactype in ("INFO", "CHAL") or av.get(M.AV_A_PASSWORD) == known.get("password"):
                 result = "ACK"
             else:
                 result = "NAK"
@@ -242,6 +243,8 @@ def serve(libdir):
                 d.set_sshpubkey(known["sshkey"])
             if known.get("profile"):
                 d.set_tacprofile(known["profile"])
+            if tactype == "CHAL" and known.get("challenge"):
+                d.av_pairs[M.AV_A_CHALLENGE] = known["challenge"]
             d.password_mustchange(bool(known.get("mustchange")))
             if "expiry" in known:
                 d.set_expiry(known["expiry"])

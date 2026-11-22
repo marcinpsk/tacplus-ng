@@ -294,6 +294,12 @@ static void mavis_lookup_final(tac_session * session, av_ctx * avc)
 	if (!pp)
 	    pp = (eval_passwd_acl(session))->passwd;
 
+	// password changes are supported for ASCII login and CHPASS only
+	if (av_get(avc, AV_A_PASSWORD_MUSTCHANGE) && !session->passwd_changeable && !strcmp(session->mavis_data->mavistype, AV_V_TACTYPE_AUTH)) {
+	    session->mavisauth_res = TAC_PLUS_AUTHEN_STATUS_FAIL;
+	    return;
+	}
+
 	if (u->dynamic)
 	    u->dynamic = io_now.tv_sec + ar->caching_period;
 
