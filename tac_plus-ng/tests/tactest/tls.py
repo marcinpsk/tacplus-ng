@@ -78,7 +78,7 @@ def _openssl(*args, cwd=None):
     return p.stdout
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)  # functools.cache needs Python 3.9
 def _libressl_command():
     """LibreSSL "x509 -req" adds no AKI and rejects "authorityKeyIdentifier = none"; OpenSSL 3 adds one unless told "none"."""
     return _openssl("version").startswith(b"LibreSSL")
