@@ -136,6 +136,7 @@ LDAP_SKIP_POSIXGROUP
 LDAP_SKIP_GROUPOFNAMES
 	0: never skip the corresponding LDAP group lookups
 	1: always skip
+	Other values have the effect of 0.
 	Default: unset
 """
 
@@ -169,9 +170,10 @@ eval_env('LDAP_TACMEMBER', 'tacMember')
 ou_regex = re.compile('(?i)^ou=(.+)$')
 eval_env('LDAP_TACMEMBER_MAP_OU', None)
 eval_env('LDAP_NESTED_GROUP_DEPTH', None)
-eval_env('LDAP_SKIP_MEMBEROF', None)
-eval_env('LDAP_SKIP_POSIXGROUP', None)
-eval_env('LDAP_SKIP_GROUPOFNAMES', None)
+# as in the Perl back-end: only "1" skips, and an empty value is set (no automatic skip)
+LDAP_SKIP_MEMBEROF = os.getenv('LDAP_SKIP_MEMBEROF')
+LDAP_SKIP_POSIXGROUP = os.getenv('LDAP_SKIP_POSIXGROUP')
+LDAP_SKIP_GROUPOFNAMES = os.getenv('LDAP_SKIP_GROUPOFNAMES')
 # only dict() and the ssl module are visible to TLS_OPTIONS; the messages do not show its values (a key password)
 try:
 	tls_options = eval("dict(" + eval_env('TLS_OPTIONS', '') + ")", {"__builtins__": {}, "dict": dict, "ssl": ssl})
@@ -344,9 +346,9 @@ while True:
 					LDAP_FILTER = '(&(objectclass=user)(sAMAccountName={}))'
 				LDAP_USER = conn.user
 				if LDAP_SKIP_POSIXGROUP is None:
-					LDAP_SKIP_POSIXGROUP = 1
+					LDAP_SKIP_POSIXGROUP = "1"
 				if LDAP_SKIP_GROUPOFNAMES is None:
-					LDAP_SKIP_GROUPOFNAMES = 1
+					LDAP_SKIP_GROUPOFNAMES = "1"
 
 			if conn.server.info.vendor_name != None:
 				if (LDAP_USER == None or LDAP_PASSWD == None) and '389 Project' in conn.server.info.vendor_name:
@@ -454,9 +456,9 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 		L = None
 		# LDAP_SKIP_MEMBEROF=1: as a user without memberOf, as in the Perl back-end and ldapmavis-mt
-		if len(entry.memberOf) > 0 and (LDAP_SKIP_MEMBEROF is None or LDAP_SKIP_MEMBEROF == "0"):
+		if len(entry.memberOf) > 0 and LDAP_SKIP_MEMBEROF != "1":
 			L = expand_memberof(entry.memberOf)
-		elif LDAP_SKIP_GROUPOFNAMES is None or LDAP_SKIP_GROUPOFNAMES == "0":
+		elif LDAP_SKIP_GROUPOFNAMES != "1":
 			L = expand_groupOfNames(entry.entry_dn)
 
 		TACMEMBER = [];
@@ -476,7 +478,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 		if len(entry.gidNumber) > 0:
 			D.set_gid(entry.gidNumber[0])
-		if len(entry.gidNumber) > 0 and (LDAP_SKIP_POSIXGROUP is None or LDAP_SKIP_POSIXGROUP == "0"):
+		if len(entry.gidNumber) > 0 and LDAP_SKIP_POSIXGROUP != "1":
 			conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
 				search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(entry.gidNumber[0]),
 				attributes=["cn"])
