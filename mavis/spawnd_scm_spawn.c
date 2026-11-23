@@ -19,6 +19,31 @@
 
 static const char rcsid[] __attribute__((used)) = "$Id$";
 
+// Below the user limit again: take connections, as before the limit.
+static void resume_listeners(void)
+{
+    if (!spawnd_data.listeners_inactive)
+	return;
+    logmsg("resuming normal operation");
+    spawnd_data.listeners_inactive = 0;
+    switch (spawnd_data.overload) {
+    case S_queue:
+	for (int i = 0; i < spawnd_data.listeners_max; i++) {
+	    if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM
+		&& spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
+		listen(spawnd_data.listener_arr[i]->fn, spawnd_data.listener_arr[i]->listen_backlog);
+	    io_set_i(common_data.io, spawnd_data.listener_arr[i]->fn);
+	}
+	break;
+    case S_reset:
+	for (int i = 0; i < spawnd_data.listeners_max; i++)
+	    if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM)
+		spawnd_bind_listener(spawnd_data.listener_arr[i], spawnd_data.listener_arr[i]->fn);
+	break;
+    default:;
+    }
+}
+
 // The server gets no new connection and no new client; its users no longer count.
 static void server_remove(struct spawnd_context *ctx)
 {
@@ -26,6 +51,8 @@ static void server_remove(struct spawnd_context *ctx)
     for (i = 0; i < common_data.servers_cur && ctx != spawnd_data.server_arr[i]; i++);
     if (i < common_data.servers_cur) {
 	common_data.users_cur -= ctx->use;
+	if (ctx->use)
+	    resume_listeners();
 	ctx->use = 0;
 	spawnd_adjust_tracking(i, -1);
 	common_data.servers_cur--;
@@ -176,26 +203,7 @@ int spawnd_spawn_child(pid_t * pidp)
 void spawnd_users_done(struct spawnd_context *ctx, int count)
 {
     common_data.users_cur -= count, ctx->use -= count;
-    if (spawnd_data.listeners_inactive) {
-	logmsg("resuming normal operation");
-	spawnd_data.listeners_inactive = 0;
-	switch (spawnd_data.overload) {
-	case S_queue:
-	    for (int i = 0; i < spawnd_data.listeners_max; i++) {
-		if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM
-		    && spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
-		    listen(spawnd_data.listener_arr[i]->fn, spawnd_data.listener_arr[i]->listen_backlog);
-		io_set_i(ctx->io, spawnd_data.listener_arr[i]->fn);
-	    }
-	    break;
-	case S_reset:
-	    for (int i = 0; i < spawnd_data.listeners_max; i++)
-		if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM)
-		    spawnd_bind_listener(spawnd_data.listener_arr[i], spawnd_data.listener_arr[i]->fn);
-	    break;
-	default:;
-	}
-    }
+    resume_listeners();
     set_proctitle(ACCEPT);
 }
 

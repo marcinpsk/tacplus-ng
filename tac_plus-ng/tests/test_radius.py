@@ -411,6 +411,19 @@ class UdpListener(DaemonTestCase):
         self.assertFalse(alive(old), "the retired worker still serves the client")
         self.assertEqual(self.welcome(c), [b"welcome"])
 
+    @unittest.skipUnless(LINUX, "workers through /proc")
+    def test_retired_worker_gives_back_the_user_limit(self):
+        """UDP clients that reach the user limit pause the TCP listener; the users that a retiring worker frees resume it."""
+        d = self.start_daemon("\tretire limit = 2\n" + POLICY, udp=True,
+                              spawnd="\tspawn { instances min = 1 instances max = 1 users max = 2 }\n")
+        (old,) = d.workers()
+        d.baseline.forget(old)
+        for _ in range(2):  # the second context makes the worker retire, at the limit of 2 users
+            r = self.radius(SECRET, daemon=d, source=NAS).access_request("alice", "alicepw", message_authenticator=True)
+            self.assertEqual(r.code_name, "Access-Accept", r)
+        with d.connect(timeout=5.0) as t:
+            self.assertTrue(t.pap("alice", "alicepw").ok)
+
     def test_sighup_replaces_a_wildcard_listener(self):
         """A new listener can bind the port of a UDP listener that the reload dropped.
 
