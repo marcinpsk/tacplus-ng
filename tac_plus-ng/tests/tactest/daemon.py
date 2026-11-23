@@ -326,10 +326,12 @@ def alive(pid, starttime=None):
 class Daemon:
     def __init__(self, body="", name="daemon", key=config.KEY, address="127.0.0.1",
                  spawnd="", top="", template=config.BASE, suppressions=SUPPRESSIONS, udp=False, listen=None,
-                 program="tac_plus-ng", debug=None):
+                 program="tac_plus-ng", debug=None, inherit=None):
         """program: the daemon in sbin, tac_plus-ng or tac_plus (with template=config.TAC_PLUS).
 
         udp: also listen for RADIUS on a UDP port (udp_port) of the same address.
+        inherit: with udp, a bound UDP socket that spawnd takes over as at a SIGHUP
+        (SPAWND_LISTEN_FDS); udp_port is its port.
 
         listen: more listeners on the same address, {name: options}, e.g.
         {"tls": "tls = yes", "radius": "protocol = UDP realm = r"}; each
@@ -343,6 +345,7 @@ class Daemon:
         self.debug = debug
         self.udp = udp
         self.udp_port = None
+        self.inherit = inherit
         self.listen = dict(listen or {})
         self.ports = {}
         self.suppressions = suppressions
@@ -401,7 +404,7 @@ class Daemon:
             self.port = ports.pop(0) if ports else self._new_port(free_port, taken)
             taken.add(self.port)
             if self.udp:
-                self.udp_port = self._new_port(free_udp_port, taken)
+                self.udp_port = self.inherit.getsockname()[1] if self.inherit else self._new_port(free_udp_port, taken)
             for name, options in self.listen.items():
                 udp = re.search(r"protocol\s*=\s*udp", options, re.I)
                 self.ports[name] = self._new_port(free_udp_port if udp else free_port, taken)
@@ -411,9 +414,13 @@ class Daemon:
             debug = self.debug or os.environ.get("TACTEST_DEBUG")
             if debug:
                 argv += ["-d", str(debug), "-D"]
+            env = sanitizer_env(self.tmp, self.suppressions)
+            fds = ()
+            if self.inherit:
+                fds = (self.inherit.fileno(),)
+                env["SPAWND_LISTEN_FDS"] = str(fds[0])
             self.proc = subprocess.Popen(argv + ["-f", self.cfg], stderr=stderr, stdout=stderr,
-                                         stdin=subprocess.DEVNULL,
-                                         env=sanitizer_env(self.tmp, self.suppressions))
+                                         stdin=subprocess.DEVNULL, pass_fds=fds, env=env)
             stderr.close()
             code = self._wait_ready()
             if code is None:
