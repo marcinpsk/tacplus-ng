@@ -105,6 +105,7 @@ id = ftpd { }</screen>
         <para>Accept or reject request from specific IP address ranges. This
         directive may appear multiple times. Matches are tried in order. IPv6
         ACLs are supported. Default is to accept everything.</para>
+        <para><emphasis role="bold">spawnd</emphasis> checks these rules for the connections that it accepts (TCP, SCTP) only. It does not check them for the datagrams of a UDP listener. Where UDP clients must be filtered, use a packet filter.</para>
         <para>Example:</para>
         <screen xml:space="preserve">permit 127.0.0.1/8
 deny 192.168.5.0/8

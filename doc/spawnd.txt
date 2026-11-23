@@ -2,7 +2,7 @@ spawnd
 
 Marc Huber
 
-   $Id: 4045c8c3d09c4b03da61129b5ca38324d82d2ef1 $
+   $Id: f29a92ca148401b7293e921d29864f33c2e58867 $
      __________________________________________________________
 
    Table of Contents
@@ -151,6 +151,10 @@ id = ftpd { }
        This directive may appear multiple times. Matches are tried
        in order. IPv6 ACLs are supported. Default is to accept
        everything.
+       spawnd checks these rules for the connections that it
+       accepts (TCP, SCTP) only. It does not check them for the
+       datagrams of a UDP listener. Where UDP clients must be
+       filtered, use a packet filter.
        Example:
 permit 127.0.0.1/8
 deny 192.168.5.0/8
