@@ -994,6 +994,16 @@ member: cn=xylophone,ou=groups,$base
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
 
+    def test_expired_password_without_chpw(self):
+        """An expired password at a PAP login is a FAIL without a user bind: PAP cannot change the password."""
+        # shadowExpire (nis schema) counts days from 1970-01-01
+        slapd, d = self.start(ldif=person("gwen", "objectClass: shadowAccount\nshadowExpire: 1\n"))
+        for password in ("gwenpw", "wrong"):
+            with self.subTest(password=password), d.connect() as c:
+                r = c.pap("gwen", password)
+                self.assertEqual((r.status_name, r.server_msg), ("FAIL", "Password has expired.\n"), r)
+        self.assertNotIn(f"uid=gwen,ou=people,{BASE}", [dn for dn, _ in slapd.binds()])
+
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
