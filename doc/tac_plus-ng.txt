@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
+   $Id: 88790014c5713742649b987ba7b8f4cf419aab05 $
      __________________________________________________________
 
    Table of Contents
@@ -769,8 +769,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -3111,25 +3111,26 @@ int async 1
    check off.
 setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
 
-   StartTLS: on an ldap:// URL, ldapmavis-mt reads the root DSE
-   without a bind. If the server offers StartTLS there, the
-   back-end starts TLS before the first bind. A failed StartTLS is
-   a backend error. Two variables change this:
+   StartTLS: on an ldap:// URL, StartTLS is mandatory.
+   ldapmavis-mt starts TLS before the first bind. A server that
+   does not offer StartTLS, a refused StartTLS and a failed TLS
+   handshake are backend errors, and the back-end closes that
+   connection. ldaps:// URLs do not use StartTLS. To see if a
+   connection already has TLS before StartTLS, ldapmavis-mt opens
+   it first with ldap_connect(), so it needs libldap of OpenLDAP
+   2.5 or later.
 
-     * USE_STARTTLS (any value): StartTLS is mandatory, also if
-       the server does not offer it. A server without StartTLS
-       then gives a backend error. This also prevents a system in
-       the path to the server from removing the StartTLS offer
-       from the root DSE, which has no authentication.
-     * LDAP_SKIP_STARTTLS = 1: no StartTLS. The binds send the
-       passwords in clear text.
+   This changes the behavior of older versions, which started TLS
+   only when the root DSE of the server offered StartTLS. A site
+   that uses an ldap:// URL to a server without StartTLS must set
+   LDAP_SKIP_STARTTLS = 1 or change to an ldaps:// URL.
+   USE_STARTTLS is no longer necessary for ldapmavis-mt, because
+   StartTLS is the default.
 
-   ldapmavis-mt does not start if both are set. If the server does
-   not let the back-end read the root DSE without a bind, set one
-   of them. When a connection has no TLS before the bind, the
-   back-end logs the connection to the LDAP server has no TLS: the
-   binds send the passwords in clear text. ldaps:// URLs do not
-   use StartTLS.
+   LDAP_SKIP_STARTTLS = 1: no StartTLS. The binds send the
+   passwords in clear text, and the back-end logs the connection
+   to the LDAP server has no TLS: the binds send the passwords in
+   clear text for each such connection.
      __________________________________________________________
 
 5.2. PAM back-end
