@@ -484,7 +484,7 @@ class TlsRejectReason(TlsTestCase):
         r = self.record(self.tls_client(self.other.context(self.certs["certnas"])))
         if "libressl" in features():    # LibreSSL drops the plaintext alert of the client: no reason to log
             self.assertIsNotNone(r, "no CONN-REJECT record")
-            self.assertTrue(r["error"] or r["hint"], r)
+            self.assertTrue(r["hint"], r)   # ${hint}: the error message of the failure
         else:
             self.assertRejected(r, "0A000418", "tlsv1 alert unknown ca")
         self.assertEqual(r["version"], "TLSv1.3")
