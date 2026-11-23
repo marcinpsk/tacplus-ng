@@ -233,6 +233,20 @@ def ipv6_available():
         return False
 
 
+def local_address(addr):
+    """True if a socket can bind addr: on the BSDs, tests/loopback-aliases adds the 127.0.0.0/8 addresses."""
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in addr else socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind((addr, 0))
+        return True
+    except OSError:
+        return False
+
+
+# all of 127.0.0.0/8 is local on Linux; elsewhere only after tests/loopback-aliases
+LOOPBACK_NET = local_address("127.0.0.2")
+
+
 # --- /proc ------------------------------------------------------------------
 
 def proc_stat(pid):

@@ -1,5 +1,7 @@
 """tests/loopback-aliases against a fake ifconfig: what it adds to lo0, and when it stops."""
 
+import ast
+import glob
 import os
 import shutil
 import subprocess
@@ -84,6 +86,21 @@ class LoopbackAliases(unittest.TestCase):
         code, out = self.run_script(CDPATH=".")
         self.assertEqual(code, 0, out)
         self.assertIn("127.1.2.3/32", self.aliases())
+
+
+class LoopbackSkips(unittest.TestCase):
+    def test_no_test_skips_the_loopback_addresses_off_linux(self):
+        """The BSDs have the addresses after tests/loopback-aliases: skip on LOOPBACK_NET, not on LINUX."""
+        found = []
+        for path in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_*.py"))):
+            with open(path) as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "skipUnless" and len(node.args) == 2
+                        and getattr(node.args[0], "id", "") == "LINUX"
+                        and "127.0.0.0/8" in str(getattr(node.args[1], "value", ""))):
+                    found.append("%s:%d" % (os.path.basename(path), node.lineno))
+        self.assertEqual(found, [])
 
 
 if __name__ == "__main__":
