@@ -901,6 +901,34 @@ class LdapMt(LdapTests, DaemonTestCase):
         self.assertTrue(slapd.binds())
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
 
+    def test_failed_service_bind(self):
+        """A failed bind of LDAP_USER is a backend error, also in the request that reads the root DSE first.
+
+        The peer is down at the start, so the first request after it reads the root DSE. The peer allows
+        anonymous searches and finds alice. The test speaks the external-mt protocol to ldapmavis-mt itself.
+        """
+        peer = AdPeer()
+        self.addCleanup(peer.stop)
+        env = {**sanitizer_env(), "LDAP_HOSTS": peer.url, "LDAP_BASE": BASE, "LDAP_USER": READER,
+               "LDAP_PASSWD": "wrong", "LDAP_SKIP_STARTTLS": "1"}
+        with subprocess.Popen([LDAPMAVIS], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env=env) as p:
+            watchdog = threading.Timer(60, p.kill)
+            watchdog.start()
+            try:
+                for down in (True, False, False):
+                    peer.down = down
+                    body = b"4 alice\n8 alicepw\n21 serial\n49 AUTH\n\n"
+                    p.stdin.write(struct.pack("!III", 0x4d610001, len(body), 0) + body)
+                    p.stdin.flush()
+                    header = p.stdout.read(12)
+                    self.assertEqual(len(header), 12, "no reply, the backend exited")
+                    reply = p.stdout.read(struct.unpack("!III", header)[1])
+                    self.assertRegex(reply, rb"(?m)^6 ERR$", f"down={down}")
+            finally:
+                watchdog.cancel()
+                p.kill()
+
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_url_list(self):
         """LDAP_HOSTS with ldaps:// and ldap://: the URL that answers decides if StartTLS runs."""

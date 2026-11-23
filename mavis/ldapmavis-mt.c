@@ -404,8 +404,13 @@ static int LDAP_init(LDAP **ldap, int *capabilities)
     }
 
     rc = LDAP_bind(*ldap, ldap_dn, ldap_pw);
-    if (rc != LDAP_SUCCESS)
+    if (rc != LDAP_SUCCESS) {
+	// the root DSE searches below must not hide a failed bind
 	fprintf(stderr, "%d: %s: %s\n", __LINE__, ldap_dn, ldap_err2string(rc));
+	ldap_unbind_ext_s(*ldap, NULL, NULL);
+	*ldap = NULL;
+	return rc;
+    }
 
     if (!capabilities_set) {
 	char *attrs[] = { "+", NULL };	// OpenLDAP
