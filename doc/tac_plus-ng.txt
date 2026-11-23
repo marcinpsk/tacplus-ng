@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: c0e7068ae4102ba7596dfad3329469db739b68de $
+   $Id: bd70f37c1a5c1a37a2ec7e7a3aa11b75c067b103 $
      __________________________________________________________
 
    Table of Contents
@@ -3242,6 +3242,9 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    and for each answer of the server. The default is 5. A value
    that is not a positive integer stops the back-end with a
    message on stderr.
+
+   An LDAP_NESTED_GROUP_DEPTH that is not a non-negative integer
+   stops the back-end with a message on stderr.
      __________________________________________________________
 
 5.2. PAM back-end

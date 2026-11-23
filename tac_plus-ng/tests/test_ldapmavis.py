@@ -2004,6 +2004,13 @@ class LdapPython(LdapTests, DaemonTestCase):
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
         self.assertNotIn(ALICE, [dn for dn, _ in slapd.binds()])
 
+    def test_nested_group_depth_unset(self):
+        """Without LDAP_NESTED_GROUP_DEPTH the nested group lookups have no limit."""
+        _, d = self.start(LDAP_NESTED_GROUP_DEPTH=None)
+        with d.connect() as c:
+            r = c.ascii_login("alice", "alicepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
+
     def test_connect_timeout(self):
         """LDAP_CONNECT_TIMEOUT from the configuration reaches ldap3 as a number of seconds."""
         _, d = self.start(LDAP_CONNECT_TIMEOUT="5")
@@ -2015,6 +2022,8 @@ class LdapPython(LdapTests, DaemonTestCase):
                       for value in ("yes", "", "2", "-1", " 1"))
         cases += tuple(({"LDAP_CONNECT_TIMEOUT": value}, f"invalid LDAP_CONNECT_TIMEOUT: {value!r}")
                        for value in ("5s", "0", "2.5", ""))
+        cases += tuple(({"LDAP_NESTED_GROUP_DEPTH": value}, f"invalid LDAP_NESTED_GROUP_DEPTH: {value!r}")
+                       for value in ("two", "-1", ""))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")
