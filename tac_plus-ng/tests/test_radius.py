@@ -32,6 +32,7 @@ import contextlib
 import errno
 import os
 import select
+import shutil
 import signal
 import socket
 import struct
@@ -423,6 +424,33 @@ class UdpListener(DaemonTestCase):
             self.assertEqual(r.code_name, "Access-Accept", r)
         with d.connect(timeout=5.0) as t:
             self.assertTrue(t.pap("alice", "alicepw").ok)
+
+    @unittest.skipUnless(LINUX and shutil.which("ss"), "the backlog of a listener from ss (Linux)")
+    def test_listener_gets_its_backlog_back_after_the_user_limit(self):
+        """At the user limit, a TCP listener gets its "overload backlog"; "overload = close" kept it after the limit."""
+        d = self.start_daemon("\tretire limit = 2\n" + POLICY, udp=True, listen={"tcp": "overload backlog = 8"},
+                              spawnd="\toverload = close\n\tspawn { instances min = 1 instances max = 1 users max = 2 }\n")
+        (old,) = d.workers()
+        d.baseline.forget(old)
+
+        def backlog():
+            out = subprocess.run(["ss", "-ltnH", "sport = :%d" % d.ports["tcp"]], stdout=subprocess.PIPE,
+                                 check=True).stdout.split()
+            return int(out[2]) if out else None
+
+        with open("/proc/sys/net/core/somaxconn") as f:
+            normal = min(128, int(f.read()))    # Linux takes at most somaxconn
+        if normal <= 8:
+            self.skipTest("somaxconn %d: no backlog above the overload backlog of 8" % normal)
+        self.assertEqual(backlog(), normal)
+        for _ in range(2):  # the second context reaches the limit and makes the worker retire
+            r = self.radius(SECRET, daemon=d, source=NAS).access_request("alice", "alicepw", message_authenticator=True)
+            self.assertEqual(r.code_name, "Access-Accept", r)
+        deadline = time.monotonic() + 5.0
+        while (alive(old) or backlog() != normal) and time.monotonic() < deadline:
+            select.select([], [], [], 0.05)
+        self.assertFalse(alive(old), "the worker did not retire")
+        self.assertEqual(backlog(), normal, "the backlog after the limit")
 
     def test_sighup_replaces_a_wildcard_listener(self):
         """A new listener can bind the port of a UDP listener that the reload dropped.

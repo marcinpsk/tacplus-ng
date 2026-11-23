@@ -26,14 +26,16 @@ static void resume_listeners(void)
 	return;
     logmsg("resuming normal operation");
     spawnd_data.listeners_inactive = 0;
-    switch (spawnd_data.overload) {
-    case S_queue:
-	for (int i = 0; i < spawnd_data.listeners_max; i++) {
+    // the limit set "overload backlog" in each mode; "reset" binds the listeners again below
+    if (spawnd_data.overload != S_reset)
+	for (int i = 0; i < spawnd_data.listeners_max; i++)
 	    if (spawnd_data.listener_arr[i]->socktype != SOCK_DGRAM
 		&& spawnd_data.listener_arr[i]->listen_backlog != spawnd_data.listener_arr[i]->overload_backlog)
 		listen(spawnd_data.listener_arr[i]->fn, spawnd_data.listener_arr[i]->listen_backlog);
+    switch (spawnd_data.overload) {
+    case S_queue:
+	for (int i = 0; i < spawnd_data.listeners_max; i++)
 	    io_set_i(common_data.io, spawnd_data.listener_arr[i]->fn);
-	}
 	break;
     case S_reset:
 	for (int i = 0; i < spawnd_data.listeners_max; i++)
