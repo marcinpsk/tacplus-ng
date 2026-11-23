@@ -8,7 +8,10 @@
 
 set -e
 
-TESTS=$(cd "$(dirname "$0")" && pwd)
+TESTS=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# grep exits 1 for no match, 2 for a file it cannot read
+named=$(grep -ohE '127\.[0-9]+\.[0-9]+\.[0-9]+' "$TESTS"/*.py "$TESTS"/tactest/*.py) || [ $? -eq 1 ] || exit 1
 
 addrs() {
 	i=2
@@ -16,12 +19,14 @@ addrs() {
 		echo 127.0.0.$i
 		i=$((i + 1))
 	done
-	grep -ohE '127\.[0-9]+\.[0-9]+\.[0-9]+' "$TESTS"/*.py "$TESTS"/tactest/*.py | grep -v '\.0$'
+	echo "$named" | grep -v '\.0$'
 }
 
+have=$(ifconfig lo0)
 n=0
 for a in $(addrs | sort -u); do
 	[ "$a" = 127.0.0.1 ] && continue
+	case "$have" in *"inet $a "*) continue ;; esac	# keep the netmask of an address that lo0 has
 	ifconfig lo0 inet "$a/32" alias
 	n=$((n + 1))
 done
