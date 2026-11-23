@@ -236,7 +236,9 @@ jobs:
       TACTEST_TIMEOUT: 2400
     steps:
       - uses: actions/checkout@v5
-      - uses: vmactions/freebsd-vm@v1
+        with:
+          persist-credentials: false   # the VM gets a copy of .git
+      - uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
         with:
           release: "15"
           cpu: 4
@@ -251,7 +253,7 @@ jobs:
             sh tac_plus-ng/tests/loopback-aliases
             # the VM copies the tree back only after a run without error: keep the exit code for the next step
             rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
-            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1
+            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1 || true
       # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/tac_plus
       - run: grep /ARES build/tac_plus-ng-version
@@ -273,7 +275,9 @@ jobs:
       TACTEST_TIMEOUT: 2400
     steps:
       - uses: actions/checkout@v5
-      - uses: vmactions/openbsd-vm@v1
+        with:
+          persist-credentials: false   # the VM gets a copy of .git
+      - uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1.4.9
         with:
           release: "8"
           cpu: 4
@@ -287,7 +291,7 @@ jobs:
             sh tac_plus-ng/tests/loopback-aliases
             # the VM copies the tree back only after a run without error: keep the exit code for the next step
             rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
-            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1
+            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1 || true
       # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
       - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/tac_plus
       - run: grep /ARES build/tac_plus-ng-version
