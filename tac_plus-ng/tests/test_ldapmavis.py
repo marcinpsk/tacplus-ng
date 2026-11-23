@@ -1725,10 +1725,6 @@ class LdapPython(LdapTests, DaemonTestCase):
         return MODULE.substitute(module="external", url=url, base=BASE, uid="{}", extra=extra,
                                  exec=command)
 
-    @unittest.skip("the groupOfNames walk of the Python back-end does not escape the group DN in its filter")
-    def test_filter_characters_in_a_group_dn(self):
-        pass
-
     @unittest.skip("the groupOfNames walk of the Python back-end gives no groups for LDAP_NESTED_GROUP_DEPTH=1")
     def test_group_depth(self):
         pass
@@ -1991,6 +1987,19 @@ class LdapPython(LdapTests, DaemonTestCase):
                 with peer:
                     peer.settimeout(1)
                     self.fail(f"the back-end followed the referral and sent: {peer.recv(4096)!r}")
+
+    def test_group_dn_filter_characters(self):
+        """The groupOfNames walk escapes the group DN in its search filter: a CN with "(", ")" and "*" works."""
+        ldif = person("otto")
+        ldif += (f"\ndn: cn=ops (a*b),ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: ops (a*b)\n"
+                 f"member: uid=otto,ou=people,{BASE}\n"
+                 f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
+                 f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
+                 f"member: cn=ops (a*b),ou=groups,{BASE}\n")
+        _, d = self.start(ldif=ldif)
+        with d.connect(timeout=15.0) as c:
+            r = c.ascii_login("otto", "ottopw")
+            self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
     def test_empty_password(self):
         """An empty password is a FAIL without a bind, not a backend error.
