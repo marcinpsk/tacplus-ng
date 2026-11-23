@@ -38,7 +38,7 @@ shell authorization, so one request shows all of them.
 import time
 import unittest
 
-from tactest import LINUX, DaemonTestCase, dns, features, tacacs
+from tactest import LOOPBACK_NET, DaemonTestCase, dns, features, tacacs
 
 USER = """
 	user alice {
@@ -73,7 +73,7 @@ class PolicyTestCase(DaemonTestCase):
         return sorted(a[len("tactest-"):-len("=yes")] for a in r.args if a.startswith("tactest-"))
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class NestedNets(PolicyTestCase):
     """#16 and #166: a net matches its own addresses and those of its children, never those of its parent.
 
@@ -129,7 +129,7 @@ class NestedNets(PolicyTestCase):
         self.assertEqual(self.holds(rem_addr="127.0.4.3"), ["client-automation", "client-jump"])
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class DeviceAddress(PolicyTestCase):
     """#134: "nas == <net>" stopped matching: the device address kept for the rules was not the one looked up.
 
@@ -264,7 +264,7 @@ class DeviceAddressFromOwnRealmHostsFile(DaemonTestCase):
             c.pap("alice", "alicepw")
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 @unittest.skipUnless("ares" in features(), "the reverse map needs a build with c-ares")
 class DeviceDnsNameFromHostsFile(PolicyTestCase):
     """The first name on a "dns preload file" line is the reverse name of the address (device.dnsname)."""
@@ -324,7 +324,7 @@ class AclAndTimeNegation(PolicyTestCase):
         self.assertEqual(self.holds_of("time"), ["time-always-eq", "time-never-ne"])
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 @unittest.skipUnless("ares" in features(), "the reverse lookup needs a build with c-ares")
 class DeviceDnsNameFromDnsServer(PolicyTestCase):
     """With "dns reverse-lookup = yes", device.dnsname is the PTR name that the DNS server sends back."""

@@ -48,14 +48,15 @@ import sys
 import unittest
 
 from . import config, daemon, detect, dns, mavis_stub, radius, sample, tacacs, tls
-from .daemon import (LINUX, SUPPRESSIONS, Daemon, DaemonError, binary, cpu_seconds, features, ipv6_available, prefix,
-                     sanitizers)
+from .daemon import (LINUX, LOOPBACK_NET, SUPPRESSIONS, Daemon, DaemonError, binary, cpu_seconds, features,
+                     ipv6_available, local_address, prefix, sanitizers)
 from .mavis_stub import Stub
 from .tacacs import Closed, Connection, Packet, ProtocolError
 
 __all__ = ["DaemonTestCase", "Daemon", "DaemonError", "Connection", "Packet", "Closed", "ProtocolError", "Stub",
-           "binary", "cpu_seconds", "prefix", "sanitizers", "features", "ipv6_available", "config", "detect", "dns",
-           "mavis_stub", "radius", "sample", "tacacs", "tls", "LINUX", "SUPPRESSIONS", "SOURCE"]
+           "binary", "cpu_seconds", "prefix", "sanitizers", "features", "ipv6_available", "local_address", "config",
+           "detect", "dns", "mavis_stub", "radius", "sample", "tacacs", "tls", "LINUX", "LOOPBACK_NET", "SUPPRESSIONS",
+           "SOURCE"]
 
 # top of the source tree: the samples, the RADIUS dictionary
 SOURCE = daemon.TOP

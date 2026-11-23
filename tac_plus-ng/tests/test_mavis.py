@@ -46,7 +46,7 @@ import time
 import unittest
 from unittest import mock
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
+from tactest import LINUX, LOOPBACK_NET, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
 from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
@@ -179,7 +179,7 @@ CISCO_VENDOR = 9
 VENDOR_SPECIFIC = 26
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class DaclAnsweredAtOnce(DaemonTestCase):
     """A DACL from a MAVIS module that answers at once, without a back-end round trip (tacinfo_cache).
 
@@ -232,7 +232,7 @@ def open_files_under(daemon, directory):
     return out
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses, open files are found through /proc")
+@unittest.skipUnless(LINUX, "open files are found through /proc")
 class DaclCacheExpired(DaemonTestCase):
     """tacinfo_cache closes a cache file that is older than "dacl cache timeout".
 
@@ -584,7 +584,7 @@ class Type6UserProfile(DaemonTestCase):
 DAY = 86400
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class PasswordExpiry(DaemonTestCase):
     """The PASSWORD_EXPIRY of the backend selects the PASSWORD_EXPIRED or PASSWORD_EXPIRES message."""
 

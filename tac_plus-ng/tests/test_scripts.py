@@ -12,7 +12,7 @@ import os
 import struct
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, features, radius, tacacs, tls
+from tactest import LOOPBACK_NET, SOURCE, DaemonTestCase, Stub, features, radius, tacacs, tls
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 RADIUS_SECRET = "radsecret"
@@ -172,7 +172,7 @@ class RadiusConditions(DaemonTestCase):
         self.assertEqual(set(self.holds([dns])) & {"dns", "not-dns", "dns-regex"}, {"not-dns", "dns-regex"})
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 @unittest.skipUnless("pcre2" in features(), "rewrite profiles need PCRE2")
 class Rewrite(DaemonTestCase):
     """The rewrite profile of a device script changes the user name before the daemon looks up the user to log in.
@@ -258,7 +258,7 @@ REALM_RULESET = """
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class ScriptOrder(DaemonTestCase):
     """script-order (bottom-up by default, or top-down) and "skip parent-script" for profiles, devices, realms.
 
@@ -612,7 +612,7 @@ class ScriptFlow(DaemonTestCase):
         self.assertEqual(command("shutdown"), "FAIL")
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class PermitIfAuthenticated(DaemonTestCase):
     """permit if-authenticated = yes: authorization of a user the daemon doesn't know, not authenticated by it."""
 

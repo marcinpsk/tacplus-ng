@@ -8,7 +8,7 @@ hide a change.
 
 import unittest
 
-from tactest import LINUX, DaemonTestCase, Stub, tacacs
+from tactest import LOOPBACK_NET, DaemonTestCase, Stub, tacacs
 
 AUTHEN_METH_LOCAL = 5
 
@@ -28,7 +28,7 @@ VERDICT = r"""
 		}"""
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class DeviceProfileKnownUser(DaemonTestCase):
     """A known user gets the profile of the device script if the rule only permits."""
 
@@ -86,7 +86,7 @@ class BackendVerdict(DaemonTestCase):
         self.assertEqual(r.status_name, "PASS_ADD", r)
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class UnknownUserOnTrustingDevice(DaemonTestCase):
     """permit if-authenticated = yes: the result for an unknown user depends on authen_method and authen_type."""
 
@@ -131,7 +131,7 @@ class UnknownUserOnTrustingDevice(DaemonTestCase):
         self.assertEqual(r.status_name, "FAIL", r)
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@unittest.skipUnless(LOOPBACK_NET, "127.0.0.0/8 local addresses (tests/loopback-aliases)")
 class BackendNakOnTrustingDevice(DaemonTestCase):
     """A NAK to INFO (for example "User name not unique") is not an unknown user."""
 
