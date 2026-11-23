@@ -229,7 +229,10 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 #define SOL_IPV6 IPPROTO_IPV6
 #endif
 	    if (cmsg->cmsg_level == SOL_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
-		memcpy(&local_su.sin6.sin6_addr, &((struct in6_pktinfo *) CMSG_DATA(cmsg))->ipi6_addr, 16);
+		struct in6_pktinfo *pi = (struct in6_pktinfo *) CMSG_DATA(cmsg);
+		memcpy(&local_su.sin6.sin6_addr, &pi->ipi6_addr, 16);
+		if (IN6_IS_ADDR_LINKLOCAL(&local_su.sin6.sin6_addr))	// bind() needs the interface of the address
+		    local_su.sin6.sin6_scope_id = pi->ipi6_ifindex;
 		local_su.sa.sa_family = AF_INET6;
 		break;
 	    }
