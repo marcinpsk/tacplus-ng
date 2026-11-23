@@ -498,9 +498,12 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 				TACMEMBER.extend(conn.entries[0].cn)
 			ldap_search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
 				search_filter='(&(objectclass=posixGroup)(memberUid={}))'.format(escape_filter_chars(D.user)),
-				attributes=["cn"])
+				attributes=["cn", "gidNumber"])
+			GIDS = [entry.gidNumber[0]]
 			for e in conn.entries:
 				TACMEMBER.extend(e.cn)
+				GIDS.extend(e.gidNumber)
+			D.set_gids(",".join(GIDS))
 
 		if len(TACMEMBER) > 0:
 			D.set_tacmember("\"" + "\",\"".join(TACMEMBER) + "\"")
