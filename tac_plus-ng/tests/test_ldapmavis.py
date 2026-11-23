@@ -414,6 +414,75 @@ class StartTlsPeer:
         self.sock.close()
 
 
+class DropPeer:
+    """An LDAP peer on ldap:// that accepts StartTLS and closes the connection after it found alice.
+
+    binds lists (DN, password, TLS) of each bind. A search with base "" gets an empty root DSE, a search for
+    inetOrgPerson gets alice, any other search gets no entry.
+    """
+
+    ALICE = ber(0x64, ber(0x04, f"uid=alice,ou=people,{BASE}".encode()), ber(0x30))
+
+    def __init__(self, ca):
+        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.context.load_cert_chain(*ca.server)
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = "ldap://127.0.0.1:%d" % self.sock.getsockname()[1]
+        self.binds = []
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    def serve(self, conn):
+        data, over_tls = b"", False
+        try:
+            while True:
+                element = ber_split(data)
+                if element is None:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    data += chunk
+                    continue
+                _, message, data = element
+                _, msgid, op = ber_split(message)
+                msgid = ber(0x02, msgid)
+                tag, value, _ = ber_split(op)
+                fields = []
+                while value and ber_split(value):
+                    _, field, value = ber_split(value)
+                    fields.append(field)
+                if tag == 0x42:  # unbind
+                    return
+                if tag == 0x60:  # bind: version, name, simple password
+                    self.binds.append((fields[1].decode(), fields[2].decode(), over_tls))
+                    conn.sendall(ber(0x30, msgid, ber(0x61, StartTlsPeer.SUCCESS)))
+                elif tag == 0x63:  # search: base, scope, deref, size, time, types only, filter, attributes
+                    entry = ber(0x64, ber(0x04), ber(0x30)) if not fields[0] else \
+                        self.ALICE if b"inetOrgPerson" in fields[6] else b""
+                    conn.sendall((ber(0x30, msgid, entry) if entry else b"") +
+                                 ber(0x30, msgid, ber(0x65, StartTlsPeer.SUCCESS)))
+                    if entry == self.ALICE:
+                        return
+                elif tag == 0x77:  # extended: StartTLS
+                    conn.sendall(ber(0x30, msgid, ber(0x78, StartTlsPeer.SUCCESS, ber(0x8A, b"1.3.6.1.4.1.1466.20037"))))
+                    conn = self.context.wrap_socket(conn, server_side=True)
+                    over_tls = True
+        except (OSError, ssl.SSLError):
+            return
+        finally:
+            conn.close()
+
+    def stop(self):
+        self.sock.close()
+
+
 class AdPeer:
     """An LDAP peer on ldap:// with the root DSE of Active Directory and a user alice without a uid attribute.
 
@@ -900,6 +969,18 @@ class LdapMt(LdapTests, DaemonTestCase):
         self.assert_login(d, "PASS")
         self.assertTrue(slapd.binds())
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_lost_tls_connection(self):
+        """The server closes the TLS connection before the bind of the user: that bind does not go in clear text."""
+        ca = self.ca()
+        peer = DropPeer(ca)
+        self.addCleanup(peer.stop)
+        module = self.module(peer.url, setenv(self.TRUST(ca.cert)))
+        d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF, base=BASE, last=WIDE - 1))
+        self.assertEqual(self.login(d), "FAIL")
+        # the first bind of LDAP_USER is the one at the start of ldapmavis-mt
+        self.assertEqual(peer.binds, [(READER, "readerpw", True)] * 2)
 
     def test_failed_service_bind(self):
         """A failed bind of LDAP_USER is a backend error, also in the request that reads the root DSE first.
