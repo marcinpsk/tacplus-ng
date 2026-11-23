@@ -1066,9 +1066,10 @@ class MalformedAnswer(DaemonTestCase):
 
 
 # external-mt: the first child takes a small stdin pipe, waits until requests queue up behind it, then answers
-# one without a serial; the next child answers each request; argv[1]: the marker file of the first child
+# one without a serial; the next child answers each request; argv[1]: the marker file of the first child, which
+# gets "<bytes in the pipe> <length of the first request>" when it answers
 RESTART_BACKEND = r"""
-import fcntl, os, struct, sys, time
+import fcntl, os, struct, sys, termios, time
 
 def exact(n):
     buf = b""
@@ -1079,15 +1080,18 @@ def exact(n):
         buf += part
     return buf
 
-first = not os.path.exists(sys.argv[1])
+first = not os.path.exists(sys.argv[1] + ".ready")
 if first:
-    open(sys.argv[1], "w").close()
     fcntl.fcntl(0, fcntl.F_SETPIPE_SZ, 4096)
+    open(sys.argv[1] + ".ready", "w").close()
     time.sleep(3)
+    in_pipe = struct.unpack("i", fcntl.ioctl(0, termios.FIONREAD, b"\0" * 4))[0]
 while True:
     magic, length, _ = struct.unpack("!III", exact(12))
     av = dict(line.split(b" ", 1) for line in exact(length).split(b"\n") if line)
     if first:
+        with open(sys.argv[1], "w") as f:
+            f.write("%d %d" % (in_pipe, 12 + length))
         out = b"6 ACK\n"
     else:
         av[b"6"] = b"ACK"
@@ -1116,6 +1120,12 @@ class ExternalMtRestartWithQueue(DaemonTestCase):
 	}
 """ % (sys.executable, sys.executable, backend, os.path.join(os.path.dirname(backend), "first")) + BACKEND + PERMIT,
                               check=False)
+        marker = os.path.join(os.path.dirname(backend), "first")
+        # the first child sets the pipe size before the first request: F_SETPIPE_SZ fails on a fuller pipe
+        deadline = time.monotonic() + 10
+        while not os.path.exists(marker + ".ready"):
+            self.assertLess(time.monotonic(), deadline, "the first child did not start")
+            time.sleep(0.05)
         results = []
 
         def login(i):
@@ -1128,6 +1138,33 @@ class ExternalMtRestartWithQueue(DaemonTestCase):
         for t in threads:
             t.join()
         self.assertEqual(results, ["PASS"] * self.LOGINS)
+        # the pipe held few of the requests when the first child answered: the others waited in the module queue
+        with open(marker) as f:
+            in_pipe, length = map(int, f.read().split())
+        self.assertLess(in_pipe, self.LOGINS * length // 2, (in_pipe, length))
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(prefix(), "lib", "mavis", "libmavis_external-mt.so")),
+                     "configure builds external-mt only if it finds pthread")
+class ExternalMtThrottled(DaemonTestCase):
+    """external-mt answers a request with a backend error while it cannot start a child; it does not keep it.
+
+    Each child exits at the first byte of a request, so the module starts new children until it throttles.
+    """
+
+    CONFIG = None
+
+    def test_throttled_respawn(self):
+        # check=False: the children of the backend exit on purpose
+        d = self.start_daemon("""
+	mavis module = external-mt {
+		exec = "%s" "%s" "-c" "import os; os.read(0, 1)"
+	}
+""" % (sys.executable, sys.executable) + BACKEND + PERMIT, check=False)
+        # the first request is in the queue when the respawn throttles, the second comes in after it
+        for login in ("queued", "after"):
+            with self.subTest(login=login), d.connect(timeout=20) as c:
+                self.assertEqual(c.pap("alice", "pw").status_name, "FAIL")
 
 
 @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
@@ -1136,8 +1173,8 @@ class MalformedRemoteAnswer(DaemonTestCase):
 
     CONFIG = None
 
-    def peer(self, last_line):
-        """A MAVIS peer on UDP that answers ACK, TACMEMBER admins and a MEMBEROF of a deny rule, as last_line."""
+    def peer(self, last_line, result=b"ACK"):
+        """A MAVIS peer on UDP that answers result (None: no RESULT), TACMEMBER admins and last_line."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("127.0.0.1", 0))
         sock.settimeout(0.2)
@@ -1150,8 +1187,11 @@ class MalformedRemoteAnswer(DaemonTestCase):
                 except socket.timeout:
                     continue
                 av = dict(line.split(b" ", 1) for line in data.split(b"\n") if b" " in line)
-                av[b"6"], av[b"47"] = b"ACK", b"admins"
+                av[b"47"] = b"admins"
                 av.pop(b"1", None)
+                av.pop(b"6", None)
+                if result:
+                    av[b"6"] = result
                 sock.sendto(b"".join(b"%s %s\n" % kv for kv in av.items()) + last_line, addr)
 
         t = threading.Thread(target=serve, daemon=True)
@@ -1181,6 +1221,21 @@ class MalformedRemoteAnswer(DaemonTestCase):
 """)
                 with d.connect() as c:
                     self.assertEqual(c.pap("alice", "pw").status_name, status)
+
+    def test_sync_reply_without_a_final_lf(self):
+        """mavistest calls the remote module without an event loop: a reply with "6 ACK" and no final LF is refused."""
+        cfg = self.scratch_file("mavistest.cfg", """id = test {
+	mavis module = remote {
+		server { address = 127.0.0.1 port = %d }
+		timeout = 2
+		tries = 1
+	}
+}
+""" % self.peer(b"6 ACK", result=None))
+        p = subprocess.run([os.path.join(prefix(), "bin", "mavistest"), cfg, "test", "TACPLUS", "alice", "pw"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, env=sanitizer_env())
+        # the answer is the request with RESULT NAK, not a timeout (which mavistest does not print)
+        self.assertRegex(p.stderr.decode(), r"\nOutput attribute-value-pairs:\n(.*\n)*RESULT +NAK\n")
 
 
 class PasswordChange(DaemonTestCase):

@@ -547,7 +547,7 @@ static int mavis_send_in(mavis_ctx * mcx, av_ctx ** ac)
 	    }
 	}
 	while (!v || strcmp(serial, v)
-	       || !av_get(avc, AV_A_RESULT));
+	       || (!bad && !av_get(avc, AV_A_RESULT)));
 	if (bad) {
 	    logmsg("Alert: malformed reply for serial %s", serial);
 	    av_list_set_malformed(*ac, AV_A_MEMBEROF, mcx->identifier);

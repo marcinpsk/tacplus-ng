@@ -44,6 +44,9 @@ fun:read_from_child
 # mavis/libmavis_remote.c mavis_io() calls it the same way; fires on every
 # answer of the remote module.
 fun:mavis_io
+# mavis/libmavis_external-mt.c child_died() calls it the same way when it
+# cannot start a new child; fires when the respawn is throttled.
+fun:child_died
 # misc/rb.h RB_delete() calls the free function a tree was made with, e.g.
 # tac_plus-ng/config.c free_user(tac_user *), as void (*)(const void *);
 # fires when an answer from MAVIS replaces a cached user.

@@ -333,7 +333,7 @@ static void child_died(struct context *ctx, int cur __attribute__((unused)))
 
 	// the new child gets all live requests again, from the start of an empty queue
 	free_iobufs(ctx);
-	fork_ctx(ctx->mcx);
+	int up = !fork_ctx(ctx->mcx);
 
 	if (!RB_empty(ctx->mcx->by_serial)) {
 	    for (rb_node_t * rbn = RB_first(ctx->mcx->by_serial); rbn;) {
@@ -345,8 +345,14 @@ static void child_died(struct context *ctx, int cur __attribute__((unused)))
 		    RB_delete(ctx->mcx->by_serial, rbn);
 		    av_free(q->ac);
 		    free(q);
-		} else
+		} else if (up)
 		    start_query(ctx, q->ac);
+		else {
+		    // no child to answer it (respawn throttled): a backend error
+		    av_set(q->ac, AV_A_RESULT, AV_V_RESULT_ERROR);
+		    q->result = MAVIS_FINAL;
+		    ((void (*)(void *)) q->ac->app_cb) (q->ac->app_ctx);
+		}
 		rbn = next;
 	    }
 	}
@@ -670,6 +676,13 @@ static void start_query(struct context *ctx, av_ctx *ac)
 static int mavis_send_in(mavis_ctx *mcx, av_ctx **ac)
 {
     int res = MAVIS_DEFERRED;
+    // no child since a throttled respawn: start one, or the request is a backend error
+    if (!mcx->ctx || mcx->ctx->fd_out < 0) {
+	if (fork_ctx(mcx) < 0) {
+	    av_set(*ac, AV_A_RESULT, AV_V_RESULT_ERROR);
+	    return MAVIS_FINAL;
+	}
+    }
     struct query *q = calloc(1, sizeof(struct query));
     q->serial = av_get(*ac, AV_A_SERIAL);
     if (!q->serial) {
