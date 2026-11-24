@@ -217,13 +217,22 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 		local_su.sa.sa_family = AF_INET;
 		break;
 	    }
+#elif defined(IP_RECVDSTADDR)
+	    if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_RECVDSTADDR) {
+		memcpy(&local_su.sin.sin_addr, CMSG_DATA(cmsg), 4);
+		local_su.sa.sa_family = AF_INET;
+		break;
+	    }
 #endif
 #ifdef IPV6_PKTINFO
 #ifndef SOL_IPV6
 #define SOL_IPV6 IPPROTO_IPV6
 #endif
 	    if (cmsg->cmsg_level == SOL_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
-		memcpy(&local_su.sin6.sin6_addr, &((struct in6_pktinfo *) CMSG_DATA(cmsg))->ipi6_addr, 16);
+		struct in6_pktinfo *pi = (struct in6_pktinfo *) CMSG_DATA(cmsg);
+		memcpy(&local_su.sin6.sin6_addr, &pi->ipi6_addr, 16);
+		if (IN6_IS_ADDR_LINKLOCAL(&local_su.sin6.sin6_addr))	// bind() needs the interface of the address
+		    local_su.sin6.sin6_scope_id = pi->ipi6_ifindex;
 		local_su.sa.sa_family = AF_INET6;
 		break;
 	    }
@@ -242,6 +251,9 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 	s = socket(sa.sa.sa_family, SOCK_DGRAM, 0);
 	int one = 1;
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *) &one, (socklen_t) sizeof(one));
+#if defined(SO_REUSEPORT) && !defined(__linux__)
+	setsockopt(s, SOL_SOCKET, SO_REUSEPORT, (char *) &one, (socklen_t) sizeof(one));
+#endif
 
 	switch (sa.sa.sa_family) {
 #ifdef AF_INET
@@ -258,8 +270,13 @@ void spawnd_accepted(struct spawnd_context *ctx, int cur)
 	    DebugOut(DEBUG_NET);
 	    return;
 	}
-	if (-1 < su_bind(s, &local_su))
-	    su_connect(s, &sa);
+	if (su_bind(s, &local_su) || su_connect(s, &sa)) {
+	    char buf[INET6_ADDRSTRLEN];
+	    logerr("UDP reply socket for %s (%s:%d)", su_ntoa(&sa, buf, (socklen_t) sizeof(buf)), __FILE__, __LINE__);
+	    close(s);
+	    DebugOut(DEBUG_NET);
+	    return;
+	}
     } else {
 	s = accept(cur, &sa.sa, &sa_len);
 	if (s < 0) {

@@ -33,11 +33,13 @@ import select
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, features, radius, tacacs
+from tactest import (LINUX, SOURCE, DaemonTestCase, Stub, config, features, ipv6_available, local_address, radius,
+                     tacacs)
 from tactest.daemon import binary, parse_only, sanitizer_env
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
@@ -69,6 +71,65 @@ POLICY = """
 		rule { script { profile = admin permit } }
 	}
 """ % (DICTIONARY, SECRET)
+
+
+def udp_sockets(address, port):
+    """The UDP sockets of this host bound to address and port, from /proc/net/udp or udp6 (Linux)."""
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    n = 0
+    with open("/proc/net/udp" + ("6" if family == socket.AF_INET6 else "")) as f:
+        for line in f.readlines()[1:]:
+            local, local_port = line.split()[1].rsplit(":", 1)
+            words = bytes.fromhex(local)     # 32-bit words in host byte order
+            raw = b"".join(words[i:i + 4][::-1] if sys.byteorder == "little" else words[i:i + 4]
+                           for i in range(0, len(words), 4))
+            if int(local_port, 16) == port and socket.inet_ntop(family, raw) == address:
+                n += 1
+    return n
+
+
+# a second local IPv6 address: tests/loopback-aliases adds it
+NAS6 = "fd00:7ac::6"
+
+
+@unittest.skipUnless(ipv6_available() and local_address(NAS6), "no local address %s (tests/loopback-aliases)" % NAS6)
+class PapOverIpv6(DaemonTestCase):
+    """The reply to a datagram for [::1] comes from [::1], also for a client with another local source address.
+
+    spawnd binds the reply socket to the destination address of the datagram (IPV6_RECVPKTINFO).
+    Without it, the system picks the source address, and the client, connected to [::1], drops the reply.
+    """
+
+    CONFIG = POLICY.replace("address = 127.0.0.6", "address = %s" % NAS6)
+    ADDRESS = "::1"
+    UDP = True
+
+    def test_access_accept(self):
+        r = self.radius(SECRET, source=NAS6).access_request("alice", "alicepw", message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
+
+
+@unittest.skipUnless(ipv6_available() and local_address(NAS6), "no local address %s (tests/loopback-aliases)" % NAS6)
+class AdoptedUdpListener(DaemonTestCase):
+    """spawnd takes over a UDP listener at a SIGHUP, and sets the options that a new listener gets.
+
+    An older image can have made the listener without IPV6_RECVPKTINFO. spawnd then had no destination
+    address for the reply socket, and the reply came from the address of the client (see PapOverIpv6).
+    """
+
+    CONFIG = None
+
+    def test_reply_from_the_address_of_the_listener(self):
+        listener = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)   # as su_bind() made it, no IPV6_RECVPKTINFO
+        self.addCleanup(listener.close)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("::1", 0))
+        d = self.start_daemon(PapOverIpv6.CONFIG, address="::1", udp=True, inherit=listener)
+        if LINUX:   # spawnd took the socket over and made none of its own (it could, with SO_REUSEADDR)
+            self.assertEqual(udp_sockets("::1", d.udp_port), 1)
+        r = self.radius(SECRET, daemon=d, source=NAS6, timeout=2.0).access_request("alice", "alicepw",
+                                                                                   message_authenticator=True)
+        self.assertEqual(r.code_name, "Access-Accept", r)
 
 
 class Pap(DaemonTestCase):
