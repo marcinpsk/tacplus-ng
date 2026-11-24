@@ -41,6 +41,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -306,6 +307,43 @@ def tcp_fds(pid):
 TCP_LISTEN = "0A"
 
 
+def command_rows(argv):
+    """The output lines of a command, split into fields."""
+    out = subprocess.run(argv, stdout=subprocess.PIPE, check=True).stdout.decode("utf-8", "replace")
+    return [line.split() for line in out.splitlines()]
+
+
+def endpoint(text):
+    """("::1", 49) from "[::1]:49" (OpenBSD fstat) or "::1:49" (FreeBSD sockstat); IPv4 as "127.0.0.1:49"."""
+    host, _, port = text.rpartition(":")
+    return host[1:-1] if host.startswith("[") else host, int(port) if port.isdigit() else None
+
+
+def sockstat_listening(rows, pid):
+    """FreeBSD "sockstat -46 -l -q -P tcp": USER COMMAND PID FD PROTO LOCAL FOREIGN."""
+    return {endpoint(f[5]) for f in rows if len(f) > 5 and f[2] == str(pid)}
+
+
+def fstat_bound(rows):
+    """OpenBSD "fstat -p": USER CMD PID FD internet[6] stream tcp PCB LOCAL; a connected socket has more fields.
+
+    fstat shows no state: a socket that is bound but not yet listening looks the same.
+    """
+    return {endpoint(f[8]) for f in rows if len(f) == 9 and f[5:7] == ["stream", "tcp"]}
+
+
+def listen_addresses(pid):
+    """{("127.0.0.1", 49), ("::1", 49), ...}: the TCP sockets of pid that can listen, off Linux.
+
+    subprocess.CalledProcessError: fstat found no process pid (OpenBSD).
+    """
+    if sys.platform.startswith("freebsd"):
+        return sockstat_listening(command_rows(["sockstat", "-46", "-l", "-q", "-P", "tcp"]), pid)
+    if sys.platform.startswith("openbsd"):
+        return fstat_bound(command_rows(["fstat", "-p", str(pid)]))
+    raise DaemonError("no way to find the listening sockets of a process on %s" % sys.platform)
+
+
 def cpu_seconds(pid):
     """utime + stime of a process (Linux)."""
     with open("/proc/%d/stat" % pid) as f:
@@ -435,13 +473,12 @@ class Daemon:
 
     def _wait_ready(self):
         deadline = time.monotonic() + READY_TIMEOUT
-        family = socket.AF_INET6 if ":" in self.address else socket.AF_INET
         while time.monotonic() < deadline:
             code = self.proc.poll()
             if code is not None:
                 return code
             # spawnd binds before it forks the first worker
-            if self._listening(family) and (not LINUX or self.workers()):
+            if self._listening() and (not LINUX or self.workers()):
                 self.snapshot()
                 return None
             select.select([], [], [], 0.02)
@@ -450,11 +487,19 @@ class Daemon:
         raise DaemonError("%s did not accept connections within %.0f s\n%s"
                           % (self.program, READY_TIMEOUT, self.stderr_tail()))
 
-    def _listening(self, family):
+    def _listening(self):
+        # not just "something accepts on the port": the port may belong to someone else
         if LINUX:
-            # not just "something accepts on the port": the port may belong to someone else
             return (self.port, TCP_LISTEN) in tcp_fds(self.pid)
-        with socket.socket(family, socket.SOCK_STREAM) as s:
+        try:
+            if (self.address, self.port) not in listen_addresses(self.pid):
+                return False
+        except subprocess.CalledProcessError:
+            if self.proc.poll() is not None:
+                return False    # spawnd exited: _wait_ready() takes its exit code
+            raise
+        # spawnd binds before it listens, and OpenBSD fstat shows no difference: connect too
+        with socket.socket(socket.AF_INET6 if ":" in self.address else socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
             return s.connect_ex(self.addr) == 0
 
