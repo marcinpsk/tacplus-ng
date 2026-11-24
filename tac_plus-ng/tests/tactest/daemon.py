@@ -330,8 +330,8 @@ class Daemon:
         """program: the daemon in sbin, tac_plus-ng or tac_plus (with template=config.TAC_PLUS).
 
         udp: also listen for RADIUS on a UDP port (udp_port) of the same address.
-        inherit: with udp, a bound UDP socket that spawnd takes over as at a SIGHUP
-        (SPAWND_LISTEN_FDS); udp_port is its port.
+        inherit: a bound UDP socket that spawnd takes over as at a SIGHUP
+        (SPAWND_LISTEN_FDS); with udp, udp_port is its port.
 
         listen: more listeners on the same address, {name: options}, e.g.
         {"tls": "tls = yes", "radius": "protocol = UDP realm = r"}; each
@@ -594,6 +594,32 @@ class Daemon:
                 except OSError:
                     pass
         return out
+
+    def udp_queued(self, port=None):
+        """Bytes that wait in the receive queue of the UDP listener on port, by default udp_port (Linux /proc/net/udp)."""
+        port, queued = ":%04X" % (self.udp_port if port is None else port), 0
+        for name in ("/proc/net/udp", "/proc/net/udp6"):
+            try:
+                with open(name) as f:
+                    rows = [line.split() for line in f.readlines()[1:]]
+            except OSError:
+                continue
+            # the listener has no remote port
+            queued += sum(int(r[4].split(":")[1], 16) for r in rows if r[1].endswith(port) and r[2].endswith(":0000"))
+        return queued
+
+    def users(self, pid=None):
+        """The users that spawnd, or the worker pid, counts: "N connections" of the process title (Linux).
+
+        setproctitle() writes the title in place, so a read can see it half written: read it again.
+        """
+        for _ in range(100):
+            with open("/proc/%d/cmdline" % (pid or self.pid), "rb") as f:
+                m = re.search(rb": (\d+) connection", f.read())
+            if m:
+                return int(m.group(1))
+            select.select([], [], [], 0.01)
+        raise DaemonError("no user count in the process title of %d" % (pid or self.pid))
 
     def snapshot(self):
         found = self.descendants()

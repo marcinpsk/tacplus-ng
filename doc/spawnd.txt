@@ -2,7 +2,7 @@ spawnd
 
 Marc Huber
 
-   $Id: b31ecee84bb895008d9bc15c71798d2be0c206c4 $
+   $Id: f29a92ca148401b7293e921d29864f33c2e58867 $
      __________________________________________________________
 
    Table of Contents
@@ -49,7 +49,14 @@ Marc Huber
 
    Support for receiving and forwarding UDP packets to the worker
    processes is available, too (tac_plus-ng uses that for
-   processing RADIUS/UDP)
+   processing RADIUS/UDP and RADIUS/DTLS). spawnd is the only
+   reader of a UDP listener. It passes each datagram to the worker
+   process that has the context of its client (the listener, the
+   destination address, and the address and port of the client).
+   The worker process replies through the listener, from the
+   destination address of the request. A UDP listener has neither
+   SO_REUSEADDR nor SO_REUSEPORT (unless reuse-port is set), so no
+   other socket can bind its address and port.
      __________________________________________________________
 
 1.1. Download
@@ -144,6 +151,10 @@ id = ftpd { }
        This directive may appear multiple times. Matches are tried
        in order. IPv6 ACLs are supported. Default is to accept
        everything.
+       spawnd checks these rules for the connections that it
+       accepts (TCP, SCTP) only. It does not check them for the
+       datagrams of a UDP listener. Where UDP clients must be
+       filtered, use a packet filter.
        Example:
 permit 127.0.0.1/8
 deny 192.168.5.0/8
@@ -177,7 +188,9 @@ acl accept ::1
           + reuse-port = ( yes | no )
             On Linux, FreeBSD and DragonFly: use SO_REUSEPORT to
             allow multiple spawnd instances to bind to the same
-            TCP or UDP ports. Disabled by default.
+            TCP or UDP ports. Disabled by default. Without this
+            option, no other socket can bind the port of a UDP
+            listener.
        For listening on UNIX domain sockets, a different syntax
        applies:
           + path = Path
@@ -335,6 +348,8 @@ exec = /some/where/linux-2.3.35-i686/ftpd
             the maximum number of users permitted and may lower
             the specified maximum number of users to a more
             suitable value.
+            A UDP client counts as one user while its worker
+            process keeps its context.
           + userid = UserID
             Change UID to UserID for spawned processes.
           + groupid = GroupID
@@ -350,6 +365,10 @@ exec = /some/where/linux-2.3.35-i686/ftpd
      * overload = ( close | queue | reset)
        If the maximum number of users is reached, either close,
        reset or queue new connections. The latter is the default.
+       UDP listeners are not affected: spawnd keeps reading them.
+       A datagram of a client that has a worker process goes to
+       it, and a datagram of a new client is dropped while the
+       limit is reached.
      * tcp keepalive ( count | idle | interval ) = Number
        Sets various options for TCP keepalive probes, if supported
        by the operating system.
@@ -411,6 +430,16 @@ syslog severity = INFO
    scratch. Listening sockets that the new configuration still has
    are kept open across the restart, so clients are neither
    refused nor reset during a reload.
+
+   After the restart, the old worker processes get no new
+   connections. They serve their existing TCP connections until
+   these end. Their RADIUS/UDP and RADIUS/DTLS contexts end at
+   once: a RADIUS/UDP client goes to a new worker process, and a
+   RADIUS/DTLS client starts a new session there. A worker process
+   that retires (retire limit or retire timeout of tac_plus-ng)
+   keeps its RADIUS/DTLS sessions, but only until the stateless
+   timeout after the retirement; its RADIUS/UDP clients go to
+   another worker process at once.
 
    The daemon is only checking for signals every couple of
    seconds, so actions aren't necessarily immediate.

@@ -157,7 +157,9 @@
           <literal>SIGHUP</literal>, re-reading the configuration file. The
           child processes will recognize that the master process is no longer
           available. It will continue to serve the existing connections and
-          terminate when idle.</para>
+          terminate when idle. Their RADIUS/UDP and RADIUS/DTLS contexts
+          end at once: a RADIUS/UDP client goes to a new child process, and
+          a RADIUS/DTLS client starts a new session there.</para>
         </listitem>
         <listitem>
           <para>If <literal>SIGHUP</literal> is sent to a child process it
@@ -496,6 +498,7 @@
               <para>The particular daemon instance will terminate after
               processing <emphasis>n</emphasis> requests. The <emphasis role="bold">spawnd</emphasis> instance will spawn a new instance
               if necessary.</para>
+              <para>The retiring instance serves its existing TCP connections until these end. A RADIUS/UDP client goes to another instance at once. A RADIUS/DTLS session stays, at most until the <literal>stateless timeout</literal> after the retirement. This is also true for <literal>retire timeout</literal>.</para>
               <para>Default: unset</para>
             </listitem>
             <listitem>
@@ -1694,6 +1697,18 @@ separator = "\t"
         </listitem>
         <listitem>
           <para>
+            <literal>stateless timeout =</literal>
+            <emphasis>s</emphasis>
+          </para>
+          <para>End the context of a RADIUS/UDP or RADIUS/DTLS client after an idle period of at
+              least <emphasis>s</emphasis> seconds. When the child process retires, a RADIUS/DTLS
+              session ends at most <emphasis>s</emphasis> seconds later, also if it is not idle.
+              After <literal>SIGHUP</literal> it ends at once.</para>
+          <para>Default: 30</para>
+          <para>This configuration will be accepted at device level, too.</para>
+        </listitem>
+        <listitem>
+          <para>
             <literal>context timeout =</literal>
             <emphasis>s</emphasis>
           </para>
@@ -2048,8 +2063,9 @@ mavis user filter = __internal__username_acl__ </screen>
       </section>
       <section>
         <title>TLS and DTLS</title>
-        <para>TACACS+ over TLS1.3 is supported, as is RADIUS over both TLS and DTLS. Availability of toese features may depend on your OpenSSL version.</para>
-        <para>The following configuration options are availablet:</para>
+        <para>TACACS+ over TLS1.3 is supported, as is RADIUS over both TLS and DTLS. Availability of these features may depend on your OpenSSL version.</para>
+        <para>A new RADIUS/DTLS client must do the cookie exchange of RFC 6347, section 4.2.1. A ClientHello without a valid cookie gets only a HelloVerifyRequest, and the daemon keeps no state for it. Thus a spoofed source address gets no other handshake message and uses no user slot. The cookie is an HMAC of the address and port of the client and the local address. Its key is a random secret that <emphasis role="bold">spawnd</emphasis> makes at start and gives to its worker processes, and a <literal>SIGHUP</literal> makes a new one. A first datagram of a new client that is not a ClientHello is dropped.</para>
+        <para>The following configuration options are available:</para>
         <itemizedlist>
           <listitem>
             <para>

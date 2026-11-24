@@ -30,15 +30,16 @@
 
   Packet      code, identifier, authenticator and attributes as fields;
               encode() can override the length and the Message-Authenticator
-  Client      UDP, TCP, TLS over TCP or a datagram socket-like object
-              (tls.DtlsSocket): send_raw(), recv_raw() with a timeout,
-              exchange() checks the Response Authenticator,
+  Client      UDP, TCP, TLS over TCP or a stream socket of the caller
+              (DTLS through tls.DtlsSocket): send_raw(), recv_raw() with a
+              timeout, exchange() checks the Response Authenticator,
               access_request() with a PAP User-Password of arbitrary bytes,
               accounting_request()
 
 Message-Authenticator (RFC 3579 3.2) is added on request;
 reply_message_authenticator() checks the one in a reply. Over TLS the
-shared secret is "radsec" (RFC 6614 2.3), over DTLS "radius/dtls" (RFC 7360 2.1).
+shared secret is "radsec" (RFC 6614 2.3), over DTLS "radius/dtls"
+(RFC 7360 2.1).
 """
 
 import hashlib
@@ -46,6 +47,7 @@ import hmac
 import os
 import socket
 import struct
+import time
 
 ACCESS_REQUEST = 1
 ACCOUNTING_REQUEST = 4
@@ -172,8 +174,9 @@ class Client:
     """One UDP socket (or TCP connection with tcp=True) to the daemon. Usable as a context manager.
 
     tls: an ssl.SSLContext for RADIUS over TLS (implies tcp); the secret
-    should then be "radsec". sock: a connected datagram socket-like object
-    instead of a new UDP socket, e.g. tls.DtlsSocket.
+    should then be "radsec". sock: a connected socket-like object that
+    carries the packets as a stream, e.g. tls.DtlsSocket (addr is then not
+    used).
     """
 
     def __init__(self, addr, secret, timeout=5.0, source=None, tcp=False, tls=None, sock=None):
@@ -181,7 +184,7 @@ class Client:
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self.secret = _b(secret)
         self.timeout = timeout
-        self.tcp = tcp or tls is not None
+        self.tcp = tcp or tls is not None or sock is not None
         if sock is not None:
             self.sock = sock
             self.sock.settimeout(timeout)
@@ -234,6 +237,10 @@ class Client:
         reply.message_authenticator: None (none in the reply), True or False (wrong).
         """
         self.send_raw(request.encode(self.secret, message_authenticator=message_authenticator))
+        return self.reply(request)
+
+    def reply(self, request):
+        """Read the reply to request, which was sent before; checks as exchange() does."""
         reply = Packet.decode(self.recv_raw())
         if reply.identifier != request.identifier:
             raise ProtocolError("reply identifier %d, request %d" % (reply.identifier, request.identifier))
@@ -244,13 +251,36 @@ class Client:
         reply.message_authenticator = reply_message_authenticator(raw, request.authenticator, self.secret)
         return reply
 
-    def access_request(self, user, password, attributes=(), message_authenticator=False):
-        """Access-Request with a PAP User-Password; password may be any bytes, also not UTF-8."""
+    def retransmit(self, request, message_authenticator=False, tries=5, interval=1.0):
+        """As a RADIUS client does: send the same request again when no reply came within interval."""
+        data = request.encode(self.secret, message_authenticator=message_authenticator)
+        timeout = self.sock.gettimeout()
+        self.sock.settimeout(interval)
+        try:
+            for _ in range(tries):
+                sent = time.monotonic()
+                try:
+                    self.send_raw(data)     # Linux reports the ICMP error of an earlier datagram here
+                    return self.reply(request)
+                except TimeoutError:
+                    pass
+                except ConnectionRefusedError:  # for a moment no socket had the port (ICMP port unreachable)
+                    time.sleep(max(0.0, interval - (time.monotonic() - sent)))
+        finally:
+            self.sock.settimeout(timeout)
+        raise TimeoutError("no RADIUS reply from the daemon to %d copies of the request" % tries)
+
+    def pap_request(self, user, password, attributes=()):
+        """An Access-Request with a PAP User-Password; password may be any bytes, also not UTF-8."""
         req = Packet(ACCESS_REQUEST)
         req.attributes = [(USER_NAME, _b(user)),
                           (USER_PASSWORD, encrypt_password(password, self.secret, req.authenticator))]
         req.attributes += [(t, _b(v)) for t, v in attributes]
-        return self.exchange(req, message_authenticator)
+        return req
+
+    def access_request(self, user, password, attributes=(), message_authenticator=False):
+        """Send pap_request(), return the reply."""
+        return self.exchange(self.pap_request(user, password, attributes), message_authenticator)
 
     def accounting_request(self, attributes):
         """Accounting-Request; RFC 2866 3: the Request Authenticator is MD5(packet with 16 zero bytes + secret)."""

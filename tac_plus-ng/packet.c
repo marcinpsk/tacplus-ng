@@ -56,6 +56,7 @@
    FITNESS FOR A PARTICULAR PURPOSE.
 */
 
+#include <stddef.h>
 #include "headers.h"
 #include "misc/mymd5.h"
 #ifdef WITH_SSL
@@ -394,6 +395,23 @@ static void set_response_authenticator(tac_session *session, rad_pak_hdr *pak)
 
 #define MAXIMUM_QUEUED_PACKETS 64
 
+// The write has a scheduler key of its own (&ctx->udp_client): on the key ctx it restarted the timers of the context.
+static void udp_write_scheduled(struct scm_udp_client *key, int cur __attribute__((unused)))
+{
+    struct context *ctx = (struct context *) ((char *) key - offsetof(struct context, udp_client));
+    io_sched_del(ctx->io, key, (void *) udp_write_scheduled);
+    tac_write(ctx, -1);
+}
+
+// A UDP context has no socket to wait for: tac_write() runs at the next turn of the event loop.
+static void want_write(struct context *ctx)
+{
+    if (!ctx->udp)
+	io_set_o(ctx->io, ctx->sock);
+    else if (!io_sched_peek(ctx->io, &ctx->udp_client))
+	io_sched_add(ctx->io, &ctx->udp_client, (void *) udp_write_scheduled, 0, 0);
+}
+
 static int rad_send_reply(tac_session *session, u_char status)
 {
     tac_pak *pak = new_rad_pak(session, status);
@@ -411,10 +429,11 @@ static int rad_send_reply(tac_session *session, u_char status)
 	    session->ctx->out = pak;
 	    session->ctx->out_tail = &pak->next;
 	}
-	if (session->ctx->out_count++ >= MAXIMUM_QUEUED_PACKETS)
+	// a UDP context has no slow reader: the next turn of the event loop sends the queue
+	if (session->ctx->out_count++ >= MAXIMUM_QUEUED_PACKETS && !session->ctx->udp)
 	    return -1;
 
-	io_set_o(session->ctx->io, session->ctx->sock);
+	want_write(session->ctx);
     }
     cleanup_session(session, 1);
     return 0;
@@ -537,7 +556,7 @@ static int write_packet(struct context *ctx, tac_pak *p)
     if (ctx->out_count++ >= MAXIMUM_QUEUED_PACKETS)
 	return -1;
 
-    io_set_o(ctx->io, ctx->sock);
+    want_write(ctx);
 
     return 0;
 }
@@ -638,7 +657,6 @@ void tac_read(struct context *ctx, int cur)
     if (ctx->hdroff != TAC_PLUS_HDR_SIZE) {
 	enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-	update_bio(ctx);
 	if (ctx->tls)
 	    len = io_SSL_read_ex(ctx->tls, &ctx->hdr.uchar + ctx->hdroff, TAC_PLUS_HDR_SIZE - ctx->hdroff, ctx->io, cur, (void *) tac_read, &status);
 	else
@@ -732,6 +750,7 @@ void tac_read(struct context *ctx, int cur)
 	    ctx->key_fixed = BISTATE_YES;
 
 	io_set_cb_i(ctx->io, ctx->sock, (void *) rad_read);
+	ctx->udp_read = rad_read;
 	rad_read(ctx, ctx->sock);
 	return;
     }
@@ -788,7 +807,6 @@ void tac_read(struct context *ctx, int cur)
     }
     enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-    update_bio(ctx);
     if (ctx->tls)
 	len = io_SSL_read_ex(ctx->tls, &ctx->in->pak.uchar + ctx->in->offset, ctx->in->length - ctx->in->offset, ctx->io, cur, (void *) tac_read, &status);
     else
@@ -1123,7 +1141,6 @@ void rad_read(struct context *ctx, int cur)
     if (ctx->hdroff != RADIUS_HDR_SIZE) {
 	enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-	update_bio(ctx);
 	if (ctx->tls)
 	    len = io_SSL_read_ex(ctx->tls, &ctx->hdr.uchar + ctx->hdroff, RADIUS_HDR_SIZE - ctx->hdroff, ctx->io, cur, (void *) rad_read, &status);
 	else
@@ -1168,7 +1185,6 @@ void rad_read(struct context *ctx, int cur)
     }
     enum io_status status = io_status_ok;
 #ifdef WITH_SSL
-    update_bio(ctx);
     if (ctx->tls)
 	len = io_SSL_read_ex(ctx->tls, &ctx->in->pak.uchar + ctx->in->offset, ctx->in->length - ctx->in->offset, ctx->io, cur, (void *) rad_read, &status);
     else
@@ -1272,6 +1288,9 @@ void tac_write(struct context *ctx, int cur)
 				&status);
 	else
 #endif
+	if (ctx->udp)
+	    len = udp_send(ctx, &ctx->out->pak.uchar + ctx->out->offset, ctx->out->length - ctx->out->offset);
+	else
 	    len = write_ex(cur, &ctx->out->pak.uchar + ctx->out->offset, ctx->out->length - ctx->out->offset, &status);
 
 	if (check_status(ctx, status))

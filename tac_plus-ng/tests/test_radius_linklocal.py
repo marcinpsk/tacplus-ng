@@ -1,15 +1,16 @@
-"""RADIUS/UDP from IPv6 link-local clients.
+"""RADIUS/UDP from IPv6 link-local clients: one address and port on two interfaces are two clients.
 
 The interface is the scope of a link-local address (sin6_scope_id). spawnd
-binds the reply socket to the destination address of the datagram; for a
-link-local address, bind() needs its scope too.
+and the worker compared the addresses of two clients without it, so the
+second client got the context of the first, and its reply went to the
+first client.
 
-The tests need an interface with link-local addresses. They run again in
-a user and network namespace of their own ("unshare --user --net
---map-root-user"), where root of the namespace can make dummy devices;
-each has fe80::1 (the clients) and fe80::2 (the server). The whole test
-process is in the namespace, so the crash detectors see the daemon as in
-every other test.
+The tests need two interfaces with the same link-local addresses. They
+run again in a user and network namespace of their own ("unshare --user
+--net --map-root-user"), where root of the namespace can make two dummy
+devices; both have fe80::1 (the clients) and fe80::2 (the server). The
+whole test process is in the namespace, so the crash detectors see the
+daemon as in every other test.
 """
 
 import os
@@ -128,3 +129,11 @@ class LinkLocal(DaemonTestCase):
         port = free_udp_port("::")
         self.start_daemon(POLICY, spawnd="\tlisten { address = :: port = %d protocol = UDP }\n" % port)
         self.access_request(self.client(DEVICES[0], 0), DEVICES[0], port)
+
+    def test_same_address_and_port_on_two_interfaces(self):
+        port = free_udp_port("::")
+        self.start_daemon(POLICY, spawnd="\tlisten { address = :: port = %d protocol = UDP }\n" % port)
+        first = self.client(DEVICES[0], 0)
+        second = self.client(DEVICES[1], first.getsockname()[1])
+        for s, device in ((first, DEVICES[0]), (second, DEVICES[1]), (first, DEVICES[0]), (second, DEVICES[1])):
+            self.access_request(s, device, port)
