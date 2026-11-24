@@ -8,7 +8,7 @@ include $(BASE)/Makefile.inc
 PROG=spawnd
 
 LIB	+= $(LIB_MAVIS) $(LIB_NET)
-CFLAGS	+= $(DEF) $(INC_SSL) $(INC)
+CFLAGS	+= $(DEF) $(INC_SSL) $(INC_CRYPTO) $(INC)
 VPATH	= $(BASE)/$(PROG)
 
 all: $(PROG)$(EXEC_EXT) install_stage

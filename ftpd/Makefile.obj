@@ -15,7 +15,7 @@ ifeq ($(OSTYPE), sunos)
 endif
 
 LIB += $(LIB_MAVIS) $(LIBSCTP) $(LIBPROCTITLE) $(LIB_ZLIB) $(LIB_PCRE) $(LIB_SSL) $(LIB_CRYPTO) $(LIB_CRYPT) $(LIB_NET)
-INC += $(INC_ZLIB) $(INC_PCRE) $(INC_SSL) $(INC_LWRES)
+INC += $(INC_ZLIB) $(INC_PCRE) $(INC_SSL) $(INC_CRYPTO) $(INC_LWRES) $(INC_SCTP)
 
 ifeq ($(WITH_PCRE), 1)
 	OBJ += pcre_rewrite.o

@@ -9,7 +9,7 @@ PROG=tac_plus-ng
 
 LIB	+= $(LIB_MAVIS) $(LIB_SSL) $(LIB_CRYPTO) $(LIB_CRYPT) $(LIB_NET) $(LIB_PCRE) $(LIB_TLS)
 
-CFLAGS	+= $(DEF) $(INC) $(INC_SSL) $(INC_PCRE)
+CFLAGS	+= $(DEF) $(INC) $(INC_SSL) $(INC_CRYPTO) $(INC_PCRE)
 VPATH	= $(BASE)/$(PROG):$(BASE)/misc
 
 ALL = $(PROG)$(EXEC_EXT) install_stage

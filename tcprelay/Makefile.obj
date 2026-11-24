@@ -20,7 +20,7 @@ endif
 #LIB += $(LIB_MAVIS) $(LIBPROCTITLE) $(LIB_SSL) $(LIB_NET)
 #OBJ += ssl_init.o
 
-CFLAGS += $(DEF) $(INC) $(INC_SSL)
+CFLAGS += $(DEF) $(INC) $(INC_SSL) $(INC_CRYPTO)
 VPATH = $(BASE)/$(PROG):$(BASE)/misc
 
 ALL = $(PROG)$(EXEC_EXT) install_stage
