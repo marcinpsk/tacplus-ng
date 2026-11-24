@@ -55,6 +55,8 @@ MEMBEROF_SCHEMA = "attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' SUP di
 # slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
 CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
 TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn="([^"]*)" method=128)')
+# an acl for Slapd: the root DSE without supportedExtension, so the server does not offer password modify (RFC 3062)
+NO_PASSWORD_MODIFY = 'access to dn.base="" attrs=supportedExtension by * none\n'
 
 SLAPD_CONF = string.Template("""\
 include $core
@@ -69,7 +71,7 @@ $tls
 pidfile $pidfile
 argsfile $argsfile
 
-access to dn.base="" $root_dse
+${acl}access to dn.base="" $root_dse
 access to dn.base="cn=Subschema" by * read
 access to attrs=userPassword by self write by anonymous auth by * none
 access to * by users read by * none
@@ -288,9 +290,9 @@ def libldap_tls_package():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, entries="", tls="", starttls=False, root_dse="by * read"):
+    def __init__(self, directory, entries="", tls="", starttls=False, root_dse="by * read", acl=""):
         """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only,
-        or on ldap:// for StartTLS; root_dse: the "by" clauses of the root DSE."""
+        or on ldap:// for StartTLS; root_dse: the "by" clauses of the root DSE; acl: access lines before all others."""
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
@@ -308,7 +310,7 @@ class Slapd:
                      db=os.path.join(directory, "db"), memberof=os.path.join(directory, "memberof.schema"))
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
-                                          root_dse=root_dse, base=BASE))
+                                          root_dse=root_dse, acl=acl, base=BASE))
         with open(paths["memberof"], "w") as f:
             f.write(MEMBEROF_SCHEMA)
         os.mkdir(os.path.join(directory, "db"))
@@ -673,19 +675,19 @@ class LdapTests:
             self.assert_login(d, "FAIL")
             self.assertEqual(slapd.binds(), [])
 
-    def slapd(self, ldif="", tls="", starttls=False, root_dse="by * read"):
-        """A running slapd; ldif: more entries, tls, starttls, root_dse: see Slapd."""
+    def slapd(self, ldif="", tls="", starttls=False, root_dse="by * read", acl=""):
+        """A running slapd; ldif: more entries, tls, starttls, root_dse, acl: see Slapd."""
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif,
-                      tls, starttls, root_dse)
+                      tls, starttls, root_dse, acl)
         self.addCleanup(slapd.stop)
         slapd.start()
         return slapd
 
-    def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", **env):
-        """Start slapd (ldif, tls, starttls, root_dse: see slapd()) and the daemon; policy: more daemon lines, env: for
-        the back-end."""
-        slapd = self.slapd(ldif, tls, starttls, root_dse)
+    def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", acl="", **env):
+        """Start slapd (ldif, tls, starttls, root_dse, acl: see slapd()) and the daemon; policy: more daemon lines,
+        env: for the back-end."""
+        slapd = self.slapd(ldif, tls, starttls, root_dse, acl)
         extra = setenv(env)
         return slapd, self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF,
                                                                             base=BASE, last=WIDE - 1) + policy)
@@ -1183,11 +1185,11 @@ class LdapPerl(LdapTests, DaemonTestCase):
         return MODULE.substitute(module="external", url=url, base=BASE, reader=READER, extra=extra,
                                  exec=perl_exec(self, LDAP_PERL, self.stderr_log))
 
-    def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", **env):
+    def start(self, ldif="", policy="", tls="", starttls=False, root_dse="by * read", acl="", **env):
         """LdapTests.start(); a slapd without TLS gets LDAP_SKIP_STARTTLS=1, unless env sets it (None: not set)."""
         if not tls:
             env.setdefault("LDAP_SKIP_STARTTLS", "1")
-        return super().start(ldif, policy, tls, starttls, root_dse, **env)
+        return super().start(ldif, policy, tls, starttls, root_dse, acl, **env)
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_starttls_by_default(self):
@@ -1265,7 +1267,6 @@ class LdapPerl(LdapTests, DaemonTestCase):
             self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
         with open(self.stderr_log, errors="replace") as f:
             self.assertIn("no root DSE: the LDAP server type is generic", f.read())
-
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
@@ -1495,6 +1496,32 @@ class LdapPerlOldStartTls(DaemonTestCase):
             self.assert_login(d, "FAIL")
         self.assertGreaterEqual(peer.hellos, 2)
         self.assertEqual(peer.after_failure, [])
+
+
+@unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
+@unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
+class LdapPerlOldPasswordChange(DaemonTestCase):
+    """mavis_tacplus_ldap.pl with LDAP_SERVER_TYPE = generic: the password change and the password modify extension."""
+
+    CONFIG = None
+
+    def test_password_modify_extension(self):
+        """The back-end changes the password only with the extension; without it, FAIL and no change.
+
+        A crypt() hash with a two-character salt would count only the first eight characters of the new password.
+        """
+        for acl, status in (("", "PASS"), (NO_PASSWORD_MODIFY, "FAIL")):
+            with self.subTest(acl=acl):
+                d = LdapPerlOldStartTls.start(self, new_slapd(self, acl=acl).url, LDAP_SKIP_STARTTLS="1")
+                with d.connect() as c:
+                    r = c.ascii_login("carol", "", data=["carolpw", "Abcdef12suffix", "Abcdef12suffix"])
+                self.assertEqual(r.statuses[-1], status, r)
+                if status == "FAIL":
+                    self.assertEqual(r.server_msg, "Password change is unsupported.\n", r)
+                changed = status == "PASS"
+                for password, ok in (("Abcdef12suffix", changed), ("Abcdef12", False), ("carolpw", not changed)):
+                    with self.subTest(password=password), d.connect() as c:
+                        self.assertEqual(c.pap("carol", password).status_name, "PASS" if ok else "FAIL")
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
