@@ -16,6 +16,7 @@
 #include <netdb.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <pwd.h>
 #include <grp.h>
@@ -722,16 +723,15 @@ void v6_ntoh(struct in6_addr *a, struct in6_addr *b)
 	a->s6_addr32[i] = ntohl(b->s6_addr32[i]);
 }
 
-/* Parse a numeric CIDR prefix length with range validation. Keeps the
-   historical atoi()-style leniency (leading digits, empty/non-numeric => 0)
-   but rejects values outside [0, hi] instead of letting a bogus prefix such
-   as "/9999" flow downstream. Returns the length or -1 on out-of-range. */
+/* Parse a CIDR prefix length: decimal digits only, in [0, hi]. Returns the
+   length, or -1 for an empty prefix, other text, or a value out of range. */
 static int parse_cidr_len(const char *s, int hi)
 {
     char *end;
+    if (!isdigit((unsigned char) *s))
+	return -1;
     long v = strtol(s, &end, 10);
-    (void) end;
-    if (v < 0 || v > (long) hi)
+    if (*end || v > (long) hi)
 	return -1;
     return (int) v;
 }

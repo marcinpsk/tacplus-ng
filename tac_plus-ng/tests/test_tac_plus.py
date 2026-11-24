@@ -417,6 +417,13 @@ class MavisListValues(TacPlusTestCase):
                 self.assertEqual(self.pap(client, "10.1.2.3"), "FAIL")
                 self.assertEqual(self.pap(client, "192.0.2.1"), "PASS")
 
+    def test_prefix_length_is_a_number(self):
+        """An empty prefix length, or text after it, is a profile error: before, "/" alone matched every IPv4 address."""
+        for member in ('"admin@10.0.0.0/"', '"admin@10.0.0.0/ bogus"', 'admin@10.0.0.0/8 bogus', '"admin@::/ bogus"'):
+            with self.subTest(member=member):
+                self.assertEqual(self.author(member=member)[0], "ERROR")
+        self.assertEqual(self.author(member='"admin@127.0.0.0/8"'), ("PASS_ADD", ["priv-lvl=15"]))
+
     def test_value_has_only_entries_of_its_attribute(self):
         """Text after the list is a parse error: no authorization."""
         for member in ('"guest" member = admin', '"guest" }', '"guest",'):
