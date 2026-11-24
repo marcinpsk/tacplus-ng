@@ -36,7 +36,10 @@ tests rely on the crash detectors that run after every test
 import struct
 import unittest
 
-from tactest import DaemonTestCase, config, features, tacacs
+from tactest import DaemonTestCase, config, crypto, features, tacacs
+
+# SHA-512, or bcrypt where crypt(3) has no other hash (OpenBSD)
+CRYPTED = crypto.crypt("secret", "$6$saltsalt$", "$2b$04$saltsaltsaltsaltsaltsu")
 
 POLICY = """
 	user alice {
@@ -45,8 +48,7 @@ POLICY = """
 		password pap = login
 	}
 	user crypted {
-		# crypt(3) of "secret" with the salt "aF"
-		password login = crypt aFs8iA.REo/iA
+		password login = crypt %s
 	}
 	user badhash {
 		password login = crypt $$9$$not-a-valid-setting
@@ -54,7 +56,7 @@ POLICY = """
 	ruleset {
 		rule { script { permit } }
 	}
-"""
+""" % CRYPTED.replace("$", "$$")
 
 
 class MalformedPackets(DaemonTestCase):

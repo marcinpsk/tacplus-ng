@@ -1,8 +1,8 @@
 """mavis_tacplus_shadow.pl: the back-end for an /etc/shadow-like file, with the external module.
 
-The tests run the installed script with a crypt() that has no MD5 and
-without Crypt::Passwd::XS, as on a C library that does not support MD5
-hashes. The script then uses MKPASSWD for new hashes. The mkpasswd of
+The tests run the installed script with a crypt() that has neither MD5
+nor bcrypt, and without Crypt::Passwd::XS, as on a C library that
+supports neither (with bcrypt, as on OpenBSD, the script writes bcrypt). The script then uses MKPASSWD for new hashes. The mkpasswd of
 the tests makes SHA-512 hashes with a fixed salt.
 """
 
@@ -21,7 +21,7 @@ SALT = "$6$tactest$"
 # loaded with -M before the script compiles
 NO_MD5 = r"""package NoMd5;
 BEGIN {
-	*CORE::GLOBAL::crypt = sub ($$) { $_[1] =~ /^\$1\$/ ? '*0' : CORE::crypt($_[0], $_[1]) };
+	*CORE::GLOBAL::crypt = sub ($$) { $_[1] =~ /^\$(1|2[aby])\$/ ? '*0' : CORE::crypt($_[0], $_[1]) };
 	unshift @INC, sub { die "no Crypt::Passwd::XS\n" if $_[1] eq 'Crypt/Passwd/XS.pm'; return };
 }
 1;

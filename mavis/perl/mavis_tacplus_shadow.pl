@@ -79,7 +79,8 @@ use Mavis;
 use Fcntl ':flock';
 
 my $hashid = ''; # DES
-my $have_crypt_passwd_xs;
+my $saltlen = 16;
+my $have_crypt_passwd_xs = eval { require Crypt::Passwd::XS; 1 };	# checks the existing MD5 hashes also where crypt(3) has none
 
 my $flag_pwpolicy	= undef;
 my $shadow		= "/dev/null";
@@ -101,10 +102,11 @@ undef $mkpasswd unless -x $mkpasswd;
 
 if (crypt('test', '$1$q5/vUEsR$') eq '$1$q5/vUEsR$jVwHmEw8zAmgkjMShLBg/.') {
 	$hashid = '$1$'; # MD5
-} elsif (eval "require Crypt::Passwd::XS") {
-	import Crypt::Passwd::XS;
+} elsif (crypt('test', '$2b$04$q5/vUEsRq5/vUEsRq5/vUE') eq '$2b$04$q5/vUEsRq5/vUEsRq5/vU.50sJwvHMw78uSuxnGgbsWKccYKZMs6y') {
+	$hashid = '$2b$10$'; # bcrypt, the only hash of OpenBSD
+	$saltlen = 22;
+} elsif ($have_crypt_passwd_xs) {
 	$hashid = '$1$';	# MD5
-	$have_crypt_passwd_xs = 1;
 } elsif (!defined $mkpasswd) {
 	print STDERR "Your system doesn't support modern hashes. Please install the mkpasswd utility.\n";
 }
@@ -134,7 +136,7 @@ sub run_mkpasswd($) {
 }
 
 sub get_password_hash ($$) {
-	if ($have_crypt_passwd_xs) {
+	if ($have_crypt_passwd_xs && $_[1] !~ /^\$2[aby]?\$/) {	# Crypt::Passwd::XS has no bcrypt
 			Crypt::Passwd::XS::crypt($_[0], $_[1]);
 	} else {
 			crypt($_[0], $_[1]);
@@ -152,7 +154,7 @@ sub new_password_hash ($) {
 		}
 	}
 	my $salt = "";
-	for (my $i = 0; $i < 16; $i++) {
+	for (my $i = 0; $i < $saltlen; $i++) {
 		$salt .= ('.', '/', 0..9, 'A'..'Z', 'a'..'z')[rand 64];
 	}
 
