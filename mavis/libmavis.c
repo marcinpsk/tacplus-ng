@@ -296,7 +296,7 @@ void av_add(av_ctx *ac, int av_attribute, char *separator, char *format, ...)
 
 char *av_get(av_ctx *ac, int av_attribute)
 {
-    if (av_attribute < 0 || av_attribute > AV_A_ARRAYSIZE) {
+    if (av_attribute < 0 || av_attribute >= AV_A_ARRAYSIZE) {
 	Debug((DEBUG_AV, "%s(%d): out of bounds\n", __func__, av_attribute));
 	return NULL;
     }
