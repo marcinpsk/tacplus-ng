@@ -4960,29 +4960,20 @@ int async 1
               </row>
               <row>
                 <entry>
-                  <literal>USE_STARTTLS</literal>
-                </entry>
-                <entry>
-                  <para>If set, StartTLS is mandatory on <literal>ldap://</literal> URLs, also if the server does not offer it. The back-end does not read the root DSE then. Each value that is not empty sets it, also <literal>0</literal>.</para>
-                  <para>Default: unset</para>
-                </entry>
-              </row>
-              <row>
-                <entry>
                   <literal>LDAP_SKIP_STARTTLS</literal>
                 </entry>
                 <entry>
-                  <para><literal>0</literal>: StartTLS on <literal>ldap://</literal> URLs if the root DSE of the server offers it.</para>
+                  <para><literal>0</literal>: StartTLS is mandatory on <literal>ldap://</literal> URLs and on <literal>LDAP_HOSTS</literal> entries without a URL scheme (a host name or an IP address).</para>
                   <para><literal>1</literal>: no StartTLS. The binds send the passwords in clear text.</para>
-                  <para>Other integers have the effect of <literal>1</literal>. A value that is not an integer stops the back-end with a message on stderr. The back-end also does not start if <literal>USE_STARTTLS</literal> and <literal>LDAP_SKIP_STARTTLS=1</literal> are both set.</para>
+                  <para>Other integers have the effect of <literal>1</literal>. A value that is not an integer stops the back-end with a message on stderr.</para>
                   <para>Default: <literal>0</literal></para>
                 </entry>
               </row>
             </tbody>
           </tgroup>
         </informaltable>
-        <para>On each new connection to an <literal>ldap://</literal> URL, the back-end first reads the root DSE without a bind. Then it starts TLS. Then it binds as <literal>LDAP_USER</literal>. If the root DSE search or StartTLS fails, the back-end closes the connection and the request gets a back-end error. A connection without TLS writes a warning to stderr. <literal>ldaps://</literal> URLs do not use StartTLS. <literal>TLS_OPTIONS</literal> also applies to StartTLS.</para>
-        <para>The root DSE has no authentication. An attacker in the network path can remove the StartTLS offer from it. Use <literal>ldaps://</literal> or <literal>USE_STARTTLS</literal> to prevent clear-text binds.</para>
+        <para>On each new connection to an <literal>ldap://</literal> URL or to an entry without a URL scheme, the back-end first starts TLS. Then it binds as <literal>LDAP_USER</literal>. The back-end does not read the root DSE to decide about StartTLS. If the server does not support StartTLS, or StartTLS fails, the back-end closes the connection and the request gets a back-end error. A connection without TLS writes a warning to stderr. <literal>ldaps://</literal> URLs do not use StartTLS. <literal>TLS_OPTIONS</literal> also applies to StartTLS.</para>
+        <para><literal>USE_STARTTLS</literal> is not necessary, because StartTLS is the default. The back-end ignores it. Older versions started TLS only if the root DSE offered StartTLS. A site that uses an <literal>ldap://</literal> URL or an entry without a URL scheme (e.g. <literal>"ldap01 ldap02"</literal>) with a server without StartTLS must set <literal>LDAP_SKIP_STARTTLS=1</literal> or use an <literal>ldaps://</literal> URL.</para>
       </section>
     </section>
     <section>

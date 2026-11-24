@@ -117,19 +117,13 @@ TLS_OPTIONS
 	Default: unset
 	Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
 
-USE_STARTTLS
-	If set, StartTLS is mandatory on ldap:// URLs, also if the server
-	does not offer it.
-	Default: unset
-
 LDAP_SKIP_STARTTLS
-	0: StartTLS on ldap:// URLs if the root DSE of the server offers it
+	0: StartTLS is mandatory on ldap:// URLs and on host names or IP
+	   addresses without a URL scheme
 	1: no StartTLS; the binds send the passwords in clear text
-	The back-end reads the root DSE without a bind. StartTLS comes
-	before the bind of LDAP_USER on each new connection, and a failed
-	StartTLS is a backend error. A connection without TLS gives a
-	warning on stderr. The back-end does not start if USE_STARTTLS
-	and LDAP_SKIP_STARTTLS=1 are both set.
+	StartTLS comes before the bind of LDAP_USER on each new connection.
+	A server without StartTLS or a failed StartTLS is a backend error.
+	A connection without TLS gives a warning on stderr.
 	Default: 0
 
 LDAP_NESTED_GROUP_DEPTH
@@ -186,15 +180,12 @@ try:
 	tls = ldap3.Tls(**{"validate": ssl.CERT_REQUIRED, **tls_options})
 except Exception as e:
 	sys.exit("invalid TLS_OPTIONS ({}): {}".format(", ".join(sorted(tls_options)), e))
-eval_env('USE_STARTTLS', None)
 # an empty value is invalid, not the default
 LDAP_SKIP_STARTTLS = os.getenv('LDAP_SKIP_STARTTLS', '0')
 try:
 	ldap_skip_starttls = int(LDAP_SKIP_STARTTLS)
 except ValueError:
 	sys.exit("invalid LDAP_SKIP_STARTTLS: {!r} (0 or 1)".format(LDAP_SKIP_STARTTLS))
-if USE_STARTTLS is not None and ldap_skip_starttls:
-	sys.exit("USE_STARTTLS and LDAP_SKIP_STARTTLS=1 contradict each other, aborting.")
 eval_env('LDAP_HOSTS', 'ldaps://localhost')
 servers = []
 for server in LDAP_HOSTS.split():
@@ -205,25 +196,15 @@ for server in LDAP_HOSTS.split():
 #ldap3.set_config_parameter("POOLING_LOOP_TIMEOUT", LDAP_CONNECT_TIMEOUT)
 conn = None
 
-STARTTLS_OID = '1.3.6.1.4.1.1466.20037'
-
-# StartTLS on ldap:// if the server offers it or USE_STARTTLS is set: ########
+# StartTLS on ldap:// unless LDAP_SKIP_STARTTLS is set: #######################
 def start_tls(c):
 	if not ldap_skip_starttls:
-		offers = False
-		if USE_STARTTLS is None:
-			if not c.search('', '(objectClass=*)', ldap3.BASE, attributes=['supportedExtension']):
-				raise ldap3.core.exceptions.LDAPStartTLSError(
-					"root DSE: {} (set USE_STARTTLS=1 or LDAP_SKIP_STARTTLS=1)".format(c.result['description']))
-			offers = any(STARTTLS_OID in r['attributes'].get('supportedExtension', [])
-				for r in c.response if r['type'] == 'searchResEntry')
-		if offers or USE_STARTTLS is not None:
-			try:
-				if not c.start_tls(read_server_info=False):
-					raise ldap3.core.exceptions.LDAPStartTLSError(c.last_error)
-			except Exception as e:
-				raise ldap3.core.exceptions.LDAPStartTLSError("StartTLS: {}".format(e))
-			return
+		try:
+			if not c.start_tls(read_server_info=False):
+				raise ldap3.core.exceptions.LDAPStartTLSError(c.last_error)
+		except Exception as e:
+			raise ldap3.core.exceptions.LDAPStartTLSError("StartTLS: {}".format(e))
+		return
 	print("the connection to the LDAP server has no TLS: the binds send the passwords in clear text",
 		file=sys.stderr)
 

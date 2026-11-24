@@ -449,7 +449,8 @@ class StartTlsPeer:
     """An LDAP peer on ldap:// that accepts StartTLS, fails the handshake, and keeps the connection open.
 
     after_failure lists the operation tags that a client sent after the failed handshake (an unbind excepted),
-    hellos counts the ClientHello records.
+    ops the operation tags (the request name for an extended request), hellos counts the ClientHello records.
+    offer: the root DSE lists StartTLS.
     """
 
     SUCCESS = ber(0x0A, b"\0") + ber(0x04) + ber(0x04)
@@ -457,10 +458,12 @@ class StartTlsPeer:
                                                   ber(0x31, ber(0x04, b"1.3.6.1.4.1.1466.20037")))))
     TLS_ALERT = bytes.fromhex("15030300020228")  # fatal handshake_failure
 
-    def __init__(self):
+    def __init__(self, offer=True):
         self.sock = socket.create_server(("127.0.0.1", 0))
         self.url = "ldap://127.0.0.1:%d" % self.sock.getsockname()[1]
+        self.root_dse = self.ROOT_DSE if offer else ber(0x64, ber(0x04), ber(0x30))
         self.after_failure = []
+        self.ops = []
         self.hellos = 0
         threading.Thread(target=self.accept, daemon=True).start()
 
@@ -500,6 +503,7 @@ class StartTlsPeer:
                 _, message, data = element
                 _, msgid, op = ber_split(message)
                 msgid = ber(0x02, msgid)
+                self.ops.append(ber_split(ber_split(op)[1])[1].decode() if op[0] == 0x77 else op[0])
                 if failed and op[0] != 0x42:
                     self.after_failure.append(op[0])
                 if op[0] == 0x42:  # unbind
@@ -507,7 +511,7 @@ class StartTlsPeer:
                 if op[0] == 0x60:  # bind
                     conn.sendall(ber(0x30, msgid, ber(0x61, self.SUCCESS)))
                 elif op[0] == 0x63:  # search
-                    conn.sendall(ber(0x30, msgid, self.ROOT_DSE) + ber(0x30, msgid, ber(0x65, self.SUCCESS)))
+                    conn.sendall(ber(0x30, msgid, self.root_dse) + ber(0x30, msgid, ber(0x65, self.SUCCESS)))
                 elif op[0] == 0x77:  # extended: StartTLS
                     conn.sendall(ber(0x30, msgid, ber(0x78, self.SUCCESS, ber(0x8A, b"1.3.6.1.4.1.1466.20037"))))
 
@@ -1690,7 +1694,8 @@ class LdapPython(LdapTests, DaemonTestCase):
     """mavis_tacplus_ldap.py; slapd with "security simple_bind=1" refuses simple binds without TLS."""
     CONFIG = None
     NO_CHECK = (("TLS_OPTIONS", "validate=ssl.CERT_NONE"),)
-    STARTTLS = {"USE_STARTTLS": "1"}
+    # StartTLS is mandatory by default; None keeps the LDAP_SKIP_STARTTLS=1 of start() away
+    STARTTLS = {"LDAP_SKIP_STARTTLS": None}
     exe = None
     SCOPES = ("SUBTREE", "LEVEL", "BASE")
 
@@ -1715,6 +1720,12 @@ class LdapPython(LdapTests, DaemonTestCase):
     def TRUST(cafile):
         # ldap3 compares only the DNS names of the certificate with the host
         return {"TLS_OPTIONS": f"ca_certs_file={cafile!r}, valid_names=['localhost']"}
+
+    def start(self, ldif="", policy="", tls="", *, starttls_default=False, **kwargs):
+        """See LdapTests.start(); a slapd without TLS gets LDAP_SKIP_STARTTLS=1, unless starttls_default is set."""
+        if not tls and not starttls_default:
+            kwargs.setdefault("LDAP_SKIP_STARTTLS", "1")
+        return super().start(ldif, policy, tls, **kwargs)
 
     def capture_stderr(self, name):
         """The next start() runs the back-end through a script that writes its stderr to the file name.
@@ -1761,32 +1772,69 @@ class LdapPython(LdapTests, DaemonTestCase):
             time.sleep(0.1)
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
-    def test_starttls_offered(self):
-        """ldap:// to a server that offers StartTLS: StartTLS before all binds, a failure is a backend error.
-
-        LDAP_SKIP_STARTTLS=1 sends the binds in clear text.
-        """
+    def test_starttls_default(self):
+        """ldap://: StartTLS before all binds, also if the root DSE does not offer it; a failure is a backend error."""
         ca = self.ca()
         refuse_clear = self.ldaps(ca, "security simple_bind=1\n")
-        with self.subTest("CA not trusted"):
-            log = self.capture_stderr("untrusted")
-            slapd, d = self.start(tls=refuse_clear, starttls=True)
+        # anonymous clients do not see the root DSE, so it does not offer StartTLS to them
+        hidden = self.ldaps(ca, 'security simple_bind=1\naccess to dn.base="" by users read by * none\n')
+        cases = (("CA not trusted", refuse_clear, {}, "FAIL"),
+                 ("CA trusted", refuse_clear, self.TRUST(ca.cert), "PASS"),
+                 ("root DSE hidden, CA not trusted", hidden, {}, "FAIL"),
+                 ("root DSE hidden", hidden, self.TRUST(ca.cert), "PASS"))
+        for i, (name, slapd_tls, env, status) in enumerate(cases):
+            with self.subTest(name):
+                log = self.capture_stderr(f"default-{i}")
+                slapd, d = self.start(tls=slapd_tls, starttls=True, **env)
+                self.assert_login(d, status)
+                if status == "FAIL":
+                    self.assertEqual(slapd.binds(), [])
+                    self.assertIn("StartTLS: ", self.stderr(log))
+                else:
+                    self.assertTrue(slapd.binds())
+                    self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
+                self.assertNotIn(CLEAR_TEXT_WARNING, self.stderr(log))
+        with self.subTest("no StartTLS on the server"):
+            log = self.capture_stderr("plain")
+            slapd, d = self.start(starttls_default=True)
             self.assert_login(d, "FAIL")
             self.assertEqual(slapd.binds(), [])
             self.assertIn("StartTLS: ", self.stderr(log))
-        with self.subTest("CA trusted"):
-            log = self.capture_stderr("trusted")
-            slapd, d = self.start(tls=refuse_clear, starttls=True, **self.TRUST(ca.cert))
-            self.assert_login(d, "PASS")
-            self.assertTrue(slapd.binds())
-            self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
-            self.assertNotIn(CLEAR_TEXT_WARNING, self.stderr(log))
-        with self.subTest("LDAP_SKIP_STARTTLS"):
-            log = self.capture_stderr("skip")
-            slapd, d = self.start(tls=self.ldaps(ca), starttls=True, LDAP_SKIP_STARTTLS="1")
-            self.assert_login(d, "PASS")
-            self.assertIn((READER, False), slapd.binds())
-            self.assertIn(CLEAR_TEXT_WARNING, self.stderr(log))
+
+    @unittest.skip("this back-end does not read USE_STARTTLS: see test_starttls_default and test_skip_starttls")
+    def test_starttls_required(self):
+        pass
+
+    @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
+    def test_skip_starttls(self):
+        """LDAP_SKIP_STARTTLS=1 sends the binds in clear text, with a warning; USE_STARTTLS does not change that."""
+        ca = self.ca()
+        for name, env in (("LDAP_SKIP_STARTTLS", {}), ("USE_STARTTLS", {"USE_STARTTLS": "1"})):
+            with self.subTest(name):
+                log = self.capture_stderr(name)
+                slapd, d = self.start(tls=self.ldaps(ca), starttls=True, LDAP_SKIP_STARTTLS="1", **env)
+                self.assert_login(d, "PASS")
+                self.assertIn((READER, False), slapd.binds())
+                self.assertIn(CLEAR_TEXT_WARNING, self.stderr(log, CLEAR_TEXT_WARNING))
+
+    def test_starttls_without_offer(self):
+        """A failed StartTLS also without an offer in the root DSE: StartTLS is the only operation.
+
+        LDAP_HOSTS without a URL scheme is ldap:// too.
+        """
+        for scheme in ("ldap://", ""):
+            with self.subTest(scheme=scheme):
+                peer = StartTlsPeer(offer=False)
+                self.addCleanup(peer.stop)
+                url = scheme + peer.url[len("ldap://"):]
+                d = self.start_daemon(POLICY.substitute(module=self.module(url, ""), staff=STAFF, base=BASE,
+                                                        last=WIDE - 1))
+                for _ in range(2):
+                    self.assert_login(d, "FAIL")
+                self.assertGreaterEqual(peer.hellos, 2)
+                # no bind, search or other extended request before or after StartTLS; 0x42 is unbind
+                self.assertEqual(set(peer.ops) - {0x42}, {"1.3.6.1.4.1.1466.20037"})
+                self.assertEqual(peer.after_failure, [])
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_ca_path_with_quotes(self):
@@ -1856,10 +1904,8 @@ class LdapPython(LdapTests, DaemonTestCase):
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
 
     def test_starttls_settings_invalid(self):
-        """USE_STARTTLS with LDAP_SKIP_STARTTLS=1, or a LDAP_SKIP_STARTTLS that is not a number, stops the back-end."""
-        cases = (({"USE_STARTTLS": "1", "LDAP_SKIP_STARTTLS": "1"},
-                  "USE_STARTTLS and LDAP_SKIP_STARTTLS=1 contradict each other"),
-                 ({"LDAP_SKIP_STARTTLS": "yes"}, "invalid LDAP_SKIP_STARTTLS: 'yes'"),
+        """A LDAP_SKIP_STARTTLS that is not a number stops the back-end."""
+        cases = (({"LDAP_SKIP_STARTTLS": "yes"}, "invalid LDAP_SKIP_STARTTLS: 'yes'"),
                  ({"LDAP_SKIP_STARTTLS": ""}, "invalid LDAP_SKIP_STARTTLS: ''"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
