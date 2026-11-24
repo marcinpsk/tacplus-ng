@@ -871,6 +871,17 @@ static void set_tls_error(struct context *ctx)
     }
 }
 
+// an empty error queue: a socket error in errno (OpenSSL 3 at a TCP reset), else EOF
+static const char *tls_error_hint(struct context *ctx, int r, int sys_errno)
+{
+    unsigned long e = ERR_get_error();
+    if (e)
+	return ERR_error_string(e, NULL);
+    if (sys_errno && SSL_get_error(ctx->tls, r) == SSL_ERROR_SYSCALL)
+	return strerror(sys_errno);
+    return "unexpected eof while reading";
+}
+
 static void accept_control_tls(struct context *ctx, int cur)
 {
     const char *hint = "";
@@ -881,6 +892,7 @@ static void accept_control_tls(struct context *ctx, int cur)
 
     update_bio(ctx);
     int r = SSL_accept(ctx->tls);
+    int sys_errno = errno;
     switch (r) {
     default:
 	switch (SSL_get_error(ctx->tls, r)) {
@@ -892,13 +904,13 @@ static void accept_control_tls(struct context *ctx, int cur)
 	    return;
 	default:
 	    set_tls_error(ctx);
-	    hint = (ctx->hint && *ctx->hint) ? ctx->hint : ERR_error_string(ERR_get_error(), NULL);
+	    hint = (ctx->hint && *ctx->hint) ? ctx->hint : tls_error_hint(ctx, r, sys_errno);
 	    reject_conn(ctx, hint, __func__, __LINE__);
 	    return;
 	}
     case 0:
 	set_tls_error(ctx);
-	hint = ERR_error_string(ERR_get_error(), NULL);
+	hint = tls_error_hint(ctx, r, sys_errno);
 	reject_conn(ctx, hint, __func__, __LINE__);
 	return;
     case 1:
