@@ -4706,7 +4706,10 @@ int async 1
         <emphasis>external</emphasis> module. It interfaces to various kinds
         of LDAP servers, e.g. OpenLDAP, Fedora DS and Active Directory. The server type is detected automatically
         from the root DSE. If the server does not give the root DSE to <literal>LDAP_USER</literal>, the server
-        type is generic and the back-end does not change passwords on it. A message goes to stderr. Its
+        type is generic and the back-end does not change passwords on it. A message goes to stderr. Except on
+        Active Directory, the back-end changes passwords only with the password modify extended operation
+        (RFC 3062). If the root DSE does not show it, a password change gets FAIL with
+        <literal>Password change is unsupported.</literal> Its
         behaviour is controlled by a list of environmental variables:</para>
       <informaltable frame="all">
         <tgroup cols="2">
