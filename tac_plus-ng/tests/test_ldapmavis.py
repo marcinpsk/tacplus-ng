@@ -1268,6 +1268,17 @@ class LdapPerl(LdapTests, DaemonTestCase):
         with open(self.stderr_log, errors="replace") as f:
             self.assertIn("no root DSE: the LDAP server type is generic", f.read())
 
+    def test_password_change_without_extension(self):
+        """A server that does not offer the password modify extension: FAIL for the password change, no change."""
+        _, d = self.start(acl=NO_PASSWORD_MODIFY)
+        with d.connect() as c:
+            r = c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        self.assertEqual((r.statuses[-1], r.server_msg), ("FAIL", "Password change is unsupported.\n"), r)
+        for password, status in (("carolpw", "PASS"), ("newpw", "FAIL")):
+            with self.subTest(password=password), d.connect() as c:
+                self.assertEqual(c.pap("carol", password).status_name, status)
+
+
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
 class LdapPerlNoRootDse(DaemonTestCase):

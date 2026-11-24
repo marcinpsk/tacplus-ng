@@ -576,7 +576,7 @@ retry_once:
 			if ($LDAP_SERVER_TYPE eq 'microsoft') {
 				$mesg = $ldap->change_ADpassword($authdn, $V[AV_A_PASSWORD], $V[AV_A_PASSWORD_NEW]);
 			} else {
-				unless (defined($has_extension_password_modify)) {
+				unless ($has_extension_password_modify) {
 					$V[AV_A_USER_RESPONSE] = "Password change is unsupported.";
 					goto fail;
 				}
@@ -589,12 +589,7 @@ retry_once:
 					goto fatal;
 				}
 
-				if ($has_extension_password_modify) {
-					$mesg = $ldap->set_password(oldpasswd => $V[AV_A_PASSWORD], newpasswd => $V[AV_A_PASSWORD_NEW]);
-				} else {
-					$V[AV_A_USER_RESPONSE] = "LDAP server doesn't support password modifications.";
-					goto fail;
-				}
+				$mesg = $ldap->set_password(oldpasswd => $V[AV_A_PASSWORD], newpasswd => $V[AV_A_PASSWORD_NEW]);
 			}
 
 			if ($mesg->code){
