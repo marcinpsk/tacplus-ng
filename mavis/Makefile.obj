@@ -344,7 +344,7 @@ install_python:
 install_python_stage:
 	@$(MAKE) -C $(BASE)/mavis/python install_stage
 
-install_stage: install_perl_stage install_python_stage
+install_stage: $(ALL) install_perl_stage install_python_stage
 	@$(MAKE) -f $(BASE)/$(PROG)/Makefile.obj INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install
 
 install_doc:
