@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
+   $Id: dcc93c25a912b60d4cf811b816adce766494334a $
      __________________________________________________________
 
    Table of Contents
@@ -769,8 +769,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -3056,20 +3056,14 @@ int async 1
    Default: unset
    USE_STARTTLS
 
-   If set, the server is required to support start_tls.
-
-   Default: unset
-
-   Do not set this flag for LDAPS connections.
-   FLAG_AUTHORIZE_ONLY
-
-   Don't attempt to authenticate users.
+   If set, the server is required to support start_tls. Do not set
+   this flag for LDAPS connections.
 
    Default: unset
    TLS_OPTIONS
 
    Extra options for use with LDAPS or start_tls, in Perl hash
-   syntax. See the Net::LDLAP documentation for details.
+   syntax. See the Net::LDAP documentation for details.
 
    The back-end checks the certificate of the server (verify =>
    'require'), unless TLS_OPTIONS sets verify. Name the CA of the
@@ -3079,11 +3073,6 @@ int async 1
 
    Example: "sslversion => 'tlsv1_3'", "cafile =>
    '/path/to/ca.pem'"
-   FLAG_AUTHORIZE_ONLY
-
-   Don't attempt to authenticate users.
-
-   Default: unset
    LDAP_NESTED_GROUP_DEPTH
 
    Limit nested group lookups to the given value. Unlimited if
