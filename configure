@@ -306,7 +306,7 @@ foreach $a (keys %A) {
 
 $DIRS = $DIRS_DEFAULT if $DIRS eq "";
 
-if ($DIRS !~ /^mavis /){
+if ($DIRS !~ /^mavis( |$)/) {
 	$DIRS = "mavis$DIRS";
 }
 
