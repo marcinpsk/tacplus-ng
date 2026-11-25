@@ -1967,12 +1967,12 @@ class LdapPython(LdapTests, DaemonTestCase):
     def test_group_search_error(self):
         """A group search that fails after a good password is a backend error; the next request gets an answer."""
         log = self.capture_stderr("group-search")
-        # after a backend error, only fallback-only users can log in for this period
-        slapd, d = self.start(settings="authentication fallback period = 1\n", LDAP_FILTER_GROUP="(member={}")
+        # after a backend error, only fallback-only users can log in for this period; the FAIL reply comes 1 s late
+        slapd, d = self.start(settings="authentication fallback period = 3\n", LDAP_FILTER_GROUP="(member={}")
         self.assert_login(d, "FAIL")
         self.assertIn("invalid filter", self.stderr(log, "invalid filter"))
         before = len(slapd.binds())
-        select.select([], [], [], 2.5)
+        select.select([], [], [], 4)
         # not a backend error: the back-end binds as LDAP_USER again, finds bob and checks the password
         for user, password in (("bob", "wrong"), ("rescue", "rescuepw")):
             with self.subTest(user=user), d.connect() as c:
