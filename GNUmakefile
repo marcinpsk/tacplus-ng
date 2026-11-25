@@ -33,10 +33,10 @@ include Makefile.inc
 install_fakeroot_doc:
 	@$(MAKE) -r BASE=$(BASE) INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install_doc
 
-dirs:
+dirs: misc/version.h
 	@for D in $(DIRS) ; do $(MAKE) -r -C $$D BASE=$(BASE) || [ ! -d $$D ] || exit 1; done
 
-install: install_doc
+install: misc/version.h install_doc
 	@for D in $(DIRS) ; do [ ! -d $$D/doc ] || $(MAKE) -r -C $$D BASE=$(BASE) install || exit 1; done
 
 $(INSTALLROOT)$(DOCDIR_DEST)/railroad: $(BASE)/doc/railroad
