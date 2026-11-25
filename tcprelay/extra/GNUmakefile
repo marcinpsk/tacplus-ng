@@ -6,7 +6,7 @@ E = $(INSTALLROOT)$(LIBARCHDIR_DEST)/mavis/extra
 all: $(S)
 
 $(S): ../../spawnd/extra/etc_init.d_spawnd
-	-sed 's/spawnd/tcprelay/g'< $^ > $@
+	sed 's/spawnd/tcprelay/g'< $^ > $@
 
 $(E)/$(S): $(S) | $(E)
 	$(INSTALL) -m 0755 $< $@

@@ -6,7 +6,7 @@ E = $(INSTALLROOT)$(LIBARCHDIR_DEST)/mavis/extra
 all: $(S)
 
 $(S): ../../spawnd/extra/etc_init.d_spawnd
-	-sed 's/spawnd/tac_plus-ng/-ngg'< $^ > $@
+	sed -e 's/spawnd/tac_plus-ng/g' -e 's/^\(# Short-Description:\) .*/\1 TACACS+ daemon/'< $^ > $@
 
 $(E)/$(S): $(S) | $(E)
 	$(INSTALL) -m 0755 $^ $@

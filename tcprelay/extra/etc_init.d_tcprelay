@@ -3,11 +3,19 @@
 # Start-stop script for tcprelay
 #
 # (C)2001-2010 by Marc Huber <Marc.Huber@web.de>
-# $Id: etc_init.d_tcprelay,v 1.1 2011/07/22 17:04:04 marc Exp $
+# $Id: etc_init.d_tcprelay,v 1.1 2011/07/22 17:04:03 marc Exp $
 #
 # chkconfig: 2345 99 99
 # description: Starts and stops the tcprelay server process.
 #
+### BEGIN INIT INFO
+# Provides:          tcprelay
+# Required-Start:    $remote_fs $network $syslog
+# Required-Stop:     $network $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: tcprelay server
+### END INIT INFO
 
 PATH=/bin:/usr/bin:/sbin:/usr/sbin
 export PATH
