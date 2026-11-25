@@ -8,7 +8,7 @@ all: $(S)
 $(S): ../../spawnd/extra/etc_init.d_spawnd
 	-sed 's/spawnd/ftpd/g'< $^ > $@
 
-$(E)/$(S): $(S)
+$(E)/$(S): $(S) | $(E)
 	$(INSTALL) -m 0755 $^ $@
 
 $(E):

@@ -20,10 +20,10 @@ BACKENDS +=	tacplus-ng_ntlmauth
 
 BI = $(patsubst %,$(M)/mavis_%.$(SUF), $(BACKENDS))
 
-$(BI): $(M)/%.$(SUF): %.$(SUF)
+$(BI): $(M)/%.$(SUF): %.$(SUF) | $(M)
 	perl $(BASE)/scripts/install_ascii.pl -R "# REMOVE #" -b -S "s|${M}|${LIBDIR_DEST}/mavis|g" -S "s|/usr/local/lib/mavis|${LIBDIR_DEST}/mavis|g" -m 0755 $^ $@
 
-$(M)/$(P): $(P)
+$(M)/$(P): $(P) | $(M)
 	perl $(BASE)/scripts/install_ascii.pl -R "# REMOVE #" -b -m 0644 $^ $@
 
 $(M):
@@ -36,7 +36,7 @@ EXTRA =	tacacs.schema tacacs.schema-fedora-ds tacacs_schema.ldif
 
 EI = $(patsubst %,$(ME)/%, $(EXTRA))
 
-$(EI): $(ME)/%: %
+$(EI): $(ME)/%: % | $(ME)
 	perl $(BASE)/scripts/install_ascii.pl -R "# REMOVE #" -b -m 0644 $^ $@
 
 install: $(M) $(ME) $(BI) $(M)/$(P) $(EI)

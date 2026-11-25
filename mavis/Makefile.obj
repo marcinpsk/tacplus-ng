@@ -263,7 +263,7 @@ clean:
 
 install: install_lib install_libs install_prg install_perl install_python
 
-$(INSTALLROOT)$(LIBARCHDIR_DEST)/$(MAVIS_LIB).$(LIBVER_MAJOR).$(LIBVER_MINOR): $(MAVIS_LIB)
+$(INSTALLROOT)$(LIBARCHDIR_DEST)/$(MAVIS_LIB).$(LIBVER_MAJOR).$(LIBVER_MINOR): $(MAVIS_LIB) | $(INSTALLROOT)$(LIBARCHDIR_DEST)
 	$(INSTALL) -m 0755 $< $(INSTALLROOT)$(LIBARCHDIR_DEST)/$<.$(LIBVER_MAJOR).$(LIBVER_MINOR) ;\
 	ln -s $<.$(LIBVER_MAJOR).$(LIBVER_MINOR) $(INSTALLROOT)$(LIBARCHDIR_DEST)/$<.$(LIBVER_MAJOR).new ;	\
 	ln -s $<.$(LIBVER_MAJOR) $(INSTALLROOT)$(LIBARCHDIR_DEST)/$<.new ;\
@@ -274,7 +274,7 @@ $(INSTALLROOT)$(LIBARCHDIR_DEST):
 	@mkdir -p -m 0755 $@
 
 ifeq ($(OSTYPE), cygwin_nt)
-$(INSTALLROOT)$(BINDIR_DEST)/$(MAVIS_LIB): $(MAVIS_LIB)
+$(INSTALLROOT)$(BINDIR_DEST)/$(MAVIS_LIB): $(MAVIS_LIB) | $(INSTALLROOT)$(BINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_lib: $(INSTALLROOT)$(BINDIR_DEST) $(INSTALLROOT)$(BINDIR_DEST)/$(MAVIS_LIB)
@@ -289,7 +289,7 @@ $(M):
 
 IL = $(patsubst %,$(M)/libmavis_%.so, $(MAVIS_LIBNAMES))
 
-$(IL): $(M)/%.so: %.so
+$(IL): $(M)/%.so: %.so | $(M)
 	$(INSTALL) -m 0755 $< $@
 
 install_libs: $(M) $(IL)
@@ -300,28 +300,28 @@ $(INSTALLROOT)$(BINDIR_DEST):
 $(INSTALLROOT)$(SBINDIR_DEST):
 	@mkdir -p -m 0755 $@
 
-$(INSTALLROOT)$(BINDIR_DEST)/mavistest$(EXEC_EXT): mavistest$(EXEC_EXT)
+$(INSTALLROOT)$(BINDIR_DEST)/mavistest$(EXEC_EXT): mavistest$(EXEC_EXT) | $(INSTALLROOT)$(BINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_mavistest: $(INSTALLROOT)$(BINDIR_DEST) $(INSTALLROOT)$(BINDIR_DEST)/mavistest$(EXEC_EXT)
 
-$(INSTALLROOT)$(SBINDIR_DEST)/pammavis$(EXEC_EXT): pammavis$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/pammavis$(EXEC_EXT): pammavis$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/pammavis-mt$(EXEC_EXT): pammavis-mt$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/pammavis-mt$(EXEC_EXT): pammavis-mt$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/radmavis-mt$(EXEC_EXT): radmavis-mt$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/radmavis-mt$(EXEC_EXT): radmavis-mt$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/ldapmavis-mt$(EXEC_EXT): ldapmavis-mt$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/ldapmavis-mt$(EXEC_EXT): ldapmavis-mt$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_pammavis: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/pammavis$(EXEC_EXT)
 
 install_pammavis-mt: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/pammavis-mt$(EXEC_EXT)
 
-$(INSTALLROOT)$(SBINDIR_DEST)/radmavis$(EXEC_EXT): radmavis$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/radmavis$(EXEC_EXT): radmavis$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_radmavis: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/radmavis$(EXEC_EXT)

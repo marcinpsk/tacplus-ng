@@ -101,16 +101,16 @@ $(I):
 
 install: doc $(INSTALLROOT)$(DOCDIR_DEST) $(HTML_INSTALL) $(TXT_INSTALL) $(PDF_INSTALL) $(MD_INSTALL)
 
-$(HTML_INSTALL): $(HTML_KEEP)
+$(HTML_INSTALL): $(HTML_KEEP) | $(I)
 	$(INSTALL) -m 0644 $< $@
 
-$(TXT_INSTALL): $(TXT_KEEP)
+$(TXT_INSTALL): $(TXT_KEEP) | $(I)
 	$(INSTALL) -m 0644 $< $@
 
-$(PDF_INSTALL): $(PDF_KEEP)
+$(PDF_INSTALL): $(PDF_KEEP) | $(I)
 	$(INSTALL) -m 0644 $< $@
 
-$(MD_INSTALL): $(MD_KEEP)
+$(MD_INSTALL): $(MD_KEEP) | $(I)
 	$(INSTALL) -m 0644 $< $@
 
 $(D):

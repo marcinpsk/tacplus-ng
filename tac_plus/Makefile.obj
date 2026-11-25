@@ -30,13 +30,13 @@ clean:
 $(INSTALLROOT)$(SBINDIR_DEST):
 	@mkdir -p -m 0755 $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/:
 	@mkdir -p $@
 
-$(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/$(PROG).cfg: sample/$(PROG).cfg
+$(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/$(PROG).cfg: sample/$(PROG).cfg | $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/
 	$(INSTALL) -m 0755 $< $@
 
 install:  $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT) $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/ $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/$(PROG).cfg install_extra
