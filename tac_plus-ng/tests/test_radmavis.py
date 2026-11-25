@@ -17,6 +17,7 @@ error.
 
 import hashlib
 import os
+import re
 import select
 import socket
 import string
@@ -155,6 +156,16 @@ def need_tls():
         raise unittest.SkipTest("no openssl command to make certificates")
     if "openssl" not in features():
         raise unittest.SkipTest("tac_plus-ng built without OpenSSL: B has no RADIUS over TLS")
+
+
+def need_apply_config(backend):
+    """Skip unless the backend applies the radcli options of the command line: radcli 1.2.10 has rc_apply_config()."""
+    usage = subprocess.run([backend], capture_output=True, timeout=30, env=sanitizer_env(), check=False).stderr
+    m = re.search(rb"^Version: \S+/(?:radcli (\d+)\.(\d+)\.(\d+)|freeradius-client)$", usage, re.MULTILINE)
+    if m is None:
+        raise AssertionError(f"no library version in the usage of {backend}: {usage!r}")
+    if m[1] is None or tuple(int(n) for n in m.groups()) < (1, 2, 10):
+        raise unittest.SkipTest(f"{os.path.basename(backend)} is built without rc_apply_config(): {m[0].decode()}")
 
 
 def exchange(backend, conf, body, options=()):
@@ -365,6 +376,7 @@ class RadiusTests(FailedLogin):
 
     def test_option_on_the_command_line(self):
         """The option "serv-type=tcp" on the command line overrides "serv-type udp" in the file."""
+        need_apply_config(self.BACKEND)
         _, a = self.start_pair(transport="tcp", serv_type="udp", options=["serv-type=tcp"])
         for password, status in (("alicepw", "PASS"), ("wrong", "FAIL")):
             with self.subTest(password=password), a.connect() as c:
@@ -372,6 +384,7 @@ class RadiusTests(FailedLogin):
 
     def test_bad_option_on_the_command_line(self):
         """The backend exits when radcli cannot apply an option of the command line."""
+        need_apply_config(self.BACKEND)
         conf = self.radcli_conf(self.start_server().udp_port)
         request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"
         p = exchange(self.BACKEND, conf, request, ["serv-type=bogus"])
@@ -380,6 +393,7 @@ class RadiusTests(FailedLogin):
 
     def test_tls_option_on_the_command_line(self):
         """Over TLS the backend starts a second session for the options: "tls-ca-file" of another CA fails it."""
+        need_apply_config(self.BACKEND)
         b = self.start_server("tls")
         conf = self.radcli_conf(b.ports.get("tls"), "tls")
         request = b"0 TACPLUS\n4 alice\n8 alicepw\n49 AUTH\n"

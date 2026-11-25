@@ -16,9 +16,11 @@
 #include <radcli/radcli.h>
 #include <radcli/version.h>
 #define RADLIB "radcli"
+#define RADLIB_VERSION RADLIB " " RADCLI_VERSION
 #else
 #include <freeradius-client.h>
 #define RADLIB "freeradius-client"
+#define RADLIB_VERSION RADLIB
 #endif
 #undef DEBUG
 #ifdef MAVISDEBUG
@@ -53,7 +55,7 @@ static void usage(void)
 	    "The RADIUS settings section in etc/radiusclient.conf.in might be a good\n"	//
 	    "starting point.\n"	//
 	    "\n"		//
-	    "Version: " VERSION "/" RADLIB "\n"	//
+	    "Version: " VERSION "/" RADLIB_VERSION "\n"	//
 	    "\n"		//
 	    "Sample usage:\n"
 #ifdef WITH_RADCLI
