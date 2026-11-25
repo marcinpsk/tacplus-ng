@@ -121,6 +121,7 @@ LDAP_SKIP_STARTTLS
 	0: StartTLS is mandatory on ldap:// URLs and on host names or IP
 	   addresses without a URL scheme
 	1: no StartTLS; the binds send the passwords in clear text
+	Any other value stops the back-end with a message on stderr.
 	StartTLS comes before the bind of LDAP_USER on each new connection.
 	A server without StartTLS or a failed StartTLS is a backend error.
 	A connection without TLS gives a warning on stderr.
@@ -182,10 +183,9 @@ except Exception as e:
 	sys.exit("invalid TLS_OPTIONS ({}): {}".format(", ".join(sorted(tls_options)), e))
 # an empty value is invalid, not the default
 LDAP_SKIP_STARTTLS = os.getenv('LDAP_SKIP_STARTTLS', '0')
-try:
-	ldap_skip_starttls = int(LDAP_SKIP_STARTTLS)
-except ValueError:
+if LDAP_SKIP_STARTTLS not in ('0', '1'):
 	sys.exit("invalid LDAP_SKIP_STARTTLS: {!r} (0 or 1)".format(LDAP_SKIP_STARTTLS))
+ldap_skip_starttls = LDAP_SKIP_STARTTLS == '1'
 eval_env('LDAP_HOSTS', 'ldaps://localhost')
 servers = []
 for server in LDAP_HOSTS.split():

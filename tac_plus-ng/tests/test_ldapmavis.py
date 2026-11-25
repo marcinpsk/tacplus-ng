@@ -1904,9 +1904,9 @@ class LdapPython(LdapTests, DaemonTestCase):
         self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
 
     def test_starttls_settings_invalid(self):
-        """A LDAP_SKIP_STARTTLS that is not a number stops the back-end."""
-        cases = (({"LDAP_SKIP_STARTTLS": "yes"}, "invalid LDAP_SKIP_STARTTLS: 'yes'"),
-                 ({"LDAP_SKIP_STARTTLS": ""}, "invalid LDAP_SKIP_STARTTLS: ''"))
+        """A LDAP_SKIP_STARTTLS that is not 0 or 1 stops the back-end."""
+        cases = tuple(({"LDAP_SKIP_STARTTLS": value}, f"invalid LDAP_SKIP_STARTTLS: {value!r}")
+                      for value in ("yes", "", "2", "-1", " 1"))
         for i, (env, message) in enumerate(cases):
             with self.subTest(env=env):
                 log = self.capture_stderr(f"invalid-{i}")

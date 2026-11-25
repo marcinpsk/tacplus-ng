@@ -4965,7 +4965,7 @@ int async 1
                 <entry>
                   <para><literal>0</literal>: StartTLS is mandatory on <literal>ldap://</literal> URLs and on <literal>LDAP_HOSTS</literal> entries without a URL scheme (a host name or an IP address).</para>
                   <para><literal>1</literal>: no StartTLS. The binds send the passwords in clear text.</para>
-                  <para>Other integers have the effect of <literal>1</literal>. A value that is not an integer stops the back-end with a message on stderr.</para>
+                  <para>Any other value stops the back-end with a message on stderr.</para>
                   <para>Default: <literal>0</literal></para>
                 </entry>
               </row>

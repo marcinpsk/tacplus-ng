@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: af762c2b363e8e69b4bafdaaab1c8229a96e4526 $
+   $Id: 8f0e9e5d52dee1e128afe1147fda9bf7cb46a2e5 $
      __________________________________________________________
 
    Table of Contents
@@ -3209,8 +3209,7 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
 
    1: no StartTLS. The binds send the passwords in clear text.
 
-   Other integers have the effect of 1. A value that is not an
-   integer stops the back-end with a message on stderr.
+   Any other value stops the back-end with a message on stderr.
 
    Default: 0
 
