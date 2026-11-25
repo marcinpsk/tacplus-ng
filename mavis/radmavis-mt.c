@@ -180,7 +180,9 @@ static void *run_thread(void *arg)
 	break;
     }
     case REJECT_RC:
+#ifdef WITH_RADCLI		/* freeradius-client has no CHALLENGE_RC */
     case CHALLENGE_RC:		/* radmavis-mt can't relay a challenge: a failed login, not a backend failure */
+#endif
 	av_set(ac, AV_A_RESULT, AV_V_RESULT_FAIL);
 	break;
     default:
