@@ -7,25 +7,21 @@ include ../Makefile.inc
 PROG	= mavis
 OD	= $(BASE)/build/$(OS)$(GITBRANCH_EXT)/$(PROG)
 
-#all: token.h $(OD)/token.h build perl_build python_build
-all: $(OD)/token.h build perl_build python_build
+all: build perl_build python_build
 
 $(OD):
 	@mkdir -p "$@"
 
-#token.h: $(BASE)/mavis/token.pl
-#	@perl "$^"
-
-$(OD)/token.h: $(BASE)/mavis/token.pl
+$(OD)/token.h: $(BASE)/mavis/token.pl | $(OD)
 	@rm -f "$(BASE)/mavis/token.h" "$(BASE)/mavis/token.c"
 	@perl "$^" $(OD)
 
 env: $(OD)
 
-build:	env
+build:	env $(OD)/token.h
 	@$(MAKE) -f "$(BASE)/$(PROG)/Makefile.obj" -C "$(OD)" "BASE=$(BASE)"
 
-install: perl_install
+install: perl_install $(OD)/token.h
 	@$(MAKE) -f "$(BASE)/$(PROG)/Makefile.obj" -C "$(OD)" "BASE=$(BASE)" install
 
 clean:
