@@ -1955,22 +1955,35 @@ class LdapPython(LdapTests, DaemonTestCase):
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
     def test_skip_group_lookups(self):
-        """LDAP_SKIP_MEMBEROF and LDAP_SKIP_GROUPOFNAMES: 0 does the lookup, 1 skips it.
+        """LDAP_SKIP_MEMBEROF, LDAP_SKIP_GROUPOFNAMES, LDAP_SKIP_POSIXGROUP: 1 skips the lookup, other values do it.
 
         eve has memberOf staff, and is a member of a second netadmins group (groupOfNames); alice has no memberOf.
+        kim is a posixAccount in the posixGroup netadmins. The Perl back-end reads the values the same way.
         """
-        eve = (f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
-               + person("eve", f"objectClass: extensibleObject\nmemberOf: {STAFF}\n")
-               + f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
-               f"member: uid=eve,ou=people,{BASE}\n")
+        ldif = (f"\ndn: ou=lab,{BASE}\nobjectClass: organizationalUnit\nou: lab\n"
+                + person("eve", f"objectClass: extensibleObject\nmemberOf: {STAFF}\n")
+                + f"\ndn: cn=netadmins,ou=lab,{BASE}\nobjectClass: groupOfNames\ncn: netadmins\n"
+                f"member: uid=eve,ou=people,{BASE}\n"
+                + person("kim", "objectClass: posixAccount\nuidNumber: 2000\ngidNumber: 1001\n"
+                         "homeDirectory: /home/kim\n")
+                + f"\ndn: ou=posix,{BASE}\nobjectClass: organizationalUnit\nou: posix\n"
+                f"\ndn: cn=netadmins,ou=posix,{BASE}\nobjectClass: posixGroup\ncn: netadmins\n"
+                f"gidNumber: 1001\n")
         # a user with memberOf does not stop the groupOfNames lookups of the next users
-        cases = (({}, (("eve", "staff\n"), ("alice", "netadmins in staff\n"))),
+        cases = (({}, (("eve", "staff\n"), ("alice", "netadmins in staff\n"), ("kim", "netadmins only\n"))),
                  ({"LDAP_SKIP_MEMBEROF": "0"}, (("eve", "staff\n"),)),
                  ({"LDAP_SKIP_MEMBEROF": "1"}, (("eve", "netadmins only\n"),)),
+                 ({"LDAP_SKIP_MEMBEROF": "yes"}, (("eve", "staff\n"),)),
                  ({"LDAP_SKIP_GROUPOFNAMES": "0"}, (("alice", "netadmins in staff\n"),)),
-                 ({"LDAP_SKIP_GROUPOFNAMES": "1"}, (("alice", ""),)))
+                 ({"LDAP_SKIP_GROUPOFNAMES": "1"}, (("alice", ""),)),
+                 ({"LDAP_SKIP_GROUPOFNAMES": "yes"}, (("alice", "netadmins in staff\n"),)),
+                 # an empty value does the lookups, as an unset one
+                 ({"LDAP_SKIP_GROUPOFNAMES": ""}, (("eve", "staff\n"), ("alice", "netadmins in staff\n"))),
+                 ({"LDAP_SKIP_POSIXGROUP": "0"}, (("kim", "netadmins only\n"),)),
+                 ({"LDAP_SKIP_POSIXGROUP": "1"}, (("kim", ""),)),
+                 ({"LDAP_SKIP_POSIXGROUP": "yes"}, (("kim", "netadmins only\n"),)))
         for env, logins in cases:
-            _, d = self.start(ldif=eve, **env)
+            _, d = self.start(ldif=ldif, **env)
             for user, motd in logins:
                 with self.subTest(env=env, user=user), d.connect() as c:
                     r = c.ascii_login(user, user + "pw")
