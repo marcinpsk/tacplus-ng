@@ -284,16 +284,23 @@ static void do_author(tac_session *session)
     struct author_data *data = session->author_data;
 
     if (!session->user && session->username.len) {
-	if ((session->user = lookup_user(session))) {
+#ifdef WITH_PCRE2
+	// the device scripts run after the lookup, but their "rewrite user" must apply before it
+	session->eval_rewrite_only = BISTATE_YES;
+	res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
+	session->eval_rewrite_only = BISTATE_NO;
+#endif
+	if (res != S_deny && (session->user = lookup_user(session))) {
 	    session->debug |= session->user->debug;
 	    if (session->profile)
 		session->debug |= session->profile->debug;
 	}
-	if (query_mavis_info(session, do_author, PW_LOGIN))
+	if (res != S_deny && query_mavis_info(session, do_author, PW_LOGIN))
 	    return;
     }
 
-    res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
+    if (res != S_deny)
+	res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
     if (res == S_deny) {
 	report(DEBAUTHZ, "user %s realm %s denied by ACL", session->username.txt, session->ctx->realm->name.txt);
 	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_FAIL, session->message.txt,
@@ -321,6 +328,12 @@ static void do_author(tac_session *session)
 
     if (session->user && session->user->passwd[PW_LOGIN] && session->user->passwd[PW_LOGIN]->type == S_error) {
 	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_ERROR, NULL, NULL, 0, NULL);
+	return;
+    }
+
+    if (session->user->rewritten_only && !session->username_rewritten) {
+	report(DEBAUTHZ, "user '%s' is rewritten-only, denied", session->username.txt);
+	send_author_reply(session, TAC_PLUS_AUTHOR_STATUS_FAIL, session->message.txt, NULL, 0, NULL);
 	return;
     }
 
