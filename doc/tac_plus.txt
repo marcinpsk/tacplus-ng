@@ -2,7 +2,7 @@ TACACS+
 
 Marc Huber
 
-   $Id: 60b337fe350e3fad178a824827033342ff5f3146 $
+   $Id: b5d2d70c725ae25a5dcbee22d6091de296cc4c60 $
      __________________________________________________________
 
    Table of Contents
@@ -3092,6 +3092,33 @@ user = admin {
    LDAP_SKIP_STARTTLS = 1 or use ldaps://.
 
    Default: 0
+   TLS_OPTIONS
+
+   Extra options for ldaps:// URLs and StartTLS, in Perl hash
+   syntax. See the Net::LDAP documentation for details.
+
+   The back-end checks the certificate of the server (verify =>
+   'require'), unless TLS_OPTIONS sets verify. The certificate
+   must chain to a CA of the system, and it must match the host
+   name or IP address of the URL, or the name that sslserver =>
+   'name' sets. cafile => '/path/to/ca.pem' or capath =>
+   '/path/to/dir' uses these CAs instead of the CAs of the system.
+   A failed check is a backend error, and the back-end writes the
+   reason to stderr.
+
+   verify => 'none' turns the check off. This changes the
+   behavior: older versions did not check the certificate. A site
+   with a server certificate that the back-end cannot check must
+   name its CA with cafile or capath, or keep the old behavior
+   with setenv TLS_OPTIONS = "verify => 'none'".
+
+   A value that is not a list of Perl key-value pairs, or a verify
+   other than none, optional or require, stops the back-end with a
+   message on stderr.
+
+   Default: unset (the certificate of the server is checked)
+
+   Example: "cafile => '/path/to/ca.pem'"
    FLAG_CHPW
 
    Permit password changes via this backend.
