@@ -1849,7 +1849,9 @@ class LdapPython(LdapTests, DaemonTestCase):
                 peer = StartTlsPeer(offer=False)
                 self.addCleanup(peer.stop)
                 url = scheme + peer.url[len("ldap://"):]
-                d = self.start_daemon(POLICY.substitute(module=self.module(url, ""), staff=STAFF, base=BASE,
+                # with LDAP_USER: a bind as LDAP_USER before StartTLS would show in peer.ops
+                extra = setenv({"LDAP_USER": READER, "LDAP_PASSWD": "readerpw"})
+                d = self.start_daemon(POLICY.substitute(module=self.module(url, extra), staff=STAFF, base=BASE,
                                                         last=WIDE - 1))
                 for _ in range(2):
                     self.assert_login(d, "FAIL")
