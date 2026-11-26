@@ -277,10 +277,13 @@ class PeerCertSan(TlsTestCase):
     def test_dns_san_before_ip_san_single_connection(self):
         self.assertEqual(self.device("dns_then_ip", single_connect=True), "xr")
 
-### FIXME -- There's no correlation between dns_san and IP address, no idea how this could work
-#    def test_dns_san_before_ip_san_from_another_address(self):
-#        """An address SAN that is not the peer's address selects nothing: the device of the address answers."""
-#        self.assertEqual(self.device("dns_then_ip", source="127.0.0.9"), "localhost")
+    def test_dns_san_before_ip_san_from_another_address(self):
+        """IP:127.0.0.65 (device xr) from 127.0.0.9 selects nothing, and no device has the DNS name.
+
+        An IP address SAN selects a device only if it is the peer's address,
+        so the device of the address (localhost) answers, not xr.
+        """
+        self.assertEqual(self.device("dns_then_ip", source="127.0.0.9"), "localhost")
 
     def test_several_dns_sans(self):
         self.assertEqual(self.device("dns_names", source="127.0.0.9"), "dnsnas")
