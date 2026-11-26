@@ -292,6 +292,15 @@ void av_add(av_ctx * ac, int av_attribute, char *separator, char *format, ...)
  * av_add_quoted() writes '"' and the value with a backslash before each '"'. It refuses a CR, LF, NUL
  * and a value that ends with a backslash. */
 int av_add_quoted(av_ctx *, int, char *, size_t);
+/* A list built in one buffer, for many values: av_list_add() and av_list_add_quoted() append, av_list_set() sets the
+ * attribute. */
+struct av_list {
+    char *buf;
+    size_t len, size;
+};
+void av_list_add(struct av_list *, char *, size_t);
+int av_list_add_quoted(struct av_list *, char *, size_t);
+void av_list_set(av_ctx *, int, struct av_list *);
 int av_list_next(char **, char **, int *);
 int av_list_check(char *, int);
 int av_lists_check(av_ctx *);
