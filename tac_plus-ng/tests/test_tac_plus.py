@@ -375,6 +375,12 @@ class MavisListValues(TacPlusTestCase):
 			set priv-lvl = 7
 		}
 	}
+	group = ops\\team {
+		service = shell {
+			default command = permit
+			set priv-lvl = 3
+		}
+	}
 """
 
     @classmethod
@@ -403,6 +409,10 @@ class MavisListValues(TacPlusTestCase):
     def test_value_is_literal(self):
         """No ${VAR} in a value: the value names the group with the literal name."""
         self.assertEqual(self.author(member='"${TACTEST_ENV_GROUP}"'), ("PASS_ADD", ["priv-lvl=7"]))
+
+    def test_backslash_in_quotes(self):
+        """A backslash in double quotes is part of the value, as av_add_quoted() and quote_list() write it."""
+        self.assertEqual(self.author(member='"ops\\team"'), ("PASS_ADD", ["priv-lvl=3"]))
 
     def pap(self, client, rem_addr):
         MavisListValues.count += 1
