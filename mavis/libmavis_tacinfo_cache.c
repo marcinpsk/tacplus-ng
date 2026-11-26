@@ -13,6 +13,7 @@
 #include "misc/sysconf.h"
 
 #include <stdio.h>
+#include <ctype.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -104,7 +105,7 @@ static int mavis_init_in(mavis_ctx *mcx)
 	UNUSED_RESULT(seteuid(mcx->euid));
 	mcx->hashfile_tmp[dirlen + 2] = '/';
 	mcx->hashfile = calloc(1, dirlen + 39 + 10 /* safety margin, see above */ );
-	memcpy(mcx->hashfile, mcx->hashfile_tmp, 36);
+	memcpy(mcx->hashfile, mcx->hashfile_tmp, dirlen + 3);
 	mcx->hashfile_offset = dirlen;
     }
 
@@ -192,6 +193,9 @@ static void get_hash(mavis_ctx *mcx, av_ctx *ac, char *buf)
     myMD5_CTX m;
     DebugIn(DEBUG_MAVIS);
     myMD5Init(&m);
+    // the NUL is part of the salt; no C string key field of an older version gives this MD5 input
+    static const char salt[] = "tacinfo_cache 2";
+    myMD5Update(&m, (u_char *) salt, sizeof(salt));
     uint64_t hashbits = mcx->hashbits;
     for (int i = 0; i < AV_A_ARRAYSIZE; i++) {
 	char *t;
@@ -210,6 +214,37 @@ static int keep[] = { AV_A_TACPROFILE, AV_A_TACCLIENT, AV_A_TACMEMBER, AV_A_UID,
     AV_A_HOME, AV_A_ROOT, AV_A_SHELL, AV_A_PATH, AV_A_DN, AV_A_MEMBEROF, AV_A_IDENTITY_SOURCE,
     AV_A_SSHKEYHASH, AV_A_SSHKEY, AV_A_SSHKEYID, -1
 };
+
+// the last line of a complete cache file
+#define CACHE_END "end\n"
+
+// a cache file is "<attribute> <value>" lines and CACHE_END; anything else (also a short read) is a miss
+static av_ctx *read_entry(int fn, off_t size)
+{
+    size_t end_len = sizeof(CACHE_END) - 1;
+    if (size < (off_t) end_len)
+	return NULL;
+    char *c = Xcalloc(1, (size_t) size + 1);
+    if (Read(fn, c, (size_t) size) != size || memchr(c, 0, (size_t) size)
+	|| memcmp(c + size - end_len, CACHE_END, end_len) || (size > (off_t) end_len && c[size - end_len - 1] != '\n')) {
+	free(c);
+	return NULL;
+    }
+    c[size - end_len] = 0;
+    for (char *l = c; *l; l = strchr(l, '\n') + 1) {
+	char *v = l;
+	while (isdigit((u_char) * v))
+	    v++;
+	if (v == l || *v != ' ') {
+	    free(c);
+	    return NULL;
+	}
+    }
+    av_ctx *a = av_new(NULL, NULL);
+    av_char_to_array(a, c, NULL);
+    free(c);
+    return a;
+}
 
 #define HAVE_mavis_send_in
 static int mavis_send_in(mavis_ctx *mcx, av_ctx **ac)
@@ -236,19 +271,16 @@ static int mavis_send_in(mavis_ctx *mcx, av_ctx **ac)
     UNUSED_RESULT(setegid(mcx->egid));
     if (fn > -1) {
 	struct stat st = { 0 };
-	fstat(fn, &st);
-	if ((!strcmp(t, AV_V_TACTYPE_HOST) && (st.st_mtime + mcx->device_cache_timeout < io_now.tv_sec))
-	    || (!strcmp(t, AV_V_TACTYPE_DACL) && (st.st_mtime + mcx->dacl_cache_timeout < io_now.tv_sec))) {
-	    close(fn);
+	av_ctx *a = NULL;
+	if (!fstat(fn, &st)
+	    && !(!strcmp(t, AV_V_TACTYPE_HOST) && (st.st_mtime + mcx->device_cache_timeout < io_now.tv_sec))
+	    && !(!strcmp(t, AV_V_TACTYPE_DACL) && (st.st_mtime + mcx->dacl_cache_timeout < io_now.tv_sec)))
+	    a = read_entry(fn, st.st_size);
+	close(fn);
+	if (!a) {
 	    DebugOut(DEBUG_MAVIS);
 	    return MAVIS_DOWN;
 	}
-	av_ctx *a = av_new(NULL, NULL);
-	char c[st.st_size + 1];
-	c[st.st_size] = 0;
-	UNUSED_RESULT(Read(fn, c, st.st_size));
-	close(fn);
-	av_char_to_array(a, c, NULL);
 	for (int i = 0; keep[i] > -1; i++)
 	    av_set(*ac, keep[i], av_get(a, keep[i]));
 	av_free(a);
@@ -260,22 +292,6 @@ static int mavis_send_in(mavis_ctx *mcx, av_ctx **ac)
 
     DebugOut(DEBUG_MAVIS);
     return MAVIS_DOWN;
-}
-
-static int write_av(av_ctx *ac, int fn, int attr)
-{
-    int res = 0;
-    char *t = av_get(ac, attr);
-    if (t) {
-	char buf[40];
-	size_t len;
-	len = snprintf(buf, sizeof(buf), "%d ", attr);
-	res |= ((ssize_t) len != Write(fn, buf, len));
-	len = strlen(t);
-	res |= ((ssize_t) len != Write(fn, t, len));
-	res |= (1 != Write(fn, "\n", 1));
-    }
-    return res;
 }
 
 #define HAVE_mavis_recv_out
@@ -315,11 +331,23 @@ static int mavis_recv_out(mavis_ctx *mcx, av_ctx **ac)
     mkdir(mcx->hashfile_tmp, 0700);
     mcx->hashfile_tmp[mcx->hashfile_offset + 3] = '/';
 
-    int fn = open(mcx->hashfile_tmp, O_CREAT | O_WRONLY, 0600);
-    int res = 0;
+    int fn = open(mcx->hashfile_tmp, O_CREAT | O_WRONLY | O_TRUNC, 0600);
     if (fn > -1) {
+	// av_array_to_char() writes a LF of a value as CR, av_char_to_array() reads it back as LF
+	fd_set set;
+	FD_ZERO(&set);
 	for (int i = 0; keep[i] > -1; i++)
-	    res |= write_av(*ac, fn, keep[i]);
+	    FD_SET(keep[i], &set);
+	size_t len = av_array_to_char_len(*ac) + sizeof(CACHE_END);
+	char *buf = Xcalloc(1, len);
+	int l = av_array_to_char(*ac, buf, len, &set);
+	int res = (l < 0);
+	if (!res) {
+	    memcpy(buf + l, CACHE_END, sizeof(CACHE_END) - 1);
+	    l += sizeof(CACHE_END) - 1;
+	    res = (l != Write(fn, buf, (size_t) l));
+	}
+	free(buf);
 	res |= (-1 == close(fn));
 	if (res)
 	    unlink(mcx->hashfile_tmp);
