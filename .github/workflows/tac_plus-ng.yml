@@ -230,3 +230,109 @@ jobs:
           name: tests-work-ubuntu-debug-minimum-${{ matrix.cc }}
           path: build/tests-work
           if-no-files-found: ignore
+
+  # FreeBSD and OpenBSD run in a QEMU VM on the Linux runner (vmactions), as
+  # root. tests/loopback-aliases adds the 127.0.0.0/8 addresses of the tests.
+  # The jobs do not block a pull request until the first BSD findings are fixed.
+  freebsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      TACTEST_TIMEOUT: 2400
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false   # the VM gets a copy of .git
+      - uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b # v1.6.0
+        with:
+          release: "15"
+          cpu: 4
+          mem: 8192
+          envs: TACTEST_TIMEOUT
+          # OpenSSL and PAM are in the base system. The package system has only radcli 2,
+          # so radmavis-mt (radcli 1) is not built and its tests skip.
+          prepare: |
+            pkg install -y gmake perl5 pcre2 python3 openldap26-client c-ares curl
+          run: |
+            freebsd-version; openssl version
+            sh tac_plus-ng/tests/loopback-aliases
+            # the VM copies the tree back only after a run without error: keep the exit code for the next step
+            mkdir -p build; rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
+            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1 || true
+      # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
+      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/tac_plus
+      - run: grep /ARES build/tac_plus-ng-version
+      - if: success() || failure()
+        run: exit "$(cat build/tests-rc)"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-work-freebsd
+          path: build/tests-work
+          if-no-files-found: ignore
+
+  openbsd:
+    # the OpenSSL 3 package (PREREQUISITES.txt), not the LibreSSL of the base system
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      TACTEST_TIMEOUT: 2400
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false   # the VM gets a copy of .git
+      - uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1.4.9
+        with:
+          release: "8"
+          cpu: 4
+          mem: 8192
+          envs: TACTEST_TIMEOUT
+          # openssl%3.5 installs beside LibreSSL: /usr/local/{include,lib}/eopenssl35 and eopenssl35.
+          # Python ssl and openldap-client stay on LibreSSL, so the TLS test client and libldap use it.
+          # curl links LibreSSL, so the build leaves it out; no test needs it.
+          # only radcli 2 is packaged: radmavis-mt (radcli 1) is not built and its tests skip
+          prepare: |
+            pkg_add -I gmake pcre2 python%3 openldap-client-- libcares openssl%3.5
+          run: |
+            uname -a
+            O=/usr/local/include/eopenssl35 L=/usr/local/lib/eopenssl35
+            # the -I in CC comes before the -I/usr/include that configure gives some libraries
+            export TACTEST_CC="cc -I$O"
+            # configure reads the -include and -lib directories only with --with-ssl and --with-crypto
+            export TACTEST_CONFIGURE="--with-ssl --with-ssl-include=$O --with-ssl-lib=$L --with-crypto --with-crypto-include=$O --with-crypto-lib=$L --without-curl"
+            # the tests make their certificates with the openssl command, and it is their TLS-PSK and DTLS client
+            mkdir -p /tmp/openssl3 && ln -sf /usr/local/bin/eopenssl35 /tmp/openssl3/openssl
+            export PATH="/tmp/openssl3:$PATH"
+            openssl version
+            sh tac_plus-ng/tests/loopback-aliases
+            # the VM copies the tree back only after a run without error: keep the exit code for the next step
+            mkdir -p build; rc=0; tac_plus-ng/tests/run-tests || rc=$?; echo $rc > build/tests-rc
+            build/*/tests-prefix/sbin/tac_plus-ng -v > build/tac_plus-ng-version 2>&1 || true
+            for f in $(find build/*/tests-prefix -type f 2>/dev/null); do
+              if file -b "$f" | grep -q ELF; then ldd "$f" || echo "ldd failed: $f"; fi
+            done > build/ldd 2>&1
+      # the tests of these backends, of tac_plus and of the DNS code skip if the build left them out
+      - run: ls build/*/tests-prefix/sbin/ldapmavis-mt build/*/tests-prefix/sbin/tac_plus
+      - run: grep /ARES build/tac_plus-ng-version
+      - run: grep "/OpenSSL 3\." build/tac_plus-ng-version
+      # no program or module loads the libcrypto of LibreSSL (/usr/lib) and of OpenSSL together,
+      # but ldapmavis-mt, through the libldap of openldap-client
+      # (ldd of a module can fail: the log shows it, and only a failed program fails the job)
+      - run: |
+          grep -E '^[^[:space:]].*:$|/libcrypto\.so|/libssl\.so|^ldd failed' build/ldd
+          awk '/^[^ \t].*:$/ { f = $0 } /\/usr\/lib\/libcrypto\.so/ { l[f] = 1 } /\/eopenssl35\/libcrypto\.so/ { o[f] = 1 }
+               /^ldd failed: .*\/s?bin\// { print; bad = 1 }
+               END { for (f in o) if (f in l) { print "LibreSSL and OpenSSL: " f; if (f !~ /\/ldapmavis-mt:$/) bad = 1 }
+                     for (f in o) if (f ~ /\/sbin\/tac_plus-ng:$/) ng = 1
+                     if (!ng) { print "tac_plus-ng loads no OpenSSL 3 libcrypto"; bad = 1 }
+                     exit bad }' build/ldd
+      - if: success() || failure()
+        run: exit "$(cat build/tests-rc)"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-work-openbsd
+          path: build/tests-work
+          if-no-files-found: ignore
