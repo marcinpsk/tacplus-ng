@@ -49,3 +49,7 @@ fun:RB_delete
 # mavis/libmavis_external.c free_context(); fires when the daemon drops a
 # child of an external MAVIS module (child_closed_stderr()).
 fun:RB_search_and_delete
+# misc/rbtree.c rbtree_freefunc(), the free walk of RB_tree_delete(), the
+# same way, e.g. with tac_plus/config.c free_svc(struct node_svc *); fires
+# when an answer from MAVIS replaces a cached tac_plus user.
+fun:rbtree_freefunc

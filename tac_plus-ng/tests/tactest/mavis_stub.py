@@ -47,7 +47,7 @@ State, all keys optional:
                         "member": [groups] or a string as it is,
                         "memberof": [LDAP group DNs] or a string as it is,
                         "sshkey": str, "mustchange": bool,
-                        "new_password": str,
+                        "new_password": str, "challenge": str,
                         "profile": the user profile (AV_A_TACPROFILE) as it is,
                         "expiry": the password expiry, seconds since the epoch}}
   hosts         {address: the host profile (AV_A_TACPROFILE) as it is}
@@ -62,8 +62,10 @@ State, all keys optional:
                 test released that request (see release)
   double_write  answer every request a second time, once the test released
                 it, and journal that as result "again" (#228)
+  hold          answer the n-th request of a child only once the test
+                released that request (see release)
   release       the number of the request (n in the journal) up to which a
-                child may go on with "quit" or "double_write"; Stub.release()
+                child may go on with "hold", "quit" or "double_write"; Stub.release()
                 sets it. Until then the child waits, so the test decides when
                 the child acts -- after the client got the first answer --
                 instead of a pause that a loaded host may stretch.
@@ -72,7 +74,8 @@ State, all keys optional:
                 test-only variables (Stub.module(setenv=...)), never a password
 
 Without a forced result: an unknown user is NOTFOUND; INFO is ACK with
-the user's attributes; AUTH and CHPW are ACK if the password matches,
+the user's attributes; CHAL is ACK with them and the user's "challenge"
+(AV_A_CHALLENGE); AUTH and CHPW are ACK if the password matches,
 else NAK; HOST is ACK with the profile of a known address; DACL is ACK
 for a name in "dacls"; other request types are NOTFOUND. A CHPW for a
 user with "new_password" is ACK only if the new password is that one
@@ -136,7 +139,7 @@ class Stub:
         os.replace(tmp, self.state_path)
 
     def release(self, n):
-        """Let a child go on with "quit" or "double_write" after its request n."""
+        """Let a child go on with "hold", "quit" or "double_write" after its request n."""
         state = _load(self.state_path)
         state["release"] = n
         self.set(**state)
@@ -207,9 +210,9 @@ def serve(libdir):
         if result is None:
             if host is not None or dacl is not None:
                 result = "ACK"
-            elif known is None or tactype not in ("INFO", "AUTH", "CHPW"):
+            elif known is None or tactype not in ("INFO", "CHAL", "AUTH", "CHPW"):
                 result = "NOTFOUND"
-            elif tactype == "INFO" or av.get(M.AV_A_PASSWORD) == known.get("password"):
+            elif tactype in ("INFO", "CHAL") or av.get(M.AV_A_PASSWORD) == known.get("password"):
                 result = "ACK"
             else:
                 result = "NAK"
@@ -242,10 +245,14 @@ def serve(libdir):
                 d.set_sshpubkey(known["sshkey"])
             if known.get("profile"):
                 d.set_tacprofile(known["profile"])
+            if tactype == "CHAL" and known.get("challenge"):
+                d.av_pairs[M.AV_A_CHALLENGE] = known["challenge"]
             d.password_mustchange(bool(known.get("mustchange")))
             if "expiry" in known:
                 d.set_expiry(known["expiry"])
         verdict, code = answers[result]
+        if state.get("hold") == n:
+            _wait_release(state_path, n)
         d.write(verdict, code, state.get("message"))
         if state.get("double_write"):
             _wait_release(state_path, n)

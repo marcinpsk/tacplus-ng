@@ -5,12 +5,14 @@ with config.TAC_PLUS around the policy, in tac_plus syntax.
 """
 
 import os
+import shutil
+import subprocess
 import time
 import unittest
 
 from tactest import DaemonTestCase, Stub, config, prefix
 from tactest.daemon import parse_only
-from tactest.tacacs import AUTHEN_TYPE_ASCII, Packet
+from tactest.tacacs import AUTHEN_SVC_ENABLE, AUTHEN_TYPE_ASCII, Packet
 
 TAC_PLUS = os.access(os.path.join(prefix(), "sbin", "tac_plus"), os.X_OK)
 
@@ -55,7 +57,7 @@ class Smoke(TacPlusTestCase):
 
 def users(conditions):
     """One user per condition; its shell authorization passes only if the condition holds."""
-    return "".join("\tuser = %s { service = shell { script = { if (%s) permit deny } } }\n" % (name, cond)
+    return "".join(f"\tuser = {name} {{ service = shell {{ script = {{ if ({cond}) permit deny }} }} }}\n"
                    for name, cond in conditions)
 
 
@@ -249,6 +251,234 @@ class SingleConnectionMayClose(TacPlusTestCase):
         self.assertTrue(idle.closed(timeout=5), "the idle single connection stays open")
         self.assertFalse(keep.closed(timeout=1), "the connection of the may-close = no host closes")
         self.assertEqual(keep.pap("alice", "alicepw").status_name, "PASS")
+
+
+class SequenceNumber(TacPlusTestCase):
+    """RFC 8907 4.1: the daemon ends the session at packet 255, it does not answer with sequence number 0."""
+
+    CONFIG = """
+	single-connection = yes
+	password max-attempts = 200
+	user = alice {
+		login = clear alicepw
+		pap = clear alicepw
+	}
+"""
+
+    def test_the_sequence_number_does_not_wrap(self):
+        with self.connect() as c:
+            s = c.session()
+            r = s.start(authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                self.assertEqual(r.status_name, "GETUSER", r)
+                r = s.cont()
+            s.send(Packet.authen_continue())
+            self.assertTrue(c.silent(), "the daemon answered packet 255")
+
+    def test_the_right_password_in_packet_255_does_not_pass(self):
+        with self.connect() as c:
+            s = c.session()
+            r = s.start(user="alice", authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                self.assertEqual(r.status_name, "GETPASS", r)
+                r = s.cont(user_msg="wrong%d" % s.seq_no)
+            s.send(Packet.authen_continue(user_msg="alicepw"))
+            self.assertTrue(c.silent(), "the daemon answered packet 255")
+
+    def test_the_limit_with_single_connection_may_close(self):
+        """The end of the last session closes the connection; the context is freed once."""
+        d = self.start_daemon(self.CONFIG + "\thost = may-close { address = 127.0.0.1/32 single-connection may-close = yes }\n")
+        with d.connect() as c:
+            s = c.session()
+            r = s.start(authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                r = s.cont()
+            s.send(Packet.authen_continue())
+            self.assertTrue(c.closed(), "the daemon answered packet 255")
+
+    def test_other_sessions_on_a_single_connection_go_on(self):
+        with self.connect(single_connect=True) as c:
+            s = c.session()
+            r = s.start(authen_type=AUTHEN_TYPE_ASCII)
+            while s.seq_no < 254:
+                r = s.cont()
+            s.send(Packet.authen_continue())
+            self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+
+    def test_an_even_number_while_a_reply_is_due_ends_the_session(self):
+        """A packet that the client sends before the reply to its previous packet."""
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + MAVIS_BACKEND)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw"}}, hold=1)
+        with d.connect() as c:
+            s = c.session()
+            self.assertEqual(s.start(user="alice", authen_type=AUTHEN_TYPE_ASCII).status_name, "GETPASS")
+            s.send(Packet.authen_continue(user_msg="pw"))
+            deadline = time.monotonic() + 5
+            while not stub.requests() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            s.send(Packet.authen_continue(user_msg="pw"))
+            time.sleep(0.5)
+            stub.release(1)
+            self.assertTrue(c.silent(), "the daemon answered")
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH"])
+
+
+MAVIS_BACKEND = """
+	user backend = mavis
+	login backend = mavis chpass
+	pap backend = mavis
+"""
+
+SHADOW = os.path.join(prefix(), "lib", "mavis", "mavis_tacplus_shadow.pl")
+
+
+class MustChangeWithoutDialog(TacPlusTestCase):
+    """The backend answers OK with PASSWORD_MUSTCHANGE to a login that has no dialog for a new password.
+
+    Only ASCII login and CHPASS can change a password. tac_plus permitted
+    the other logins. The tac_plus-ng counterpart is MustChangeWithoutDialog
+    in test_mavis.py.
+    """
+
+    CONFIG = None
+    MESSAGE = "Please change your password."
+
+    def daemon_and_stub(self):
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + MAVIS_BACKEND)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, message=self.MESSAGE)
+        return d, stub
+
+    def test_pap_fails(self):
+        d, stub = self.daemon_and_stub()
+        for _ in range(2):
+            with d.connect() as c:
+                r = c.pap("alice", "pw")
+            self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK"), ("AUTH", "ACK")])
+
+    def test_ascii_login_with_the_password_in_start_fails(self):
+        """The PAP-like ASCII login of IOS-XR (user and password in START) has no dialog either."""
+        d, stub = self.daemon_and_stub()
+        with d.connect() as c:
+            r = c.session().start(user="alice", data="pw", authen_type=AUTHEN_TYPE_ASCII)
+        self.assertEqual(r.status_name, "FAIL", r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK")])
+
+    def test_ascii_login_still_changes_the_password(self):
+        d, stub = self.daemon_and_stub()
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["pw", "new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+        self.assertEqual([e["type"] for e in stub.requests()], ["AUTH", "CHPW"])
+
+    def test_refused_answer_updates_the_cached_profile(self):
+        """The profile of the refused answer replaces the cached profile and its cached PAP password."""
+        d, stub = self.daemon_and_stub()
+        stub.set(users={"alice": {"password": "pw", "profile": "{ service = shell { default command = permit } }"}})
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "pw").status_name, "PASS")
+        stub.set(users={"alice": {"password": "pw", "mustchange": True,
+                                  "profile": "{ service = shell { script = { deny } } }"}}, message=self.MESSAGE)
+        with d.connect() as c:
+            r = c.session().start(user="alice", data="pw", authen_type=AUTHEN_TYPE_ASCII)
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        with d.connect() as c:
+            r = c.author("alice", ["service=shell", "cmd="])
+        self.assertEqual(r.status_name, "FAIL", r)
+        with d.connect() as c:
+            r = c.pap("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK")] * 3)
+
+    def test_refused_answer_does_not_extend_the_cache(self):
+        """A refused answer does not keep a cached PAP password valid after the cache timeout."""
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + "\tcache timeout = 11\n" + MAVIS_BACKEND)
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw"}})
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "pw").status_name, "PASS")
+        stub.set(users={"alice": {"password": "pw", "mustchange": True}}, message=self.MESSAGE)
+        time.sleep(7)
+        with d.connect() as c:
+            r = c.session().start(user="alice", data="pw", authen_type=AUTHEN_TYPE_ASCII)
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        time.sleep(5.5)
+        with d.connect() as c:
+            r = c.pap("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("AUTH", "ACK")] * 3)
+
+    def test_enable_gets_the_challenge_of_a_must_change_answer(self):
+        """The refusal is for AUTH answers: a CHAL answer with PASSWORD_MUSTCHANGE still gives its challenge."""
+        d = self.start_daemon(Stub.module(childs=(1, 1)) + MAVIS_BACKEND.replace("mavis chpass", "mavis chalresp chpass"))
+        stub = Stub(d)
+        stub.set(users={"alice": {"password": "pw", "mustchange": True, "challenge": "otp-md5 99 tactest",
+                                  "profile": "{ enable = login }"}}, message=self.MESSAGE)
+        with d.connect() as c:
+            s = c.session()
+            r = s.start(user="alice", authen_type=AUTHEN_TYPE_ASCII, service=AUTHEN_SVC_ENABLE, priv_lvl=15)
+            self.assertEqual(r.status_name, "GETPASS", r)
+            self.assertIn("otp-md5 99 tactest", r.server_msg, r)
+            r = s.cont(user_msg="pw")
+        self.assertEqual(r.status_name, "FAIL", r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()],
+                         [("INFO", "ACK"), ("CHAL", "ACK"), ("AUTH", "ACK")])
+
+    def test_authorization_uses_the_profile_of_an_info_answer(self):
+        """An INFO answer with PASSWORD_MUSTCHANGE still gives the profile for authorization."""
+        d, stub = self.daemon_and_stub()
+        stub.set(users={"alice": {"password": "pw", "mustchange": True,
+                                  "profile": "{ service = shell { default command = permit } }"}})
+        with d.connect() as c:
+            r = c.author("alice", ["service=shell", "cmd="])
+        self.assertEqual(r.status_name, "PASS_ADD", r)
+        self.assertEqual([(e["type"], e["result"]) for e in stub.requests()], [("INFO", "ACK")])
+
+    def expired_shadow_daemon(self):
+        """lastchange 0 in the shadow file: the password has expired."""
+        if not shutil.which("perl"):
+            self.skipTest("the backend is a Perl script")
+        shadow = self.scratch_file("shadow", f"alice:{crypt_md5(self, 'pw')}:0:0:99999:7:::\n")
+        return self.start_daemon(f"""
+	mavis module = external {{
+		setenv SHADOWFILE = "{shadow}"
+		exec = "{SHADOW}"
+	}}
+""" + MAVIS_BACKEND)
+
+    def test_expired_shadow_password(self):
+        d = self.expired_shadow_daemon()
+        with d.connect() as c:
+            r = c.pap("alice", "pw")
+        self.assertEqual((r.status_name, r.server_msg.strip()), ("FAIL", self.MESSAGE), r)
+        with d.connect() as c:
+            r = c.ascii_login("alice", "pw", data=["pw", "new", "new"])
+        self.assertEqual(r.statuses, ["GETPASS", "GETDATA", "GETDATA", "GETDATA", "PASS"], r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "new").status_name, "PASS")
+
+    def test_chpass_changes_an_expired_shadow_password(self):
+        """CHPASS START: the CHPW answer of the backend keeps PASSWORD_MUSTCHANGE."""
+        d = self.expired_shadow_daemon()
+        with d.connect() as c:
+            s = c.session()
+            r = s.dialog(s.start(user="alice", action=2, authen_type=AUTHEN_TYPE_ASCII),
+                         {"GETDATA": ["pw"], "GETPASS": ["new", "new"]})
+        self.assertEqual(r.statuses, ["GETDATA", "GETPASS", "GETPASS", "PASS"], r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("alice", "new").status_name, "PASS")
+
+
+def crypt_md5(test, password):
+    """An MD5-crypt hash from the crypt() of Perl (the crypt module of Python is gone in 3.13)."""
+    salt = "$1$tactest$"
+    hashed = subprocess.run(["perl", "-e", "print crypt($ARGV[0], $ARGV[1])", password, salt],
+                            check=True, capture_output=True, text=True).stdout
+    if not hashed.startswith(salt):
+        test.skipTest("the crypt() of the system has no MD5-crypt")
+    return hashed
 
 
 if __name__ == "__main__":

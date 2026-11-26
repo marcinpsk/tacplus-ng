@@ -529,7 +529,8 @@ static char *subst_magic(tac_session *session, char *format, ...)
     if (!len)
 	return NULL;
 
-    format_concat = alloca(len);
+    // + 1: an empty format still gets the newline before the next string
+    format_concat = alloca(len + 1);
     *format_concat = 0;
 
     va_start(ap, format);
@@ -1739,6 +1740,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 	session->authen_data = mem_alloc(session->mem, sizeof(struct authen_data));
 
     if (hdr->seq_no == 1) {
+	session->passwd_changeable = 0;
 	switch (start->action) {
 	case TAC_PLUS_AUTHEN_LOGIN:
 	    switch (start->service) {
@@ -1757,6 +1759,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 		    } else {
 			/* Standard ASCII login */
 			session->authen_data->authfn = do_ascii_login;
+			session->passwd_changeable = 1;
 			username_required = 0;
 		    }
 		    break;
@@ -1792,6 +1795,7 @@ void authen(tac_session *session, tac_pak_hdr *hdr)
 		case TAC_PLUS_AUTHEN_TYPE_ASCII:
 		    session->authen_data->authfn = do_chpass;
 		    session->chpass = 1;
+		    session->passwd_changeable = 1;
 		    username_required = 0;
 		    break;
 		}
