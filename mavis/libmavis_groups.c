@@ -298,15 +298,23 @@ static int good_name(struct regex_list *l, char *s)
     return 0;
 }
 
-// A group name into attr. For a list attribute: quoted, or plain if it cannot be quoted (a backslash at the end)
-// and a plain value can carry it. -1: the list cannot carry it
-static int add_group_name(av_ctx *ac, int attr, char *name)
+// 1 if a plain value of the list in attr can carry name (MEMBEROF needs quoted values)
+static int plain_value(int attr, char *name)
 {
     size_t len = strlen(name);
-    if (!av_list_attribute(attr))
+    return attr != AV_A_MEMBEROF && len && !strpbrk(name, ",\r\n") && !strchr("\"' \t", *name) && !strchr(" \t", name[len - 1]);
+}
+
+// A group name into attr. For a list attribute: quoted, or plain if it cannot be quoted (a backslash at the end) and
+// a plain value can carry it. A resolved name with a backslash is plain if the tac_plus parser reads it as one word:
+// that parser reads C escapes in quotes. -1: the list cannot carry it
+static int add_group_name(av_ctx *ac, int attr, char *name, int resolved)
+{
+    if (!av_list_attribute(attr)
+	|| (resolved && strchr(name, '\\') && plain_value(attr, name) && *name != '#' && !strpbrk(name, " \t={}()[]|&!")))
 	av_list_append(ac, attr, name);
-    else if (av_add_quoted(ac, attr, name, len)) {
-	if (attr == AV_A_MEMBEROF || !len || strpbrk(name, ",\r\n") || strchr("\"' \t", *name) || strchr(" \t", name[len - 1]))
+    else if (av_add_quoted(ac, attr, name, strlen(name))) {
+	if (!plain_value(attr, name))
 	    return -1;
 	av_list_append(ac, attr, name);
     }
@@ -344,7 +352,7 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
 		} else {
 		    g = getgrgid((gid_t) u);
 		    av_unset(*ac, mcx->resolve_gid_attr);
-		    if (g && good_name(mcx->group_regex, g->gr_name) && add_group_name(*ac, mcx->resolve_gid_attr, g->gr_name))
+		    if (g && good_name(mcx->group_regex, g->gr_name) && add_group_name(*ac, mcx->resolve_gid_attr, g->gr_name, 1))
 			return group_name_refused(*ac, mcx->resolve_gid_attr);
 		}
 	    } else
@@ -365,7 +373,7 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
 			if (!good_gid(mcx->gids, u))
 			    continue;
 			g = getgrgid((gid_t) u);
-			if (g && good_name(mcx->groups_regex, g->gr_name) && add_group_name(*ac, mcx->resolve_gids_attr, g->gr_name)) {
+			if (g && good_name(mcx->groups_regex, g->gr_name) && add_group_name(*ac, mcx->resolve_gids_attr, g->gr_name, 1)) {
 			    free(gids);
 			    return group_name_refused(*ac, mcx->resolve_gids_attr);
 			}
@@ -386,7 +394,7 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
 	while (av_list_next(&l, &v, &quoted) > 0)
 	    if (good_name(mcx->groups_regex, v)) {
 		if (quoted)
-		    add_group_name(*ac, AV_A_TACMEMBER, v);
+		    add_group_name(*ac, AV_A_TACMEMBER, v, 0);
 		else
 		    av_list_append(*ac, AV_A_TACMEMBER, v);
 	    }
@@ -399,7 +407,7 @@ static int mavis_recv_out(mavis_ctx * mcx, av_ctx ** ac)
 	av_unset(*ac, AV_A_MEMBEROF);
 	while (av_list_next(&l, &v, NULL) > 0)
 	    if (good_name(mcx->memberof_regex, v))
-		add_group_name(*ac, AV_A_MEMBEROF, v);
+		add_group_name(*ac, AV_A_MEMBEROF, v, 0);
 	free(list);
     }
 

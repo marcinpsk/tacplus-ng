@@ -44,7 +44,9 @@ Environment:
 
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 from . import config, daemon, detect, dns, mavis_stub, radius, sample, tacacs, tls
@@ -55,10 +57,39 @@ from .tacacs import Closed, Connection, Packet, ProtocolError
 
 __all__ = ["DaemonTestCase", "Daemon", "DaemonError", "Connection", "Packet", "Closed", "ProtocolError", "Stub",
            "binary", "cpu_seconds", "prefix", "sanitizers", "features", "ipv6_available", "config", "detect", "dns",
-           "mavis_stub", "radius", "sample", "tacacs", "tls", "LINUX", "SUPPRESSIONS", "SOURCE"]
+           "mavis_stub", "radius", "sample", "tacacs", "tls", "LINUX", "SUPPRESSIONS", "SOURCE", "GROUP_DB",
+           "run_with_group_db"]
 
 # top of the source tree: the samples, the RADIUS dictionary
 SOURCE = daemon.TOP
+
+# set in the namespace of run_with_group_db()
+GROUP_DB = "TACTEST_GROUP_DB"
+
+
+def run_with_group_db(test, lines, name):
+    """Run the test class name ("module.Class") in a user and mount namespace, with lines added to /etc/group.
+
+    That class skips unless GROUP_DB is set. test skips where no such namespace can be made.
+    """
+    unshare = ["unshare", "--user", "--mount", "--map-root-user"]
+    probe = subprocess.run(unshare + ["true"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, timeout=30, check=False)
+    if probe.returncode:
+        test.skipTest("no user and mount namespace here: " + probe.stdout.decode("utf-8", "replace").strip())
+    tmp = tempfile.mkdtemp(prefix="tactest-group-")
+    test.addCleanup(shutil.rmtree, tmp)
+    db = os.path.join(tmp, "group")
+    with open("/etc/group") as f, open(db, "w") as g:
+        g.write(f.read() + lines)
+    p = subprocess.run(unshare + ["sh", "-c", 'mount --bind "$0" /etc/group && exec "$@"', db,
+                                  sys.executable, "-m", "unittest", "-v", name],
+                       cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       env=dict(os.environ, **{GROUP_DB: "1"}), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, timeout=120, check=False)
+    out = p.stdout.decode("utf-8", "replace")
+    test.assertEqual(p.returncode, 0, out)
+    test.assertRegex(out, r"\nRan 1 test", out)
 
 
 class DaemonTestCase(unittest.TestCase):

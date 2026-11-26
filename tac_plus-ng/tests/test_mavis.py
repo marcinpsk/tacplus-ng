@@ -47,7 +47,8 @@ import time
 import unittest
 from unittest import mock
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
+from tactest import (GROUP_DB, LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix,
+                     run_with_group_db)
 from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
@@ -930,7 +931,6 @@ class GroupsResolveGids(DaemonTestCase):
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "last\n"))
 
 
-GROUP_DB = "TACTEST_GROUP_DB"
 GROUP_GID = 4242
 
 
@@ -943,24 +943,7 @@ class GroupNameTheListCannotCarry(unittest.TestCase):
     """
 
     def test_refused(self):
-        probe = subprocess.run(["unshare", "--user", "--mount", "--map-root-user", "true"], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=30, check=False)
-        if probe.returncode:
-            self.skipTest("no user and mount namespace here: " + probe.stdout.decode("utf-8", "replace").strip())
-        tmp = tempfile.mkdtemp(prefix="tactest-group-")
-        self.addCleanup(shutil.rmtree, tmp)
-        db = os.path.join(tmp, "group")
-        with open("/etc/group") as f, open(db, "w") as g:
-            g.write(f.read() + "bs\\:x:%d:\n" % GROUP_GID)
-        p = subprocess.run(["unshare", "--user", "--mount", "--map-root-user", "sh", "-c",
-                            'mount --bind "$0" /etc/group && exec "$@"', db,
-                            sys.executable, "-m", "unittest", "-v", "test_mavis.GroupNameInNamespace"],
-                           cwd=os.path.dirname(os.path.abspath(__file__)), env=dict(os.environ, **{GROUP_DB: "1"}),
-                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
-                           check=False)
-        out = p.stdout.decode("utf-8", "replace")
-        self.assertEqual(p.returncode, 0, out)
-        self.assertRegex(out, r"\nRan 1 test", out)
+        run_with_group_db(self, "bs\\:x:%d:\n" % GROUP_GID, "test_mavis.GroupNameInNamespace")
 
 
 @unittest.skipUnless(os.environ.get(GROUP_DB), "runs in the namespace of GroupNameTheListCannotCarry")
