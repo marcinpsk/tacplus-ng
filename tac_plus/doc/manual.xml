@@ -3975,6 +3975,7 @@ aaa authorization commands 15 cmdlist</screen>
               </entry>
               <entry>
                 <para>Permit password changes via this backend.</para>
+                <para>Except for <literal>LDAP_SERVER_TYPE=microsoft</literal>, the server must offer the password modify extended operation (RFC 3062) in its root DSE. Without it, a password change gets FAIL with <literal>Password change is unsupported.</literal> If the user cannot read the root DSE, the back-end tries the extended operation.</para>
                 <para>Default: unset</para>
               </entry>
             </row>

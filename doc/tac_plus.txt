@@ -3096,6 +3096,12 @@ user = admin {
 
    Permit password changes via this backend.
 
+   Except for LDAP_SERVER_TYPE=microsoft, the server must offer
+   the password modify extended operation (RFC 3062) in its root
+   DSE. Without it, a password change gets FAIL with Password
+   change is unsupported. If the user cannot read the root DSE,
+   the back-end tries the extended operation.
+
    Default: unset
    FLAG_PWPOLICY
 
