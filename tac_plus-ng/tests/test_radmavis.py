@@ -47,12 +47,17 @@ SERVER = string.Template("""
 	user alice { password login = clear alicepw }
 	user bob { password login = clear bobpw }
 	user carol { password login = clear carolpw }
+	user dan { password login = clear danpw }
 	user erin { password login = clear push }
+	user frank { password login = clear frankpw }
 	profile reply {
 		script {
 			if (user == carol) permit
 			if (user == alice) set radius[Class] = "netadmins"
 			if (user == erin) set radius[Class] = "netadmins"
+			# a quote and a comma, a line break: the characters of the TACMEMBER list
+			if (user == dan) set radius[Class] = "x\\",\\"netadmins"
+			if (user == frank) set radius[Class] = "x\\nnetadmins"
 			set radius[Reply-Message] = "welcome"
 			permit
 		}
@@ -322,6 +327,18 @@ class RadiusTests(FailedLogin):
                 r = c.ascii_login(user, password)
                 self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
+    def test_list_values(self):
+        """A quote, a comma or a line break in a Class value stays in that one value of TACMEMBER.
+
+        dan is not a member of netadmins, and frank can log in (the backend
+        skips his value).
+        """
+        _, a = self.start_pair()
+        for user in ("dan", "frank"):
+            with self.subTest(user=user), a.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+
     def test_access_accept_without_attributes(self):
         """B adds no attribute for carol, and radcli keeps no Message-Authenticator: the back-end gets no pairs.
 
@@ -398,6 +415,15 @@ class RadiusTests(FailedLogin):
 @unittest.skipUnless(os.path.exists(RADMAVIS_MT), "the build has no radmavis-mt (radcli or pthreads missing)")
 class RadiusServer(RadiusTests, RadmavisTestCase):
     """The tests with radmavis-mt, in "mavis module = external-mt"."""
+
+    def test_class_replaces_the_tacmember_of_the_request(self):
+        """The Class values of the answer replace a TACMEMBER of the request; an answer without Class keeps it."""
+        conf = self.radcli_conf(self.start_server().udp_port)
+        for user, tacmember in (("alice", '"netadmins"'), ("carol", '"stale"')):
+            with self.subTest(user=user):
+                request = '0 TACPLUS\n4 %s\n8 %spw\n49 AUTH\n47 "stale"\n' % (user, user)
+                p = exchange(RADMAVIS_MT, conf, request.encode())
+                self.assertEqual((reply_pairs(p) or {}).get("47"), tacmember, p)
 
 
 @unittest.skipUnless(os.path.exists(RADMAVIS_MT), "the build has no radmavis-mt (radcli or pthreads missing)")
