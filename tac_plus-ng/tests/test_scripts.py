@@ -12,7 +12,7 @@ import os
 import struct
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, features, radius, tacacs, tls
+from tactest import LINUX, SOURCE, DaemonTestCase, Stub, features, radius, sample, tacacs, tls
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 RADIUS_SECRET = "radsecret"
@@ -522,6 +522,21 @@ class Attributes(DaemonTestCase):
 
     def test_unknown_mandatory_pair_of_the_device_fails(self):
         self.assertEqual(self.shell("foo=bar"), ("FAIL", []))
+
+
+class DocAclExample(DaemonTestCase):
+    """The "acl" example of tac_plus-ng/doc/manual.xml."""
+
+    CONFIG = "\tnet SomeNetName { address = 127.0.7.0/24 }\n" + sample.manual_screen("tac_plus-ng", "acl myacl123") + """
+	profile shell { script { if (service == shell) { if (acl == myacl123) permit deny } } }
+	ruleset { rule { script { profile = shell permit } } }
+""" + USER
+
+    def test_client_in_the_net_is_denied(self):
+        self.assertEqual(self.connect().author("alice", ["service=shell", "cmd="], rem_addr="127.0.7.1").status_name, "FAIL")
+
+    def test_other_client_is_permitted(self):
+        self.assertTrue(self.connect().author("alice", ["service=shell", "cmd="], rem_addr="127.0.8.1").ok)
 
 
 class ScriptFlow(DaemonTestCase):

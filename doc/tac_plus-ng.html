@@ -14,7 +14,7 @@
 <div class="TITLEPAGE">
 <h1 class="title"><a name="AEN2" id="AEN2">TACACS+ NG</a></h1>
 <h3 class="author"><a name="AEN4" id="AEN4">Marc Huber</a></h3>
-<span class="releaseinfo">$Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $<br></span>
+<span class="releaseinfo">$Id: 485e463d1802bb64e3db163fa5f711bdf5372a59 $<br></span>
 <hr></div>
 <div class="TOC">
 <dl>
@@ -2462,7 +2462,8 @@ profile A {
 <p><tt class="literal">acl</tt> <span class="emphasis"><i class="emphasis">aclName</i></span><tt class="literal">{</tt> tac_action ... <tt class="literal">}</tt></p>
 <p>Example:</p>
 <pre class="screen">    acl myacl123 {
-        if (nas == 1.2.3.4 || nac = SomeHostName || nac-dns =~ /\\.example\\.com$/) deny
+        if (nas == 1.2.3.4 || nac == SomeNetName || nac-name =~ /\\.example\\.com$/) deny
+        permit
     }</pre></li>
 <li>
 <p><tt class="literal">script</tt> ( <tt class="literal">=</tt> <span class="emphasis"><i class="emphasis">aclName</i></span> | <tt class="literal">{</tt> <span class="emphasis"><i class="emphasis">tacAction</i></span> <tt class="literal">}</tt> )</p>

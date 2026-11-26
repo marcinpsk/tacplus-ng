@@ -3047,7 +3047,8 @@ profile A {
               tac_action ... <literal>}</literal></para>
           <para>Example:</para>
           <screen xml:space="preserve">    acl myacl123 {
-        if (nas == 1.2.3.4 || nac = SomeHostName || nac-dns =~ /\\.example\\.com$/) deny
+        if (nas == 1.2.3.4 || nac == SomeNetName || nac-name =~ /\\.example\\.com$/) deny
+        permit
     }</screen>
         </listitem>
         <listitem>

@@ -8,7 +8,7 @@ import os
 import time
 import unittest
 
-from tactest import DaemonTestCase, Stub, config, prefix
+from tactest import DaemonTestCase, Stub, config, prefix, sample
 from tactest.daemon import parse_only
 from tactest.tacacs import AUTHEN_TYPE_ASCII, Packet
 
@@ -44,7 +44,7 @@ class Smoke(TacPlusTestCase):
 
 def users(conditions):
     """One user per condition; its shell authorization passes only if the condition holds."""
-    return "".join("\tuser = %s { service = shell { script = { if (%s) permit deny } } }\n" % (name, cond)
+    return "".join(f"\tuser = {name} {{ service = shell {{ script = {{ if ({cond}) permit deny }} }} }}\n"
                    for name, cond in conditions)
 
 
@@ -238,6 +238,66 @@ class SingleConnectionMayClose(TacPlusTestCase):
         self.assertTrue(idle.closed(timeout=5), "the idle single connection stays open")
         self.assertFalse(keep.closed(timeout=1), "the connection of the may-close = no host closes")
         self.assertEqual(keep.pap("alice", "alicepw").status_name, "PASS")
+
+
+PORT_CONDITIONS = [
+    ("script-eq", "port == tty1"),
+    ("script-ne", "port != tty1"),
+    ("script-re", "port =~ tty1"),
+    ("script-nre", "port !~ tty1"),
+    # the ACLs below use the ACL syntax, not a script
+    ("acl-re", "acl == acl-re"),
+    ("acl-nre", "acl == acl-nre"),
+    ("acl-regex", "acl == acl-regex"),
+    ("acl-regex-not", "acl == acl-regex-not"),
+    ("acl-realm-eq", "acl == acl-realm-eq"),
+    ("acl-realm-regex", "acl == acl-realm-regex"),
+    ("acl-realm-re", "acl == acl-realm-re"),
+    ("acl-realm-nre", "acl == acl-realm-nre"),
+]
+
+
+class PortAndRealmOperators(TacPlusTestCase):
+    """The port and realm operators of the TacCond and ACLExpr grammars (doc/tac_plus.html).
+
+    The request uses the default realm.
+    """
+
+    CONFIG = """
+	acl = acl-re { port =~ tty1 }
+	acl = acl-nre { port !~ tty1 }
+	acl = acl-regex { port regex = tty1 }
+	acl = acl-regex-not { port regex = not tty1 }
+	acl = acl-realm-eq { realm = default }
+	acl = acl-realm-regex { realm regex = def }
+	acl = acl-realm-re { realm =~ def }
+	acl = acl-realm-nre { realm !~ def }
+""" + users(PORT_CONDITIONS)
+
+    def holds(self, port):
+        c = self.connect()
+        return [name for name, _ in PORT_CONDITIONS if c.author(name, ["service=shell", "cmd="], port=port).ok]
+
+    def test_port_tty1(self):
+        self.assertEqual(self.holds("tty1"), ["script-eq", "script-re", "acl-re", "acl-regex",
+                                              "acl-realm-eq", "acl-realm-regex", "acl-realm-re"])
+
+    def test_port_tty2(self):
+        self.assertEqual(self.holds("tty2"), ["script-ne", "script-nre", "acl-nre", "acl-regex-not",
+                                              "acl-realm-eq", "acl-realm-regex", "acl-realm-re"])
+
+
+class DocScriptExample(TacPlusTestCase):
+    """The "acl script" example of tac_plus/doc/manual.xml."""
+
+    CONFIG = "\thost = SomeHostName { address = 127.0.7.0/24 }\n" + sample.manual_screen("tac_plus", "acl script = myacl123") \
+        + users([("joe", "acl == myacl123")])
+
+    def test_client_in_the_host_is_denied(self):
+        self.assertEqual(self.connect().author("joe", ["service=shell", "cmd="], rem_addr="127.0.7.1").status_name, "FAIL")
+
+    def test_other_client_is_permitted(self):
+        self.assertTrue(self.connect().author("joe", ["service=shell", "cmd="], rem_addr="127.0.8.1").ok)
 
 
 if __name__ == "__main__":
