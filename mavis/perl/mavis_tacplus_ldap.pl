@@ -99,6 +99,8 @@ LDAP_SKIP_STARTTLS
 	   clear text, and a warning goes to stderr.
 	ldaps:// URLs do not use StartTLS. USE_TLS is no longer needed,
 	because StartTLS is the default.
+	ldapi:// URLs (a local Unix socket) use no TLS and give no
+	warning, also with LDAP_SKIP_STARTTLS=0.
 	Default: 0
 
 FLAG_CHPW

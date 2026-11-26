@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: ca3a4bb320bdb4be685c29730f05ef3463a793dc $
+   $Id: ad79f5d61e443f17161df92c8046a3a915ab8100 $
      __________________________________________________________
 
    Table of Contents
@@ -3082,6 +3082,11 @@ int async 1
    clear text, and the back-end logs the connection to the LDAP
    server has no TLS: the binds send the passwords in clear text.
    ldaps:// URLs still use TLS and give no warning.
+
+   ldapi:// URLs (a local Unix socket, e.g.
+   ldapi://%2Fvar%2Frun%2Fldapi) do not use TLS, with both values.
+   The back-end does not start TLS on them, and it gives no
+   warning: the binds do not go through the network.
 
    This changes the behavior: older versions used StartTLS only
    with USE_STARTTLS. USE_STARTTLS is no longer needed, because

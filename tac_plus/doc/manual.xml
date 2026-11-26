@@ -3965,6 +3965,7 @@ aaa authorization commands 15 cmdlist</screen>
               <entry>
                 <para><literal>0</literal>: on <literal>ldap://</literal> URLs, the back-end starts TLS (StartTLS) before any bind. A server without StartTLS or a failed StartTLS is a backend error. <literal>ldaps://</literal> URLs do not use StartTLS.</para>
                 <para><literal>1</literal>: no StartTLS on <literal>ldap://</literal> URLs. The binds send the passwords in clear text, and the back-end logs <literal>the connection to the LDAP server has no TLS: the binds send the passwords in clear text</literal>. <literal>ldaps://</literal> URLs still use TLS and give no warning.</para>
+                <para><literal>ldapi://</literal> URLs (a local Unix socket, e.g. <literal>ldapi://%2Fvar%2Frun%2Fldapi</literal>) do not use TLS, with both values. The back-end does not start TLS on them, and it gives no warning: the binds do not go through the network.</para>
                 <para>This changes the behavior: older versions used StartTLS only with <literal>USE_TLS</literal>. <literal>USE_TLS</literal> is no longer needed, because StartTLS is the default. For <literal>ldap://</literal> URLs to a server without StartTLS, set <literal>LDAP_SKIP_STARTTLS = 1</literal> or use <literal>ldaps://</literal>.</para>
                 <para>Default: <literal>0</literal></para>
               </entry>
