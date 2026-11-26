@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 20391bcdc169ae77da560a76ae50d3540d2685e6 $
+   $Id: c0e7068ae4102ba7596dfad3329469db739b68de $
      __________________________________________________________
 
    Table of Contents
@@ -3237,6 +3237,11 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    code 532 or 773 (password expired, password must change), the
    AD password change runs on the LDAP_USER connection. The
    back-end does not follow referrals.
+
+   LDAP_CONNECT_TIMEOUT is the timeout in seconds for the connect
+   and for each answer of the server. The default is 5. A value
+   that is not a positive integer stops the back-end with a
+   message on stderr.
      __________________________________________________________
 
 5.2. PAM back-end
