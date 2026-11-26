@@ -4933,7 +4933,7 @@ int async 1
       </section>
       <section>
         <title>Python LDAP Backend</title>
-        <para><literal>mavis_tacplus_ldap.py</literal> is an LDAP back-end for the <emphasis>external</emphasis> module. It uses the Python <literal>ldap3</literal> library. This variable controls TLS:</para>
+        <para><literal>mavis_tacplus_ldap.py</literal> is an LDAP back-end for the <emphasis>external</emphasis> module. It uses the Python <literal>ldap3</literal> library. These variables control TLS:</para>
         <informaltable frame="all">
           <tgroup cols="2">
             <colspec colname="col1" colnum="1" colwidth="30*"/>
@@ -4958,9 +4958,22 @@ int async 1
                   <para>Example: <literal>"ca_certs_file='/etc/ssl/ldap-ca.pem'"</literal></para>
                 </entry>
               </row>
+              <row>
+                <entry>
+                  <literal>LDAP_SKIP_STARTTLS</literal>
+                </entry>
+                <entry>
+                  <para><literal>0</literal>: StartTLS is mandatory on <literal>ldap://</literal> URLs and on <literal>LDAP_HOSTS</literal> entries without a URL scheme (a host name or an IP address).</para>
+                  <para><literal>1</literal>: no StartTLS. The binds send the passwords in clear text.</para>
+                  <para>Any other value stops the back-end with a message on stderr.</para>
+                  <para>Default: <literal>0</literal></para>
+                </entry>
+              </row>
             </tbody>
           </tgroup>
         </informaltable>
+        <para>On each new connection to an <literal>ldap://</literal> URL or to an entry without a URL scheme, the back-end first starts TLS. Then it binds as <literal>LDAP_USER</literal>. The back-end does not read the root DSE to decide about StartTLS. If the server does not support StartTLS, or StartTLS fails, the back-end closes the connection and the request gets a back-end error. A connection without TLS writes a warning to stderr. <literal>ldaps://</literal> URLs do not use StartTLS. <literal>TLS_OPTIONS</literal> also applies to StartTLS.</para>
+        <para><literal>USE_STARTTLS</literal> is not necessary, because StartTLS is the default. The back-end ignores it. Older versions started TLS only if the root DSE offered StartTLS. A site that uses an <literal>ldap://</literal> URL or an entry without a URL scheme (e.g. <literal>"ldap01 ldap02"</literal>) with a server without StartTLS must set <literal>LDAP_SKIP_STARTTLS=1</literal> or use an <literal>ldaps://</literal> URL.</para>
       </section>
     </section>
     <section>

@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: bf31cb348d51447002f4027a24a672a923a7af74 $
+   $Id: 8f0e9e5d52dee1e128afe1147fda9bf7cb46a2e5 $
      __________________________________________________________
 
    Table of Contents
@@ -3160,10 +3160,10 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
 5.1.2. Python LDAP Backend
 
    mavis_tacplus_ldap.py is an LDAP back-end for the external
-   module. It uses the Python ldap3 library. This variable
-   controls TLS:
+   module. It uses the Python ldap3 library. These variables
+   control TLS:
 
-     Variable  Description
+        Variable      Description
    TLS_OPTIONS
 
    Keyword arguments of ldap3.Tls for LDAPS and StartTLS, in
@@ -3202,6 +3202,32 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    Default: unset
 
    Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
+   LDAP_SKIP_STARTTLS
+
+   0: StartTLS is mandatory on ldap:// URLs and on LDAP_HOSTS
+   entries without a URL scheme (a host name or an IP address).
+
+   1: no StartTLS. The binds send the passwords in clear text.
+
+   Any other value stops the back-end with a message on stderr.
+
+   Default: 0
+
+   On each new connection to an ldap:// URL or to an entry without
+   a URL scheme, the back-end first starts TLS. Then it binds as
+   LDAP_USER. The back-end does not read the root DSE to decide
+   about StartTLS. If the server does not support StartTLS, or
+   StartTLS fails, the back-end closes the connection and the
+   request gets a back-end error. A connection without TLS writes
+   a warning to stderr. ldaps:// URLs do not use StartTLS.
+   TLS_OPTIONS also applies to StartTLS.
+
+   USE_STARTTLS is not necessary, because StartTLS is the default.
+   The back-end ignores it. Older versions started TLS only if the
+   root DSE offered StartTLS. A site that uses an ldap:// URL or
+   an entry without a URL scheme (e.g. "ldap01 ldap02") with a
+   server without StartTLS must set LDAP_SKIP_STARTTLS=1 or use an
+   ldaps:// URL.
      __________________________________________________________
 
 5.2. PAM back-end
