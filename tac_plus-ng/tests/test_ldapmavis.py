@@ -8,6 +8,8 @@ search. alice is a member of netadmins, and netadmins is a member of
 staff; dave is a direct member of staff; bob is in no group. erin and
 frank have the tacacs schema of mavis/perl; the password of frank expired.
 The password of grace does not expire (shadowExpire -1), that of heidi expired.
+mike, olga and ivan have directory values with the characters of the
+list format of TACMEMBER and SSHKEY.
 """
 
 import base64
@@ -33,7 +35,7 @@ import unittest
 import unittest.mock
 
 from tactest import LINUX, DaemonTestCase, Stub, prefix, tls
-from tactest.daemon import free_port, sanitizer_env
+from tactest.daemon import features, free_port, sanitizer_env
 
 SLAPD = shutil.which("slapd") or "/usr/sbin/slapd"
 SCHEMA_DIRS = ("/etc/ldap/schema", "/etc/openldap/schema")
@@ -56,9 +58,15 @@ BASE = "dc=example,dc=com"
 READER = "cn=reader," + BASE
 STAFF = "cn=staff,ou=groups," + BASE
 WIDE = 2000                 # groups of one user, above the 1024 of the old fixed array
-# memberOf as a plain attribute, the way Active Directory has it; no overlay needed
-MEMBEROF_SCHEMA = "attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' SUP distinguishedName )\n"
 ALICE, BOB, DAVE = (f"uid={uid},ou=people,{BASE}" for uid in ("alice", "bob", "dave"))
+COMMA_GROUP = 'cn=a\\,b,ou=groups,' + BASE
+BLOCKED_GROUP = 'cn=c\\,d,ou=groups,' + BASE
+# memberOf as in Active Directory (OpenLDAP has it only with the memberof overlay), sshPublicKey as in openssh-lpk
+EXTRA_SCHEMA = """\
+attributetype ( 1.2.840.113556.1.2.102 NAME 'memberOf' SUP distinguishedName )
+attributetype ( 1.3.6.1.4.1.24552.500.1.1.1.13 NAME 'sshPublicKey' EQUALITY octetStringMatch
+	SYNTAX 1.3.6.1.4.1.1466.115.121.1.40 )
+"""
 # slapd -d 256 logs 'conn=1000 fd=12 TLS established ...' and 'conn=1000 op=1 BIND dn="..." method=128' (simple)
 CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds send the passwords in clear text"
 # runs the back-end argv[1]; on SIGUSR1 it writes the number of its ldap3.Connection objects to argv[2]
@@ -100,7 +108,7 @@ include $cosine
 include $inetorgperson
 include $nis
 include $tacacs
-include $memberof
+include $extra
 $modules
 sizelimit unlimited
 $tls
@@ -115,6 +123,20 @@ database mdb
 suffix "$base"
 directory $db
 """)
+
+
+
+def ssh_ed25519_key(comment):
+    """An OpenSSH public key line ("ssh-ed25519 <base64> comment"), the key itself made up."""
+    def string(b):
+        return struct.pack("!I", len(b)) + b
+    blob = string(b"ssh-ed25519") + string(bytes(range(32)))
+    return "ssh-ed25519 %s %s" % (base64.b64encode(blob).decode(), comment)
+
+
+# values that contain the quote, the separator or a line break of the list format
+OLGA_KEY = ssh_ed25519_key('olga "laptop", 2026')
+IVAN_KEY = ssh_ed25519_key("ivan") + "\nmore"
 
 LDIF = string.Template("""\
 dn: $base
@@ -211,7 +233,76 @@ cn: Heidi
 sn: Heidi
 userPassword: heidipw
 shadowExpire: 1
-""").substitute(base=BASE, reader=READER, staff=STAFF)
+
+dn: uid=mike,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: mike
+cn: Mike
+sn: Mike
+uidNumber: 5001
+gidNumber: 5000
+homeDirectory: /home/mike
+userPassword: mikepw
+
+dn: cn=users,ou=groups,$base
+objectClass: posixGroup
+cn: users
+gidNumber: 5000
+
+dn: cn=x\\"\\,\\"admins,ou=groups,$base
+objectClass: posixGroup
+cn: x","admins
+gidNumber: 5001
+memberUid: mike
+
+dn: uid=olga,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: olga
+cn: Olga
+sn: Olga
+userPassword: olgapw
+sshPublicKey: $olga_key
+
+dn: $comma_group
+objectClass: organizationalRole
+cn: a,b
+
+dn: uid=kim,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: kim
+cn: Kim
+sn: Kim
+userPassword: kimpw
+memberOf: $comma_group
+
+dn: $blocked_group
+objectClass: organizationalRole
+cn: c,d
+
+dn: uid=lee,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: lee
+cn: Lee
+sn: Lee
+userPassword: leepw
+memberOf: $staff
+memberOf: $blocked_group
+
+dn: uid=ivan,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: extensibleObject
+uid: ivan
+cn: Ivan
+sn: Ivan
+userPassword: ivanpw
+sshPublicKey:: $ivan_key
+""").substitute(base=BASE, reader=READER, staff=STAFF, comma_group=COMMA_GROUP, blocked_group=BLOCKED_GROUP,
+               olga_key=OLGA_KEY,
+               ivan_key=base64.b64encode(IVAN_KEY.encode()).decode())
 
 
 def slapd_arg(value):
@@ -371,12 +462,12 @@ class Slapd:
         paths = {n: os.path.join(schema, n + ".schema") for n in ("core", "cosine", "inetorgperson", "nis")}
         paths.update(tacacs=TACACS_SCHEMA)
         paths.update(pidfile=os.path.join(directory, "slapd.pid"), argsfile=os.path.join(directory, "slapd.args"),
-                     db=os.path.join(directory, "db"), memberof=os.path.join(directory, "memberof.schema"))
+                     db=os.path.join(directory, "db"), extra=os.path.join(directory, "extra.schema"))
+        with open(paths["extra"], "w") as f:
+            f.write(EXTRA_SCHEMA)
         with open(self.conf, "w") as f:
             f.write(SLAPD_CONF.substitute({k: slapd_arg(v) for k, v in paths.items()}, modules=modules(), tls=tls,
                                           root_dse=root_dse, access=access, base=BASE))
-        with open(paths["memberof"], "w") as f:
-            f.write(MEMBEROF_SCHEMA)
         os.mkdir(os.path.join(directory, "db"))
         ldif = os.path.join(directory, "data.ldif")
         with open(ldif, "w") as f:
@@ -629,7 +720,11 @@ $module
 	}
 	group netadmins { }
 	group staff { }
+	group admins { }
 	ruleset {
+		rule blocked {
+			script { if (memberof == $blocked_group) { deny } }
+		}
 		rule wide {
 			script { if (memberof == "cn=wide-$last,ou=groups,$base") { motd banner = "wide\\n" permit } }
 		}
@@ -655,11 +750,20 @@ $module
 				}
 			}
 		}
+		rule admins {
+			script { if (member == admins) { motd banner = "admins\\n" permit } }
+		}
 		rule nested {
 			script { if (member == netadmins && memberof == "$staff") { motd banner = "netadmins in staff\\n" permit } }
 		}
 		rule netadmins {
 			script { if (member == netadmins) { motd banner = "netadmins only\\n" permit } }
+		}
+		rule comma {
+			script { if (memberof == $comma_group) { motd banner = "comma\\n" permit } }
+		}
+		rule empty {
+			script { if (memberof == "") { motd banner = "empty\\n" permit } }
 		}
 		rule staff {
 			script { if (memberof == "$staff") { motd banner = "staff\\n" permit } }
@@ -718,7 +822,8 @@ class LdapTests:
         self.addCleanup(peer.stop)
         extra = setenv({"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **self.STARTTLS})
         d = self.start_daemon(POLICY.substitute(module=self.module(peer.url, extra), staff=STAFF, base=BASE,
-                                                last=WIDE - 1))
+                                                last=WIDE - 1, comma_group=slapd_arg(COMMA_GROUP),
+                                                blocked_group=slapd_arg(BLOCKED_GROUP)))
         for _ in range(2):
             self.assertEqual(self.login(d), "FAIL")
             with d.connect() as c:
@@ -769,7 +874,8 @@ class LdapTests:
         env = {"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **env}
         extra = setenv(env)
         body = settings + POLICY.substitute(module=self.module(slapd.url, extra), staff=STAFF, base=BASE,
-                                            last=WIDE - 1) + policy
+                                            last=WIDE - 1, comma_group=slapd_arg(COMMA_GROUP),
+                                            blocked_group=slapd_arg(BLOCKED_GROUP)) + policy
         return slapd, self.start_daemon(body, check=check)
 
     def test_pap(self):
@@ -856,11 +962,11 @@ class LdapTests:
 
     def test_group_cycle(self):
         """cyc-a and cyc-b are members of each other: the walk ends, and both groups count."""
-        ldif = person("ivan") + string.Template("""
+        ldif = person("cade") + string.Template("""
 dn: cn=cyc-a,ou=groups,$base
 objectClass: groupOfNames
 cn: cyc-a
-member: uid=ivan,ou=people,$base
+member: uid=cade,ou=people,$base
 member: cn=cyc-b,ou=groups,$base
 
 dn: cn=cyc-b,ou=groups,$base
@@ -870,7 +976,7 @@ member: cn=cyc-a,ou=groups,$base
 """).substitute(base=BASE)
         _, d = self.start(ldif=ldif)
         with d.connect() as c:
-            r = c.ascii_login("ivan", "ivanpw")
+            r = c.ascii_login("cade", "cadepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "cycle\n"), r)
 
     def test_filter_characters_in_a_group_dn(self):
@@ -1233,7 +1339,9 @@ class LdapMt(LdapTests, DaemonTestCase):
                 module = MODULE.substitute(module="external-mt", url=slapd.url, base=base, uid="%s",
                                            extra=setenv({"LDAP_USER": reader, "LDAP_PASSWD": "readerpw"}),
                                            exec=f'"{LDAPMAVIS}" "ldapmavis-mt"')
-                d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF, base=BASE, last=WIDE - 1),
+                d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF, base=BASE, last=WIDE - 1,
+                                                        comma_group=slapd_arg(COMMA_GROUP),
+                                                        blocked_group=slapd_arg(BLOCKED_GROUP)),
                                       name=self.id().split(".")[-1] + "-" + name)
                 self.assert_connections_closed(slapd, d)
 
@@ -1319,7 +1427,9 @@ class LdapPerl(LdapTests, DaemonTestCase):
         extra = setenv({"LDAP_USER": READER, "LDAP_PASSWD": "readerpw", **self.TRUST(ca.cert)})
         d = self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra + "\t\tchilds min = 1\n"
                                                                    "\t\tchilds max = 1\n"),
-                                                staff=STAFF, base=BASE, last=WIDE - 1))
+                                                staff=STAFF, base=BASE, last=WIDE - 1,
+                                                comma_group=slapd_arg(COMMA_GROUP),
+                                                blocked_group=slapd_arg(BLOCKED_GROUP)))
         self.assertEqual(self.login(d), "PASS")
         wait_for_idle_close(slapd)
         self.assertEqual(self.login(d), "PASS")
@@ -1673,14 +1783,15 @@ class LdapPythonServerName(DaemonTestCase):
     """mavis_tacplus_ldap.py, through its standard input and output: the certificate check for an IP address URL."""
 
     CONFIG = None
-    ENTRY = ("\ndn: uid=ivan,ou=people,$base\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\nuid: ivan\n"
-             "cn: Ivan\nsn: Ivan\nuidNumber: 1005\ngidNumber: 1005\nhomeDirectory: /home/ivan\nuserPassword: ivanpw\n")
+    ENTRY = ("\ndn: uid=quinn,ou=people,$base\nobjectClass: inetOrgPerson\nobjectClass: posixAccount\n"
+             "uid: quinn\ncn: Quinn\nsn: Quinn\nuidNumber: 1005\ngidNumber: 1005\nhomeDirectory: /home/quinn\n"
+             "userPassword: quinnpw\n")
 
     def result(self, url, tls_options):
-        """The AV_A_RESULT of a login of ivan, and the stderr of the back-end."""
+        """The AV_A_RESULT of a login of quinn, and the stderr of the back-end."""
         env = {k: v for k, v in os.environ.items() if not k.startswith(("LDAP_", "TLS_", "FLAG_"))}
         env.update(LDAP_HOSTS=url, LDAP_BASE=BASE, LDAP_USER=READER, LDAP_PASSWD="readerpw", TLS_OPTIONS=tls_options)
-        p = subprocess.run([PYTHON, LDAP_PYTHON], input=b"0 TACPLUS\n4 ivan\n8 ivanpw\n49 AUTH\n=\n",
+        p = subprocess.run([PYTHON, LDAP_PYTHON], input=b"0 TACPLUS\n4 quinn\n8 quinnpw\n49 AUTH\n=\n",
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60, check=False)
         return dict(re.findall(r"(?m)^(\d+) (.*)$", p.stdout.decode())).get("6"), p.stderr.decode()
 
@@ -1792,6 +1903,64 @@ class LdapPython(LdapTests, DaemonTestCase):
                 return content
             time.sleep(0.1)
 
+    def test_list_values(self):
+        """A quote, a comma or a line break in a directory value stays in that one value of TACMEMBER or SSHKEY.
+
+        mike is in the posixGroup x","admins, olga has a quote in the
+        comment of her SSH key, ivan has a line break in his. None of them
+        is a member of admins, and all can log in. The back-end logs the
+        value it cannot send.
+        """
+        log = self.capture_stderr("list")
+        _, d = self.start()
+        # without OpenSSL the daemon has no ssh-key, so the SSH keys fail the profile
+        for user in ("mike", "olga", "ivan") if "openssl" in features() else ("mike",):
+            with self.subTest(user=user), d.connect() as c:
+                r = c.ascii_login(user, user + "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+        if "openssl" in features():
+            message = "user ivan: SSHKEY value skipped: the list cannot carry it"
+            self.assertIn(message, self.stderr(log, message))
+
+    def test_memberof_with_an_escaped_comma(self):
+        """A group DN with an escaped comma is one MEMBEROF value, as the server sent it.
+
+        The default LDAP_MEMBEROF_REGEX gives the TACMEMBER value a\\ (up
+        to the escaped comma); the list cannot carry a value that ends with
+        a backslash, so the back-end skips it with a message. The other
+        regex gives a.
+        """
+        message = "user kim: TACMEMBER value skipped: the list cannot carry it"
+        for i, regex in enumerate((None, "^cn=([a-z]+)")):
+            with self.subTest(regex=regex):
+                log = self.capture_stderr(f"comma-{i}")
+                _, d = self.start(**({"LDAP_MEMBEROF_REGEX": regex} if regex else {}))
+                with d.connect() as c:
+                    r = c.ascii_login("kim", "kimpw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", "comma\n"), r)
+                if regex is None:
+                    self.assertIn(message, self.stderr(log, message))
+                else:
+                    self.assertNotIn(message, self.stderr(log))
+
+    def test_no_memberof_without_groups(self):
+        """A memberOf that LDAP_MEMBEROF_FILTER takes away completely gives no MEMBEROF, not one empty value."""
+        _, d = self.start(LDAP_MEMBEROF_FILTER="^cn=nothing,")
+        with d.connect() as c:
+            r = c.ascii_login("kim", "kimpw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", ""), r)
+
+    def test_memberof_deny_rule_with_an_escaped_comma(self):
+        """A memberof deny rule matches a group DN with an escaped comma; lee is also in staff."""
+        for regex in (None, "^cn=([a-z]+)"):
+            with self.subTest(regex=regex):
+                _, d = self.start(**({"LDAP_MEMBEROF_REGEX": regex} if regex else {}))
+                with d.connect() as c:
+                    r = c.ascii_login("lee", "leepw")
+                self.assertEqual(r.status_name, "FAIL", r)
+                # the rule denies it, not a profile parse error
+                d.wait_log("authentication", "\tlee\ttty0\t127.0.0.1\tshell login denied by ACL")
+
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_starttls_default(self):
         """ldap://: StartTLS before all binds, also if the root DSE does not offer it; a failure is a backend error."""
@@ -1852,7 +2021,8 @@ class LdapPython(LdapTests, DaemonTestCase):
                 # with LDAP_USER: a bind as LDAP_USER before StartTLS would show in peer.ops
                 extra = setenv({"LDAP_USER": READER, "LDAP_PASSWD": "readerpw"})
                 d = self.start_daemon(POLICY.substitute(module=self.module(url, extra), staff=STAFF, base=BASE,
-                                                        last=WIDE - 1))
+                                                        last=WIDE - 1, comma_group=slapd_arg(COMMA_GROUP),
+                                                        blocked_group=slapd_arg(BLOCKED_GROUP)))
                 for _ in range(2):
                     self.assert_login(d, "FAIL")
                 self.assertGreaterEqual(peer.hellos, 2)

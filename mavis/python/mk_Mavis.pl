@@ -30,6 +30,18 @@ print <<EOT;
 
 import sys, os, re
 
+# The list format of TACMEMBER, MEMBEROF and SSHKEY*, as av_add_quoted() of libmavis writes it: each value in
+# double quotes with a backslash before each double quote, joined by commas. A value with a CR, LF or NUL, or
+# that ends with a backslash, cannot go in the list: it is skipped, with a message on stderr. None: no value.
+def quote_list(user, attribute, values):
+	quoted = []
+	for v in values:
+		if re.search('[\\r\\n\\0]', v) or v.endswith('\\\\'):
+			print("user {}: {} value skipped: the list cannot carry it".format(user, attribute), file=sys.stderr)
+			continue
+		quoted.append('"' + v.replace('"', '\\\\"') + '"')
+	return ",".join(quoted) if quoted else None
+
 class Mavis:
 	def write(self, verdict, result, user_response):
 		self.av_pairs[AV_A_RESULT] = result
