@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 import unittest.mock
+import urllib.parse
 
 from tactest import LINUX, DaemonTestCase, Stub, ipv6_available, prefix, tls
 from tactest.daemon import free_port, sanitizer_env
@@ -57,6 +58,8 @@ CLEAR_TEXT_WARNING = "the connection to the LDAP server has no TLS: the binds se
 TLS_OR_BIND = re.compile(r'conn=(\d+) (?:fd=\d+ (TLS) established|op=\d+ BIND dn="([^"]*)" method=128)')
 # an acl for Slapd: the root DSE without supportedExtension, so the server does not offer password modify (RFC 3062)
 NO_PASSWORD_MODIFY = 'access to dn.base="" attrs=supportedExtension by * none\n'
+# slapd -d 256 logs 'conn=1000 op=0 EXT oid=1.3.6.1.4.1.1466.20037' for a StartTLS request
+START_TLS_OID = "1.3.6.1.4.1.1466.20037"
 
 SLAPD_CONF = string.Template("""\
 include $core
@@ -290,12 +293,15 @@ def libldap_tls_package():
 class Slapd:
     """slapd on 127.0.0.1, configuration and database in directory/"slapd data" (the blank tests the quoting)."""
 
-    def __init__(self, directory, entries="", tls="", starttls=False, root_dse="by * read", acl="", addr="127.0.0.1"):
+    def __init__(self, directory, entries="", tls="", starttls=False, root_dse="by * read", acl="", addr="127.0.0.1",
+                 ldapi=False):
         """entries: more LDIF entries; tls: TLS lines for slapd.conf, with them slapd listens on ldaps:// only,
         or on ldap:// for StartTLS; root_dse: the "by" clauses of the root DSE; acl: access lines before all others;
-        addr: the address slapd listens on."""
+        addr: the address slapd listens on; ldapi: slapd also listens on a Unix socket (ldapi_url)."""
         self.scheme = "ldaps" if tls and not starttls else "ldap"
         self.addr = addr
+        # a short directory: the path of a Unix socket has a limit of about 100 bytes
+        self.ldapi_dir = tempfile.mkdtemp(prefix="ldapi-") if ldapi else None
         directory = os.path.join(directory, "slapd data")
         os.mkdir(directory)
         self.dir = directory
@@ -329,11 +335,16 @@ class Slapd:
         host = f"[{self.addr}]" if ":" in self.addr else self.addr
         return f"{self.scheme}://{host}:{self.port}"
 
+    @property
+    def ldapi_url(self):
+        return "ldapi://" + urllib.parse.quote(os.path.join(self.ldapi_dir, "s"), safe="")
+
     def start(self):
         self.port = free_port(self.addr)
         with open(self.log, "ab") as log:
             # -d keeps slapd in the foreground; 256 logs the connections and operations
-            self.proc = subprocess.Popen([SLAPD, "-d", "256", "-h", self.url + "/", "-f", self.conf],
+            urls = self.url + "/" + (" " + self.ldapi_url if self.ldapi_dir else "")
+            self.proc = subprocess.Popen([SLAPD, "-d", "256", "-h", urls, "-f", self.conf],
                                          stdout=log, stderr=log, stdin=subprocess.DEVNULL)
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
@@ -372,6 +383,8 @@ class Slapd:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        if self.ldapi_dir:
+            shutil.rmtree(self.ldapi_dir, ignore_errors=True)
 
 
 def ber(tag, *parts):
@@ -623,6 +636,17 @@ class LdapHarness:
         return (f"TLSCACertificateFile {slapd_arg(ca.cert)}\nTLSCertificateFile {slapd_arg(cert)}\n"
                 f"TLSCertificateKeyFile {slapd_arg(key)}\n{more}")
 
+    def ldapi_slapd(self):
+        """slapd without TLS on ldap:// and ldapi://; it refuses simple binds without TLS, except on ldapi://."""
+        return self.slapd(tls="security simple_bind=1\n", starttls=True, ldapi=True)
+
+    def assert_ldapi_binds(self, slapd, stderr):
+        """The binds had no TLS and no StartTLS was tried; stderr of the back-end has no clear text warning."""
+        self.assertIn((READER, False), slapd.binds())
+        with open(slapd.log, errors="replace") as f:
+            self.assertNotIn(START_TLS_OID, f.read())
+        self.assertNotIn(CLEAR_TEXT_WARNING, stderr)
+
     def certificate_cases(self, starttls):
         """(case, slapd, TLS_OPTIONS, passes, log) for the check of the server certificate by a Perl back-end.
 
@@ -655,11 +679,11 @@ class LdapHarness:
             cases.append(("IPv6", self.slapd(tls=self.ldaps(ca), starttls=starttls, addr="::1"), cafile, True, None))
         return cases
 
-    def slapd(self, ldif="", tls="", starttls=False, root_dse="by * read", acl="", addr="127.0.0.1"):
-        """A running slapd; ldif: more entries, tls, starttls, root_dse, acl, addr: see Slapd."""
+    def slapd(self, ldif="", tls="", starttls=False, root_dse="by * read", acl="", addr="127.0.0.1", ldapi=False):
+        """A running slapd; ldif: more entries, tls, starttls, root_dse, acl, addr, ldapi: see Slapd."""
         # a directory of its own for every slapd: a test may start more than one
         slapd = Slapd(tempfile.mkdtemp(prefix="slapd-", dir=os.path.dirname(self.scratch_file("slapd", ""))), ldif,
-                      tls, starttls, root_dse, acl, addr)
+                      tls, starttls, root_dse, acl, addr, ldapi)
         self.addCleanup(slapd.stop)
         slapd.start()
         return slapd
@@ -1301,6 +1325,16 @@ class LdapPerl(LdapTests, DaemonTestCase):
                         if text:
                             self.assertIn(text, f.read())
 
+    def test_ldapi_without_tls(self):
+        """ldapi:// (a Unix socket): no StartTLS, also by default, and no clear text warning."""
+        slapd = self.ldapi_slapd()
+        self.stderr_log = self.scratch_file("ldapi.log", "")
+        d = self.start_daemon(POLICY.substitute(module=self.module(slapd.ldapi_url, ""), staff=STAFF, base=BASE,
+                                                last=WIDE - 1))
+        self.assert_login(d, "PASS")
+        with open(self.stderr_log, errors="replace") as f:
+            self.assert_ldapi_binds(slapd, f.read())
+
     def test_ad_root_dse(self):
         """The root DSE of AD: the server type is microsoft, and its default filter (sAMAccountName) finds alice."""
         peer = AdPeer()
@@ -1479,6 +1513,21 @@ class LdapPerlOldStartTls(LdapPerlOldCase):
         self.assertGreaterEqual(peer.hellos, 2)
         self.assertEqual(peer.after_failure, [])
 
+    def test_ldapi_without_tls(self):
+        """ldapi:// (a Unix socket): no StartTLS, also by default and for a password change, and no clear text
+        warning."""
+        slapd = self.ldapi_slapd()
+        log = self.scratch_file("ldapi.log", "")
+        d = self.start(slapd.ldapi_url, log)
+        self.assert_login(d, "PASS")
+        with d.connect() as c:
+            r = c.ascii_login("carol", "", data=["carolpw", "newpw", "newpw"])
+        self.assertEqual(r.statuses[-1], "PASS", r)
+        with d.connect() as c:
+            self.assertEqual(c.pap("carol", "newpw").status_name, "PASS")
+        with open(log, errors="replace") as f:
+            self.assert_ldapi_binds(slapd, f.read())
+
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_server_certificate_is_checked(self):
         """ldaps:// and StartTLS: by default the back-end checks the CA and the name of the server certificate.
@@ -1610,6 +1659,13 @@ class LdapPerlAuthOnly(LdapHarness, DaemonTestCase):
         self.assertEqual(self.results(peer.url, 2, FLAG_CACHE_CONNECTION="1")[0], ["ERR", "ERR"])
         self.assertGreaterEqual(peer.hellos, 2)
         self.assertEqual(peer.after_failure, [])
+
+    def test_ldapi_without_tls(self):
+        """ldapi:// (a Unix socket): no StartTLS, also by default, and no clear text warning."""
+        slapd = self.ldapi_slapd()
+        results, stderr = self.results(slapd.ldapi_url)
+        self.assertEqual(results, ["ACK"], stderr)
+        self.assert_ldapi_binds(slapd, stderr)
 
     @unittest.skipUnless(tls.openssl_available(), "the certificates need the openssl command")
     def test_server_certificate_is_checked(self):

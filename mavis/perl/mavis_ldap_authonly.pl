@@ -20,6 +20,7 @@
 # LDAP_USER, LDAP_PASSWD, FLAG_CACHE_CONNECTION, LDAP_SKIP_STARTTLS and
 # TLS_OPTIONS, as in mavis_tacplus-ng_ldap.pl. The server certificate is
 # checked unless TLS_OPTIONS sets "verify", e.g. "verify => 'none'".
+# ldapi:// URLs (a local Unix socket) use no TLS and give no warning.
 #
 
 use lib '/usr/local/lib/mavis/';
