@@ -343,9 +343,12 @@ while True:
 			continue
 		try:
 			conn.refresh_server_info()
+			info = conn.server.info
+			if info is None:
+				# the server can refuse the root DSE to LDAP_USER: the generic type, as in ldapmavis-mt
+				print("no root DSE: the LDAP server type is generic", file=sys.stderr)
 			# Check for MS AD LDAP
-			if '1.2.840.113556.1.4.800' in map(
-				lambda x: x[0], conn.server.info.supported_features):
+			elif '1.2.840.113556.1.4.800' in map(lambda x: x[0], info.supported_features):
 				LDAP_SERVER_TYPE = "microsoft"
 				if LDAP_FILTER == None:
 					LDAP_FILTER = '(&(objectclass=user)(sAMAccountName={}))'
@@ -355,14 +358,14 @@ while True:
 				if LDAP_SKIP_GROUPOFNAMES is None:
 					LDAP_SKIP_GROUPOFNAMES = 1
 
-			if conn.server.info.vendor_name != None:
-				if (LDAP_USER == None or LDAP_PASSWD == None) and '389 Project' in conn.server.info.vendor_name:
+			if info is not None and info.vendor_name != None:
+				if (LDAP_USER == None or LDAP_PASSWD == None) and '389 Project' in info.vendor_name:
 					print('\
 The 389 directory server will not return the memberOf attribute for anonymous binds. \
 Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stderr)
 
 			has_extension_password_modify = None
-			if '1.3.6.1.4.1.4203.1.11.1' in map (lambda x: x[0], conn.server.info.supported_extensions):
+			if info is not None and '1.3.6.1.4.1.4203.1.11.1' in map(lambda x: x[0], info.supported_extensions):
 				has_extension_password_modify = 1
 
 			if LDAP_SERVER_TYPE == None:
@@ -371,7 +374,7 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 					LDAP_FILTER = '(&(objectclass=posixaccount)(uid={}))'
 			try_once = False
 		except Exception as e:
-			# for example no root DSE (conn.server.info is None): the next request opens a new connection
+			# the next request opens a new connection
 			backend_error(D, e)
 			continue
 

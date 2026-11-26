@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 20391bcdc169ae77da560a76ae50d3540d2685e6 $
+   $Id: ec1d83d1f462ce7f5769d72531df54dac4ccdd0d $
      __________________________________________________________
 
    Table of Contents
@@ -3229,6 +3229,13 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    an entry without a URL scheme (e.g. "ldap01 ldap02") with a
    server without StartTLS must set LDAP_SKIP_STARTTLS=1 or use an
    ldaps:// URL.
+
+   After the first bind as LDAP_USER, the back-end reads the root
+   DSE to find the server type (Active Directory or generic) and
+   the password modify extension. If the server does not give the
+   root DSE to LDAP_USER, the server type is generic and the
+   back-end does not change passwords on it. A message goes to
+   stderr.
 
    The back-end keeps two connections to the server. It does the
    searches on one connection, bound as LDAP_USER. It checks the
