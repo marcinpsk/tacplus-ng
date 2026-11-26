@@ -38,6 +38,7 @@ NestedInclude is the exception to "no network": it starts a daemon to
 show that a configuration -P accepts is also the one that runs.
 """
 
+import base64
 import glob
 import os
 import re
@@ -292,6 +293,48 @@ class IntegerValues(unittest.TestCase):
                 code, out = self.parse(value)
                 self.assertGreater(code, 0, out)
                 self.assertIn(text, out)
+
+
+C7 = b"dsfd;kfoA,.iyewrkldJKDHSUBsgvca69834ncxv9873254k;fg87"
+
+
+def type7(text, seed=2):
+    """The Cisco type 7 form of text, as c7decode() in config.c reads it."""
+    return "%02d" % seed + "".join("%02X" % (ord(c) ^ C7[(seed + i) % len(C7)]) for i, c in enumerate(text))
+
+
+class PskMinimumLength(unittest.TestCase):
+    """tls psk key: at least 128 bit (16 bytes), in every form of the key."""
+
+    TOO_SHORT = "PSK is too short, a minimum of 128 bit is required"
+
+    def setUp(self):
+        if "openssl" not in features():
+            self.skipTest("tac_plus-ng built without OpenSSL")
+
+    def parse(self, key):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "psk.cfg")
+            with open(path, "w") as f:
+                f.write("id = spawnd { listen = { port = 4949 tls = yes tls psk = yes } }\n"
+                        "id = tac_plus-ng {\n\ttls psk = yes\n\ttype6-key = demo\n"
+                        "\tdevice psknas {\n\t\ttls psk id = psknas\n\t\ttls psk key = %s\n\t}\n}\n" % key)
+            return check(path)
+
+    def test_accepted(self):
+        for key in ("hex " + "ab" * 16, "clear " + "x" * 16, "7 " + type7("x" * 16),
+                    'base64 "%s"' % base64.b64encode(b"x" * 16).decode()):
+            with self.subTest(key=key):
+                code, out = self.parse(key)
+                self.assertEqual(code, 0, out)
+
+    def test_refused(self):
+        for key in ("hex " + "ab" * 15, "clear " + "x" * 15, "7 " + type7("x" * 15),
+                    'base64 "%s"' % base64.b64encode(b"x" * 15).decode()):
+            with self.subTest(key=key):
+                code, out = self.parse(key)
+                self.assertGreater(code, 0, out)
+                self.assertIn(self.TOO_SHORT, out)
 
 
 class NestedInclude(DaemonTestCase):

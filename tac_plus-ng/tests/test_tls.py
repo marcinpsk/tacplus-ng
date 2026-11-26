@@ -564,7 +564,7 @@ class Psk(TlsTestCase):
         self.assertTrue(self.connect_psk("psk6", b"demoDemoDemoDemo".hex()).pap("alice", "alicepw").ok)
 
     def test_type6_psk_encrypted_text_is_refused(self):
-        self.assertRefused(lambda: self.connect_psk("psk6", b"ZKAb`S]hPDBAbXWZNJQ_BecWeZIMFYAAB".hex()))
+        self.assertRefused(lambda: self.connect_psk("psk6", b"_ifbOASUKMTdIGXHEXTBPDWF[`CeFOBY^GgMVcAbMQAAB".hex()))
 
     def test_wrong_psk_is_refused(self):
         self.assertRefused(lambda: self.connect_psk(key="00" * 16))
