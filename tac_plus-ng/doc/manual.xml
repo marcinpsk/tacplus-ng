@@ -4931,6 +4931,37 @@ int async 1
         </itemizedlist>
         <para><literal>ldapmavis-mt</literal> does not start if both are set. If the server does not let the back-end read the root DSE without a bind, set one of them. When a connection has no TLS before the bind, the back-end logs <literal>the connection to the LDAP server has no TLS: the binds send the passwords in clear text</literal>. <literal>ldaps://</literal> URLs do not use StartTLS.</para>
       </section>
+      <section>
+        <title>Python LDAP Backend</title>
+        <para><literal>mavis_tacplus_ldap.py</literal> is an LDAP back-end for the <emphasis>external</emphasis> module. It uses the Python <literal>ldap3</literal> library. This variable controls TLS:</para>
+        <informaltable frame="all">
+          <tgroup cols="2">
+            <colspec colname="col1" colnum="1" colwidth="30*"/>
+            <colspec colname="col2" colnum="2" colwidth="70*"/>
+            <thead>
+              <row>
+                <entry>Variable</entry>
+                <entry>Description</entry>
+              </row>
+            </thead>
+            <tbody>
+              <row>
+                <entry>
+                  <literal>TLS_OPTIONS</literal>
+                </entry>
+                <entry>
+                  <para>Keyword arguments of <literal>ldap3.Tls</literal> for LDAPS and StartTLS, in Python syntax. The values can use the names of the Python <literal>ssl</literal> module, e.g. <literal>ssl.CERT_NONE</literal>. No other Python names are available. See <ulink url="https://ldap3.readthedocs.io/en/latest/ssltls.html">the ldap3 SSL and TLS documentation</ulink> for the keys.</para>
+                  <para>The back-end checks the server certificate if <literal>TLS_OPTIONS</literal> does not set <literal>validate</literal> (<literal>validate=ssl.CERT_REQUIRED</literal>). The certificate must chain to a CA of the system, and it must match the host name in <literal>LDAP_HOSTS</literal>. <literal>ca_certs_file='/path/to/ca.pem'</literal> uses the CAs in that file instead of the CAs of the system. <literal>validate=ssl.CERT_NONE</literal> turns the check off.</para>
+                  <para>With Python 3.12 or later, ldap3 2.9.1 ignores the IP addresses in the subject alternative names of the certificate (unless the <literal>backports.ssl_match_hostname</literal> module, version 3.5.0.1 or later, is installed). It compares the host name of the URL as text with the DNS names, or with the CN if the certificate has no DNS names. So if <literal>LDAP_HOSTS</literal> names the server by its IP address, the check fails also if the CA is trusted, unless one of these names matches the address as text, also as a wildcard (e.g. <literal>*.0.0.1</literal> matches <literal>127.0.0.1</literal>). Add a DNS name of the certificate with <literal>valid_names</literal>, e.g. <literal>valid_names=['ldap.example.org']</literal>. The back-end then also accepts the certificate for that name. The certificate must still chain to a trusted CA. <literal>valid_names</literal> applies to all servers in <literal>LDAP_HOSTS</literal>: each of them can then show a certificate for one of these names.</para>
+                  <para>An invalid value stops the back-end with a message on stderr, e.g. a syntax error, an unknown key, an invalid <literal>validate</literal> value or a <literal>ca_certs_file</literal> that does not exist. The message does not show the values.</para>
+                  <para>Default: unset</para>
+                  <para>Example: <literal>"ca_certs_file='/etc/ssl/ldap-ca.pem'"</literal></para>
+                </entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </informaltable>
+      </section>
     </section>
     <section>
       <title>PAM back-end</title>

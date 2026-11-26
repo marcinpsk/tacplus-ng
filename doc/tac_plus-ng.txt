@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: bfaf09c4e56fc04993d3cc8f3c3633db4b7175e4 $
+   $Id: bf31cb348d51447002f4027a24a672a923a7af74 $
      __________________________________________________________
 
    Table of Contents
@@ -96,6 +96,7 @@ Marc Huber
         5.1. LDAP Backends
 
               5.1.1. Multi-threaded LDAP Backend
+              5.1.2. Python LDAP Backend
 
         5.2. PAM back-end
         5.3. System Password Backends
@@ -1441,6 +1442,17 @@ master key
 #tls psk key = 7 2703130E0E725C555C # type 7
 #tls psk key = base64 'ZGVtb0RlbW9EZW1vCg==' # base64
 tls psk key = 0123456789abcdef # hex
+     * tls psk key-exchange = ( dhe | auto | no-dhe )
+       The TLS 1.3 PSK key exchange modes (RFC 8446, section
+       4.2.9) the realm accepts. dhe, the default, accepts only
+       psk_dhe_ke: each session also runs an (EC)DHE exchange, so
+       a PSK that leaks later doesn't decrypt recorded sessions.
+       auto also accepts psk_ke, the PSK alone, for clients that
+       offer nothing else. no-dhe accepts both and prefers psk_ke
+       (OpenSSL 3.3 or later).
+       tls psk dhe-supported-groups = string
+       The groups for the (EC)DHE exchange of a PSK session, for
+       example X25519:P-256. Not used with no-dhe.
      * tls sni = SNI
        This adds SNI to the server name list of the current realm.
        A TLS connection requesting SNI will automatically be
@@ -3143,6 +3155,53 @@ setenv LDAP_OPT_X_TLS_CACERTFILE = "/path/to/ca.pem"
    back-end logs the connection to the LDAP server has no TLS: the
    binds send the passwords in clear text. ldaps:// URLs do not
    use StartTLS.
+     __________________________________________________________
+
+5.1.2. Python LDAP Backend
+
+   mavis_tacplus_ldap.py is an LDAP back-end for the external
+   module. It uses the Python ldap3 library. This variable
+   controls TLS:
+
+     Variable  Description
+   TLS_OPTIONS
+
+   Keyword arguments of ldap3.Tls for LDAPS and StartTLS, in
+   Python syntax. The values can use the names of the Python ssl
+   module, e.g. ssl.CERT_NONE. No other Python names are
+   available. See the ldap3 SSL and TLS documentation for the
+   keys.
+
+   The back-end checks the server certificate if TLS_OPTIONS does
+   not set validate (validate=ssl.CERT_REQUIRED). The certificate
+   must chain to a CA of the system, and it must match the host
+   name in LDAP_HOSTS. ca_certs_file='/path/to/ca.pem' uses the
+   CAs in that file instead of the CAs of the system.
+   validate=ssl.CERT_NONE turns the check off.
+
+   With Python 3.12 or later, ldap3 2.9.1 ignores the IP addresses
+   in the subject alternative names of the certificate (unless the
+   backports.ssl_match_hostname module, version 3.5.0.1 or later,
+   is installed). It compares the host name of the URL as text
+   with the DNS names, or with the CN if the certificate has no
+   DNS names. So if LDAP_HOSTS names the server by its IP address,
+   the check fails also if the CA is trusted, unless one of these
+   names matches the address as text, also as a wildcard (e.g.
+   *.0.0.1 matches 127.0.0.1). Add a DNS name of the certificate
+   with valid_names, e.g. valid_names=['ldap.example.org']. The
+   back-end then also accepts the certificate for that name. The
+   certificate must still chain to a trusted CA. valid_names
+   applies to all servers in LDAP_HOSTS: each of them can then
+   show a certificate for one of these names.
+
+   An invalid value stops the back-end with a message on stderr,
+   e.g. a syntax error, an unknown key, an invalid validate value
+   or a ca_certs_file that does not exist. The message does not
+   show the values.
+
+   Default: unset
+
+   Example: "ca_certs_file='/etc/ssl/ldap-ca.pem'"
      __________________________________________________________
 
 5.2. PAM back-end
