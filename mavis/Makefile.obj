@@ -10,7 +10,7 @@ PROG	= mavis
 CFLAGS	+= $(DEFCRYPT)
 
 LIB_MAVIS_LIB += $(LIB_SSL) $(LIB_PCRE) $(LIB_EXECINFO) $(LIB_CURL) $(LIB_DNS) $(LIB_TLS)
-INC += $(INC_PCRE) $(INC_EXECINFO) $(INC_SSL) $(INC_EXECINFO) $(INC_CURL) $(INC_TLS)
+INC += $(INC_PCRE) $(INC_EXECINFO) $(INC_SSL) $(INC_CRYPTO) $(INC_EXECINFO) $(INC_CURL) $(INC_ARES) $(INC_TLS)
 
 VPATH = $(BASE)/mavis:$(BASE)/misc
 CFLAGS += $(DEF) $(INC)
@@ -91,17 +91,17 @@ all:	$(ALL) install_stage
 mavistest$(EXEC_EXT): mavistest.o $(MAVIS_LIB)
 	$(CC) -o $@ $^ $(LIB_MAVIS) $(LIB) $(LIB_NET)
 
-radmavis-mt.o: INC += $(INC_FREERADIUS_CLIENT) $(INC_RADCLI)
+radmavis-mt.o: CFLAGS += $(INC_FREERADIUS_CLIENT) $(INC_RADCLI)
 
 radmavis-mt$(EXEC_EXT): radmavis-mt.o $(MAVIS_LIB)
 	$(CC) -o $@ $^ $(LIB_MAVIS) $(LIB) $(LIB_PTHREAD) $(LIB_FREERADIUS_CLIENT) $(LIB_RADCLI) $(LIB_NET)
 
-ldapavis-mt.o: INC += $(INC_LDAP)
+ldapmavis-mt.o: CFLAGS += $(INC_LDAP)
 
 ldapmavis-mt$(EXEC_EXT): ldapmavis-mt.o $(MAVIS_LIB)
 	$(CC) -o $@ $^ $(LIB_MAVIS) $(LIB) $(LIB_PTHREAD) $(LIB_LDAP) $(LIB_LBER) $(LIB_NET) $(LIB_PCRE)
 
-radmavis.o: INC += $(INC_FREERADIUS_CLIENT) $(INC_RADCLI)
+radmavis.o: CFLAGS += $(INC_FREERADIUS_CLIENT) $(INC_RADCLI)
 
 radmavis$(EXEC_EXT): radmavis.o $(MAVIS_LIB)
 	$(CC) -o $@ $^ $(LIB_MAVIS) $(LIB) $(LIB_FREERADIUS_CLIENT) $(LIB_RADCLI) $(LIB_NET)
@@ -263,7 +263,7 @@ clean:
 
 install: install_lib install_libs install_prg install_perl install_python
 
-$(INSTALLROOT)$(LIBARCHDIR_DEST)/$(MAVIS_LIB).$(LIBVER_MAJOR).$(LIBVER_MINOR): $(MAVIS_LIB)
+$(INSTALLROOT)$(LIBARCHDIR_DEST)/$(MAVIS_LIB).$(LIBVER_MAJOR).$(LIBVER_MINOR): $(MAVIS_LIB) | $(INSTALLROOT)$(LIBARCHDIR_DEST)
 	$(INSTALL) -m 0755 $< $(INSTALLROOT)$(LIBARCHDIR_DEST)/$<.$(LIBVER_MAJOR).$(LIBVER_MINOR) ;\
 	ln -s $<.$(LIBVER_MAJOR).$(LIBVER_MINOR) $(INSTALLROOT)$(LIBARCHDIR_DEST)/$<.$(LIBVER_MAJOR).new ;	\
 	ln -s $<.$(LIBVER_MAJOR) $(INSTALLROOT)$(LIBARCHDIR_DEST)/$<.new ;\
@@ -274,7 +274,7 @@ $(INSTALLROOT)$(LIBARCHDIR_DEST):
 	@mkdir -p -m 0755 $@
 
 ifeq ($(OSTYPE), cygwin_nt)
-$(INSTALLROOT)$(BINDIR_DEST)/$(MAVIS_LIB): $(MAVIS_LIB)
+$(INSTALLROOT)$(BINDIR_DEST)/$(MAVIS_LIB): $(MAVIS_LIB) | $(INSTALLROOT)$(BINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_lib: $(INSTALLROOT)$(BINDIR_DEST) $(INSTALLROOT)$(BINDIR_DEST)/$(MAVIS_LIB)
@@ -289,7 +289,7 @@ $(M):
 
 IL = $(patsubst %,$(M)/libmavis_%.so, $(MAVIS_LIBNAMES))
 
-$(IL): $(M)/%.so: %.so
+$(IL): $(M)/%.so: %.so | $(M)
 	$(INSTALL) -m 0755 $< $@
 
 install_libs: $(M) $(IL)
@@ -300,28 +300,28 @@ $(INSTALLROOT)$(BINDIR_DEST):
 $(INSTALLROOT)$(SBINDIR_DEST):
 	@mkdir -p -m 0755 $@
 
-$(INSTALLROOT)$(BINDIR_DEST)/mavistest$(EXEC_EXT): mavistest$(EXEC_EXT)
+$(INSTALLROOT)$(BINDIR_DEST)/mavistest$(EXEC_EXT): mavistest$(EXEC_EXT) | $(INSTALLROOT)$(BINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_mavistest: $(INSTALLROOT)$(BINDIR_DEST) $(INSTALLROOT)$(BINDIR_DEST)/mavistest$(EXEC_EXT)
 
-$(INSTALLROOT)$(SBINDIR_DEST)/pammavis$(EXEC_EXT): pammavis$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/pammavis$(EXEC_EXT): pammavis$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/pammavis-mt$(EXEC_EXT): pammavis-mt$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/pammavis-mt$(EXEC_EXT): pammavis-mt$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/radmavis-mt$(EXEC_EXT): radmavis-mt$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/radmavis-mt$(EXEC_EXT): radmavis-mt$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/ldapmavis-mt$(EXEC_EXT): ldapmavis-mt$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/ldapmavis-mt$(EXEC_EXT): ldapmavis-mt$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_pammavis: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/pammavis$(EXEC_EXT)
 
 install_pammavis-mt: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/pammavis-mt$(EXEC_EXT)
 
-$(INSTALLROOT)$(SBINDIR_DEST)/radmavis$(EXEC_EXT): radmavis$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/radmavis$(EXEC_EXT): radmavis$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 install_radmavis: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/radmavis$(EXEC_EXT)
@@ -344,7 +344,7 @@ install_python:
 install_python_stage:
 	@$(MAKE) -C $(BASE)/mavis/python install_stage
 
-install_stage: install_perl_stage install_python_stage
+install_stage: $(ALL) install_perl_stage install_python_stage
 	@$(MAKE) -f $(BASE)/$(PROG)/Makefile.obj INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install
 
 install_doc:

@@ -15,7 +15,7 @@ ifeq ($(OSTYPE), sunos)
 endif
 
 LIB += $(LIB_MAVIS) $(LIBSCTP) $(LIBPROCTITLE) $(LIB_ZLIB) $(LIB_PCRE) $(LIB_SSL) $(LIB_CRYPTO) $(LIB_CRYPT) $(LIB_NET)
-INC += $(INC_ZLIB) $(INC_PCRE) $(INC_SSL) $(INC_LWRES)
+INC += $(INC_ZLIB) $(INC_PCRE) $(INC_SSL) $(INC_CRYPTO) $(INC_LWRES) $(INC_SCTP)
 
 ifeq ($(WITH_PCRE), 1)
 	OBJ += pcre_rewrite.o
@@ -72,13 +72,13 @@ clean:
 $(INSTALLROOT)$(SBINDIR_DEST):
 	@mkdir -p -m 0755 $@
 
-$(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/:
 	@mkdir -p -m 0755 $@
 
-$(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/$(PROG).cfg: sample/$(PROG).cfg
+$(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/$(PROG).cfg: sample/$(PROG).cfg | $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/
 	$(INSTALL) -m 0755 $< $@
 
 install:  $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT) $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/ $(INSTALLROOT)$(ETCDIR_DEST)/mavis/sample/$(PROG).cfg install_extra
@@ -89,7 +89,7 @@ install_extra:
 install_doc:
 	@$(MAKE) -C $(BASE)/$(PROG)/doc INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install
 
-install_stage:
+install_stage: $(PROG)$(EXEC_EXT)
 	@$(MAKE) -f $(BASE)/$(PROG)/Makefile.obj INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install
 
 

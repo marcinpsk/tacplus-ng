@@ -91,7 +91,7 @@ my @ALLDIRS = qw(mavis spawnd mavisd tac_plus tac_plus-ng tactester ftpd tcprela
 my $DIRS_DEFAULT = join(" ", @DIRS_DEFAULT);
 my $ALLDIRS = join(" ", @ALLDIRS);
 
-my @options = qw(pcre2 ssl zlib freeradius_client freeradius pam execinfo sctp curl ipc ares crypto ldap radcli doc);
+my @options = qw(pcre2 ssl zlib freeradius_client pam execinfo sctp curl ipc ares crypto ldap radcli doc);
 my %COMMENT;
 
 my $sbin = "sbin";
@@ -252,7 +252,8 @@ my $hint = "";
 $hint = "(Called without arguments. \"--help\" will display the command line options.)\n" if $#ARGV < 0;
 
 while ($#ARGV > -1) {
-	$ARGV[0] =~ s/-freeradius-client/-freeradius_client/;
+	# --with-freeradius* is an alias of --with-freeradius-client*
+	$ARGV[0] =~ s/-freeradius(-client)?(?=-|=|$)/-freeradius_client/;
 	if ($ARGV[0] =~ /^(--[^=]+)=(.*)$/) {
 		$A{$1} = $2;
 	} elsif ($ARGV[0] =~ /^--([^-]+-[^-]+|debug|asan)$/) {
@@ -272,8 +273,12 @@ my $a;
 my $DIRS = "";
 
 foreach $a (keys %A) {
+	if ($a =~ /^--with-[^-]+-(include|lib)$/ && !(defined $A{$a} && $A{$a} ne "")) {
+		print STDERR "$a: a directory is missing.\n";
+		exit(-1);
+	}
 	if ($a =~ /^--with-([^-]+)-include$/) {
-		$A{"--with-$1"} = "1" unless exists $A{"--with-$1"};
+		$A{"--with-$1"} = "1" unless defined $A{"--with-$1"};
 
 		unless (exists $A{"--with-$1-lib"}) {
 			$A{"--with-$1-lib"} = $A{"--with-$1-include"};
@@ -281,7 +286,7 @@ foreach $a (keys %A) {
 		}
 	}
 	elsif ($a =~ /^--with-([^-]+)-lib$/) {
-		$A{"--with-$1"} = "1" unless exists $A{"--with-$1"};
+		$A{"--with-$1"} = "1" unless defined $A{"--with-$1"};
 
 		unless (exists $A{"--with-$1-include"}) {
 			$A{"--with-$1-include"} = $A{"--with-$1-lib"};
@@ -301,7 +306,7 @@ foreach $a (keys %A) {
 
 $DIRS = $DIRS_DEFAULT if $DIRS eq "";
 
-if ($DIRS !~ /^mavis /){
+if ($DIRS !~ /^mavis( |$)/) {
 	$DIRS = "mavis$DIRS";
 }
 

@@ -8,7 +8,7 @@ include $(BASE)/Makefile.inc
 PROG=mavisd
 
 LIB	+= $(LIB_MAVIS) $(LIBPROCTITLE) $(LIB_NET)
-CFLAGS  += $(DEF) $(INC) $(INC_SSL)
+CFLAGS  += $(DEF) $(INC) $(INC_SSL) $(INC_CRYPTO)
 VPATH = $(BASE)/$(PROG)
 
 PROGS=$(PROG)
@@ -28,7 +28,7 @@ $(PROG)$(EXEC_EXT): $(OBJS)
 clean:
 	@rm -f *.o *.so *.so *~ *.a core $(PROGS)
 
-$(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT)
+$(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EXEC_EXT): $(PROG)$(EXEC_EXT) | $(INSTALLROOT)$(SBINDIR_DEST)
 	$(INSTALL) -m 0755 $< $@
 
 $(INSTALLROOT)$(SBINDIR_DEST):
@@ -39,7 +39,7 @@ install: $(INSTALLROOT)$(SBINDIR_DEST) $(INSTALLROOT)$(SBINDIR_DEST)/$(PROG)$(EX
 install_doc:
 	@$(MAKE) -C $(BASE)/$(PROG)/doc INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install
 
-install_stage:
+install_stage: $(PROG)$(EXEC_EXT)
 	@$(MAKE) -f $(BASE)/$(PROG)/Makefile.obj INSTALLROOT=$(BASE)/build/$(OS)$(GITBRANCH_EXT)/fakeroot install
 
 

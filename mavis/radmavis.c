@@ -238,7 +238,9 @@ int main(int argc, char **argv)
 		printf("=%d\n", MAVIS_FINAL);
 		break;
 	    case REJECT_RC:
+#ifdef WITH_RADCLI		/* freeradius-client has no CHALLENGE_RC */
 	    case CHALLENGE_RC:	// radmavis can't relay a challenge
+#endif
 		printf("%d %s\n", AV_A_RESULT, AV_V_RESULT_FAIL);
 		printf("=%d\n", MAVIS_FINAL);
 		break;
