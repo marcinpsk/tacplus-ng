@@ -92,9 +92,14 @@ EXPAND_AD_GROUP_MEMBERSHIP
 	If set, AD group memberships will be expanded.
 	Default: unset
 
-USE_TLS
-	If set, the server is required to support start_tls. Do not use this for plain LDAPS.
-	Default: unset
+LDAP_SKIP_STARTTLS
+	0: StartTLS on ldap:// URLs, before any bind. A server without
+	   StartTLS or a failed StartTLS is a backend error.
+	1: no StartTLS on ldap:// URLs; the binds send the passwords in
+	   clear text, and a warning goes to stderr.
+	ldaps:// URLs do not use StartTLS. USE_TLS is no longer needed,
+	because StartTLS is the default.
+	Default: 0
 
 FLAG_CHPW
 	Permit password changes via this backend.
@@ -218,7 +223,7 @@ my $LDAP_CONNECT_TIMEOUT = 5;
 my $LDAP_SCOPE			= 'sub';
 my $LDAP_FILTER			= '(uid=%s)';
 my $LDAP_FILTER_CHPW	= '(uid=%s)';
-my $use_tls				= undef;
+my $skip_starttls		= 0;
 my $flag_chpass			= undef;
 my $flag_pwpolicy		= undef;
 my $flag_cacheconn		= undef;
@@ -271,7 +276,10 @@ $LDAP_FILTER_CHPW	= $ENV{'LDAP_FILTER_CHPW'} if exists $ENV{'LDAP_FILTER_CHPW'};
 $LDAP_CONNECT_TIMEOUT	= $ENV{'LDAP_CONNECT_TIMEOUT'} if exists $ENV{'LDAP_CONNECT_TIMEOUT'};
 @LDAP_BIND			= ($ENV{'LDAP_USER'}, password => $ENV{'LDAP_PASSWD'}) if (exists $ENV{'LDAP_USER'} && exists $ENV{'LDAP_PASSWD'});
 $flag_use_memberof		= $ENV{'USE_MEMBEROF'} if exists $ENV{'USE_MEMBEROF'};
-$use_tls			= $ENV{'USE_TLS'} if exists $ENV{'USE_TLS'};
+if (exists $ENV{'LDAP_SKIP_STARTTLS'}) {
+	die "invalid LDAP_SKIP_STARTTLS: '$ENV{'LDAP_SKIP_STARTTLS'}' (0 or 1)\n" unless $ENV{'LDAP_SKIP_STARTTLS'} =~ /^[01]\z/;
+	$skip_starttls = $ENV{'LDAP_SKIP_STARTTLS'};
+}
 $tacacsGroupPrefix	= $ENV{'TACACS_GROUP_PREFIX'} if exists $ENV{'TACACS_GROUP_PREFIX'};
 $tacacsGroupPrefix	= $ENV{'TACACS_AD_GROUP_PREFIX'} if exists $ENV{'TACACS_AD_GROUP_PREFIX'};
 $tacacsGroupPrefix	= $ENV{'AD_GROUP_PREFIX'} if exists $ENV{'AD_GROUP_PREFIX'};
@@ -304,12 +312,12 @@ if (defined($flag_chpass) && $LDAP_SERVER_TYPE eq 'microsoft') {
 	}
 }
 
-if ((defined($use_tls) || ($ENV{'LDAP_HOSTS'} =~ /ldaps:/))
+if ((!$skip_starttls || ($ENV{'LDAP_HOSTS'} =~ /ldaps:/))
     && !eval("require IO::Socket::SSL")){
 		print STDERR "Warning: IO::Socket::SSL.pm not found. Neither StartTLS nor LDAPS connections will work.\n";
 }
 
-if (!defined($use_tls) && defined($flag_chpass) && $ENV{'LDAP_HOSTS'} !~ /ldaps:/ && $LDAP_SERVER_TYPE eq 'microsoft') {
+if ($skip_starttls && defined($flag_chpass) && $ENV{'LDAP_HOSTS'} !~ /ldaps:/ && $LDAP_SERVER_TYPE eq 'microsoft') {
 	print STDERR "Warning: AD password changes require LDAPS.\n";
 }
 
@@ -333,6 +341,19 @@ sub random_bytes($) {
 	close($fh);
 	die "/dev/urandom: short read\n" unless defined($got) && $got == $n;
 	return $buf;
+}
+
+# StartTLS on an ldap:// connection, before any bind
+sub starttls() {
+	return 1 unless $ldap->scheme eq 'ldap';
+	if ($skip_starttls) {
+		print STDERR "the connection to the LDAP server has no TLS: the binds send the passwords in clear text\n";
+		return 1;
+	}
+	my $mesg = $ldap->start_tls(%tls_options);
+	return 1 unless $mesg->code;
+	print STDERR "StartTLS: ", $mesg->error, "\n";
+	return 0;
 }
 
 sub get_memberof($) {
@@ -430,12 +451,9 @@ while ($in = <>) {
 			$V[AV_A_USER_RESPONSE] = "No answer from LDAP backend.";
 			goto fatal;
 		}
-		if (defined $use_tls) {
-			my $mesg = $ldap->start_tls(%tls_options);
-			if ($mesg->code) {
-				$V[AV_A_USER_RESPONSE] = "TLS negotiation failed.";
-				goto fatal;
-			}
+		unless (starttls()) {
+			$V[AV_A_USER_RESPONSE] = "TLS negotiation failed.";
+			goto fatal;
 		}
 	}
 	my $authdn = undef;
@@ -532,12 +550,9 @@ while ($in = <>) {
 					$V[AV_A_USER_RESPONSE] = "No answer from LDAP backend.";
 					goto fatal;
 				}
-				if (defined $use_tls) {
-					$mesg = $ldap->start_tls(%tls_options);
-					if ($mesg->code) {
-						$V[AV_A_USER_RESPONSE] = "TLS negotiation failed.";
-						goto fatal;
-					}
+				unless (starttls()) {
+					$V[AV_A_USER_RESPONSE] = "TLS negotiation failed.";
+					goto fatal;
 				}
 				$mesg =  $ldap->bind($authdn, password => $V[AV_A_PASSWORD]);
 				if ($mesg->code) {
@@ -547,8 +562,10 @@ while ($in = <>) {
 				}
 
 				unless (defined $has_extension_password_modify) {
+					my $root_dse = $ldap->root_dse;
+					# without the root DSE use the extension: the crypt() fallback keeps only 8 characters
 					$has_extension_password_modify =
-						$ldap->root_dse->supported_extension(LDAP_EXTENSION_PASSWORD_MODIFY);
+						$root_dse ? $root_dse->supported_extension(LDAP_EXTENSION_PASSWORD_MODIFY) : 1;
 				}
 
 				if (0 == $has_extension_password_modify) {

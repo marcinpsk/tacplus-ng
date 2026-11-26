@@ -2,7 +2,7 @@ TACACS+ NG
 
 Marc Huber
 
-   $Id: 71d4d0a32bd4c96dd8476bb2db557f1b54ae7221 $
+   $Id: bfaf09c4e56fc04993d3cc8f3c3633db4b7175e4 $
      __________________________________________________________
 
    Table of Contents
@@ -769,8 +769,8 @@ n tested.
     #                     # "RFC5424" or "none", see the TIMESTAMP
     #                     # log variable for details.
     #
-    # buffer limit = 64000 # default upper limit for log buffer, use 0 to
- unlimit
+    # buffer limit = 64000 # default upper limit for log buffer, use 0 t
+o unlimit
     #
     # Logs may be filtered using a script:
     # filter = logfilter # pre-existing script
@@ -2977,8 +2977,11 @@ int async 1
    mavis_tacplus-ng_ldap.pl is an authentication/authorization
    back-end for the external module. It interfaces to various
    kinds of LDAP servers, e.g. OpenLDAP, Fedora DS and Active
-   Directory. The server type is detected automatically. Its
-   behaviour is controlled by a list of environmental variables:
+   Directory. The server type is detected automatically from the
+   root DSE. If the server does not give the root DSE to
+   LDAP_USER, the server type is generic and the back-end does not
+   change passwords on it. A message goes to stderr. Its behaviour
+   is controlled by a list of environmental variables:
 
            Variable        Description
    LDAP_HOSTS
@@ -3054,13 +3057,23 @@ int async 1
    Map organizational units from user DN to group membership.
 
    Default: unset
-   USE_STARTTLS
+   LDAP_SKIP_STARTTLS
 
-   If set, the server is required to support start_tls.
+   0: on ldap:// URLs, the back-end starts TLS (StartTLS) before
+   any bind. A server without StartTLS or a failed StartTLS is a
+   backend error. ldaps:// URLs do not use StartTLS.
 
-   Default: unset
+   1: no StartTLS on ldap:// URLs. The binds send the passwords in
+   clear text, and the back-end logs the connection to the LDAP
+   server has no TLS: the binds send the passwords in clear text.
+   ldaps:// URLs still use TLS and give no warning.
 
-   Do not set this flag for LDAPS connections.
+   This changes the behavior: older versions used StartTLS only
+   with USE_STARTTLS. USE_STARTTLS is no longer needed, because
+   StartTLS is the default. For ldap:// URLs to a server without
+   StartTLS, set LDAP_SKIP_STARTTLS = 1 or use ldaps://.
+
+   Default: 0
    FLAG_AUTHORIZE_ONLY
 
    Don't attempt to authenticate users.

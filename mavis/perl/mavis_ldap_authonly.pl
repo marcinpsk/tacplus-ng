@@ -27,7 +27,7 @@ my @LDAP_BIND = ();
 my $LDAP_BASE	= 'ou=staff,dc=example,dc=com';
 my $LDAP_SCOPE	= 'sub';
 my $LDAP_FILTER	= '(uid=%s)';
-my $use_tls = undef;
+my $skip_starttls = 0;
 my $flag_cacheconn		= undef;
 
 $flag_cacheconn			= $ENV{'FLAG_CACHE_CONNECTION'} if exists $ENV{'FLAG_CACHE_CONNECTION'};
@@ -44,13 +44,17 @@ $LDAP_BASE = $ENV{'LDAP_BASE'} if exists $ENV{'LDAP_BASE'};
 $LDAP_FILTER = $ENV{'LDAP_FILTER'} if exists $ENV{'LDAP_FILTER'};
 @LDAP_BIND = ($ENV{'LDAP_USER'}, password => $ENV{'LDAP_PASSWD'})
 	if (exists $ENV{'LDAP_USER'} && exists $ENV{'LDAP_PASSWD'});
-$use_tls = $ENV{'USE_TLS'} if exists $ENV{'USE_TLS'};
+# StartTLS on ldap:// URLs unless LDAP_SKIP_STARTTLS=1
+if (exists $ENV{'LDAP_SKIP_STARTTLS'}) {
+	die "invalid LDAP_SKIP_STARTTLS: '$ENV{'LDAP_SKIP_STARTTLS'}' (0 or 1)\n" unless $ENV{'LDAP_SKIP_STARTTLS'} =~ /^[01]\z/;
+	$skip_starttls = $ENV{'LDAP_SKIP_STARTTLS'};
+}
 
 use Net::LDAP;
 use Net::LDAP qw(LDAP_SUCCESS LDAP_SERVER_DOWN LDAP_TYPE_OR_VALUE_EXISTS
 	LDAP_NO_SUCH_ATTRIBUTE LDAP_INVALID_CREDENTIALS LDAP_CONSTRAINT_VIOLATION);
 
-if ((defined($use_tls) || ($ENV{'LDAP_HOSTS'} =~ /ldaps:/))
+if ((!$skip_starttls || ($ENV{'LDAP_HOSTS'} =~ /ldaps:/))
     && !eval("require IO::Socket::SSL")){
 		print STDERR "Warning: IO::Socket::SSL.pm not found. Neither StartTLS nor LDAPS connections will work.\n";
 }
@@ -123,9 +127,12 @@ while ($in = <>) {
 			$result = MAVIS_FINAL;
 			goto bye;
 		}
-		if (defined $use_tls) {
+		if ($ldap->scheme eq 'ldap' && $skip_starttls) {
+			print STDERR "the connection to the LDAP server has no TLS: the binds send the passwords in clear text\n";
+		} elsif ($ldap->scheme eq 'ldap') {
 			my $mesg = $ldap->start_tls;
 			if ($mesg->code) {
+				print STDERR "StartTLS: ", $mesg->error, "\n";
 				$V[AV_A_USER_RESPONSE] = "TLS negotiation failed.";
 				goto fatal;
 			}

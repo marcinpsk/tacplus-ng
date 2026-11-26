@@ -369,7 +369,6 @@ id = tac_plus {
   realm = ldapRealm {
     mavis module = external {
       exec = /usr/local/lib/mavis/mavis_tacplus_ads.pl
-      setenv USE_TLS = 0
       setenv LDAP_HOSTS = "192.0.2.193"
       setenv LDAP_SCOPE = sub
       setenv LDAP_BASE = "dc=example,dc=com"
@@ -3961,13 +3960,13 @@ aaa authorization commands 15 cmdlist</screen>
             </row>
             <row>
               <entry>
-                <literal>USE_TLS</literal>
+                <literal>LDAP_SKIP_STARTTLS</literal>
               </entry>
               <entry>
-                <para>If set, the server is required to support
-              <literal>start_tls</literal>.</para>
-                <para>Default:
-              unset</para>
+                <para><literal>0</literal>: on <literal>ldap://</literal> URLs, the back-end starts TLS (StartTLS) before any bind. A server without StartTLS or a failed StartTLS is a backend error. <literal>ldaps://</literal> URLs do not use StartTLS.</para>
+                <para><literal>1</literal>: no StartTLS on <literal>ldap://</literal> URLs. The binds send the passwords in clear text, and the back-end logs <literal>the connection to the LDAP server has no TLS: the binds send the passwords in clear text</literal>. <literal>ldaps://</literal> URLs still use TLS and give no warning.</para>
+                <para>This changes the behavior: older versions used StartTLS only with <literal>USE_TLS</literal>. <literal>USE_TLS</literal> is no longer needed, because StartTLS is the default. For <literal>ldap://</literal> URLs to a server without StartTLS, set <literal>LDAP_SKIP_STARTTLS = 1</literal> or use <literal>ldaps://</literal>.</para>
+                <para>Default: <literal>0</literal></para>
               </entry>
             </row>
             <row>
@@ -4114,7 +4113,6 @@ id = tac_plus {
         setenv LDAP_PASSWD = Secret123
         setenv AD_GROUP_PREFIX = tacacs
         # setenv REQUIRE_AD_GROUP_PREFIX = 1
-        setenv USE_TLS = 0
         exec = /usr/local/lib/mavis/mavis_tacplus_ldap.pl
     }
 
