@@ -72,7 +72,7 @@ HASHES = """
 		password login = 6 'SeIF^JbTBWUcRIhgP[FW\\`L\\AAB'
 	}
 	device type6 {
-		# type 6 of "devkey6" and "enable6pw" with this master key, made with encrypt_type6() of type6.c
+		# type 6 of "devkey6" and "enable6pw" with this master key
 		address = 127.0.0.22
 		type6-key = tactest-master
 		key = 6 'AgCUffHhe[EgYQEJHSf]BXch[PfAS_'
