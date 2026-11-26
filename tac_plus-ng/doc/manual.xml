@@ -4976,6 +4976,7 @@ int async 1
         <para><literal>USE_STARTTLS</literal> is not necessary, because StartTLS is the default. The back-end ignores it. Older versions started TLS only if the root DSE offered StartTLS. A site that uses an <literal>ldap://</literal> URL or an entry without a URL scheme (e.g. <literal>"ldap01 ldap02"</literal>) with a server without StartTLS must set <literal>LDAP_SKIP_STARTTLS=1</literal> or use an <literal>ldaps://</literal> URL.</para>
         <para>The back-end keeps two connections to the server. It does the searches on one connection, bound as <literal>LDAP_USER</literal>. It checks the password of the user on the other connection, and a password change after a good user bind also runs there. After AD data code 532 or 773 (password expired, password must change), the AD password change runs on the <literal>LDAP_USER</literal> connection. The back-end does not follow referrals.</para>
         <para><literal>LDAP_CONNECT_TIMEOUT</literal> is the timeout in seconds for the connect and for each answer of the server. The default is <literal>5</literal>. A value that is not a positive integer stops the back-end with a message on stderr.</para>
+        <para>An <literal>LDAP_NESTED_GROUP_DEPTH</literal> that is not a non-negative integer stops the back-end with a message on stderr.</para>
       </section>
     </section>
     <section>
