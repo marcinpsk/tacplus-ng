@@ -532,7 +532,8 @@ static void getsym(struct sym *sym)
 	    sym->code = S_string;
 	    sym->quoted = 1;
 	    sym_getchar(sym);
-	    substitute_envvar(sym);
+	    if (!sym->flag_prohibit_envvar)
+		substitute_envvar(sym);
 	    return;
 	case '/':
 	    if (sym->flag_parse_pcre) {

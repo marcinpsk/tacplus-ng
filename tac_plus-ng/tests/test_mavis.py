@@ -674,6 +674,41 @@ while True:
 """
 
 
+class MavisTextLiteral(DaemonTestCase):
+    """Text from a backend (TACMEMBER, TACPROFILE) keeps a ${VAR}: the daemon does not put its environment there.
+
+    The configuration file replaces ${VAR}: "${TACTEST_ENV_LITERAL}" there is
+    the group named with the literal text ${TACTEST_ENV_GROUP} ($$ is the $ of
+    the test configuration template).
+    """
+
+    CONFIG = Stub.module(childs=(1, 1)) + BACKEND + r"""
+	group admins { }
+	group "$${TACTEST_ENV_LITERAL}" { }
+	ruleset {
+		rule admins { script { if (member == admins) { motd banner = "admins\n" permit } } }
+		rule literal { script { if (member == "$${TACTEST_ENV_LITERAL}") { motd banner = "literal\n" permit } } }
+		rule everyone { script { permit } }
+	}
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        # the daemon gets the environment of the tests
+        for name, value in (("TACTEST_ENV_GROUP", "admins"), ("TACTEST_ENV_LITERAL", "${TACTEST_ENV_GROUP}")):
+            os.environ[name] = value
+            cls.addClassCleanup(os.environ.pop, name)
+        super().setUpClass()
+
+    def test_no_environment_variables(self):
+        stub = Stub(self.daemon)
+        for attributes in ({"member": '"${TACTEST_ENV_GROUP}"'}, {"profile": '{ member = "${TACTEST_ENV_GROUP}" }'}):
+            with self.subTest(attributes=attributes):
+                stub.set(users={"bob": dict(password="pw", **attributes)})
+                r = self.connect().ascii_login("bob", "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", "literal\n"), r)
+
+
 class ChallengeResponse(DaemonTestCase):
     """"login backend = mavis chalresp": the backend sends a challenge, the user answers it."""
 
