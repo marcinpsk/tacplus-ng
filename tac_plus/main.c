@@ -124,6 +124,7 @@ struct context *new_context(struct io_context *io, tac_realm * r)
 	c->key = r->key;
 	c->authfallback = r->authfallback;
 	c->single_connection = r->single_connection;
+	c->cleanup_when_idle = r->cleanup_when_idle;
 	c->lookup_revmap = r->lookup_revmap;
 	c->authen_max_attempts = r->authen_max_attempts;
 	c->authfail_delay = r->authfail_delay;

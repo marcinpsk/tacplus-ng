@@ -253,6 +253,30 @@ class SingleConnectionMayClose(TacPlusTestCase):
         self.assertEqual(keep.pap("alice", "alicepw").status_name, "PASS")
 
 
+class RealmSingleConnectionMayClose(TacPlusTestCase):
+    """single-connection may-close set on the realm, not on a host, must reach the context.
+
+    new_context() copies the realm settings to the context. The host hierarchy then
+    overrides a setting that a matched host sets. Here no host sets may-close, so the
+    realm value is the only source. A reply must close the connection.
+    """
+
+    CONFIG = """
+	single-connection = yes
+	single-connection may-close = yes
+	user = alice {
+		login = clear alicepw
+		pap = clear alicepw
+		service = shell { default command = permit }
+	}
+"""
+
+    def test_a_realm_reply_closes_the_connection(self):
+        with self.connect() as c:
+            self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
+            self.assertTrue(c.closed(), "the connection stays open after the reply")
+
+
 class SequenceNumber(TacPlusTestCase):
     """RFC 8907 4.1: the daemon ends the session at packet 255, it does not answer with sequence number 0."""
 
