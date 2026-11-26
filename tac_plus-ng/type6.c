@@ -11,7 +11,6 @@
 #include <unistd.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
-#include <openssl/rand.h>
 #include "type6.h"
 #if OPENSSL_VERSION_NUMBER < 0x30000000
 #include <openssl/md5.h>
@@ -33,17 +32,6 @@ static __inline__ int base41_decode_block(const char in[3], uint8_t out[2])
     out[0] = number >> 8;
     out[1] = number & 0xFF;
     return 0;
-}
-
-static __inline__ void base41_encode_two_bytes(const uint8_t data[2], char out[3])
-{
-    uint16_t number = ((uint16_t) data[0] << 8) | data[1];
-
-    out[2] = 'A' + number % 41;
-    number /= 41;
-    out[1] = 'A' + number % 41;
-    number /= 41;
-    out[0] = 'A' + number;
 }
 
 static __inline__ int base41_decode(const char *in, uint8_t *out, size_t *out_len)
@@ -68,21 +56,6 @@ static __inline__ int base41_decode(const char *in, uint8_t *out, size_t *out_le
     *out_len = j;
     return 0;
 }
-
-static __inline__ char *b41_encode(const uint8_t *data, size_t len)
-{
-    char *out = malloc((len >> 1) * 3 + 1);
-    if (out) {
-	char *t = out;
-
-	for (size_t i = 0; i < len; i += 2, t += 3)
-	    base41_encode_two_bytes(data + i, t);
-
-	*t = 0;
-    }
-    return out;
-}
-
 
 static void calculate_md5(const char *input, uint8_t *output)
 {
@@ -214,44 +187,4 @@ char *decrypt_type6(const char *encoded, const char *master_key)
     output[len] = 0;
 
     return output;
-}
-
-char *encrypt_type6(const char *cleartext, const char *master_key)
-{
-    size_t len = strlen(cleartext);
-
-    uint8_t enc[len];
-
-    uint8_t salt[TYPE6_SALT_LEN];
-    RAND_bytes(salt, TYPE6_SALT_LEN);
-
-    aes_xor(master_key, salt, len, enc, (const uint8_t *) cleartext);
-
-    uint8_t md5_digest[16];
-    calculate_md5(master_key, md5_digest);
-
-    uint8_t ka_input[16] = { 0 };
-    memcpy(ka_input, salt, TYPE6_SALT_LEN);
-
-    uint8_t ka[16];
-    aes_ecb_encrypt(md5_digest, ka_input, ka);
-
-    unsigned int hmac_len;
-    uint8_t *digest = HMAC(EVP_sha1(), ka, 16, enc, len, NULL, &hmac_len);
-    if (digest) {
-	uint8_t mac[TYPE6_MAC_LEN];
-	memcpy(mac, digest, TYPE6_MAC_LEN);
-
-	size_t pad = ~len & 1;
-	uint8_t final[TYPE6_SALT_LEN + len + TYPE6_MAC_LEN + 1 + pad];
-	memcpy(final, salt, TYPE6_SALT_LEN);
-	memcpy(final + TYPE6_SALT_LEN, enc, len);
-	memcpy(final + TYPE6_SALT_LEN + len, mac, TYPE6_MAC_LEN);
-	final[TYPE6_SALT_LEN + len + TYPE6_MAC_LEN] = 0;
-	if (pad)
-	    final[TYPE6_SALT_LEN + len + TYPE6_MAC_LEN + 1] = 1;
-
-	return b41_encode(final, TYPE6_SALT_LEN + len + TYPE6_MAC_LEN + 1 + pad);
-    }
-    return NULL;
 }
