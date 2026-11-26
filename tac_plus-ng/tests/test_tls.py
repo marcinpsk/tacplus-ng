@@ -149,6 +149,12 @@ class TlsTestCase(DaemonTestCase):
         with self.assertRaises((tacacs.Closed, ssl.SSLError, ConnectionError)):
             login(connect())
 
+    def assertProtocolVersionRefused(self, connect):
+        """The daemon answers the ClientHello with a protocol_version alert, not some other failure."""
+        with self.assertRaises(ssl.SSLError) as cm:
+            connect()
+        self.assertEqual(cm.exception.reason, "TLSV1_ALERT_PROTOCOL_VERSION", cm.exception)
+
     def device_and_transport(self, conn):
         r = conn.author("alice", ["service=shell", "cmd="])
         self.assertTrue(r.ok, r)
@@ -201,12 +207,11 @@ class TacacsOverTls(TlsTestCase):
         ctx = self.ca.context(other.issue("certnas", "/CN=certnas.tactest"))
         self.assertRefused(lambda: self.connect(listener="tls", tls=ctx, server_hostname="localhost", timeout=10.0))
 
-### FIXME -- false positive. "openssl s_connect ... -tls1_2" show a protocol error alert
-#    def test_tls12_is_refused(self):
-#        """RFC 9887 requires TLS 1.3: a listener without aaa.protocol refuses a TLS 1.2 handshake."""
-#        with self.assertRaises((ssl.SSLError, ConnectionError)):
-#            self.connect(listener="tls", tls=self.context("certnas", minimum=ssl.TLSVersion.TLSv1_2, maximum=ssl.TLSVersion.TLSv1_2),
-#                         server_hostname="localhost", timeout=10.0)
+    def test_tls12_is_refused(self):
+        """RFC 9887 requires TLS 1.3: a listener without aaa.protocol refuses a TLS 1.2 handshake."""
+        self.assertProtocolVersionRefused(lambda: self.connect(
+            listener="tls", tls=self.context("certnas", minimum=ssl.TLSVersion.TLSv1_2, maximum=ssl.TLSVersion.TLSv1_2),
+            server_hostname="localhost", timeout=10.0))
 
     def test_obfuscated_packet_over_tls_is_refused(self):
         """RFC 9887: no obfuscation over TLS; a packet without TAC_PLUS_UNENCRYPTED_FLAG gets ERROR, then the close."""
@@ -589,7 +594,7 @@ RADSEC = """
 class RadiusOverTls(TlsTestCase):
     """RADIUS over TLS (RFC 6614) on a TLS listener: the daemon tells it from TACACS+ by the first bytes."""
 
-    LISTEN = {"tls": "tls = yes aaa.protocol = radius.tls"}
+    LISTEN = {"tls": "tls = yes"}
     BODY = TLS_REALM + DEVICES + RADSEC
 
     def radsec(self, client="certnas"):
@@ -644,7 +649,6 @@ class ListenerAaaProtocol(TlsTestCase):
 
 
 TLS12 = ssl.TLSVersion.TLSv1_2
-HANDSHAKE_REFUSED = (ssl.SSLError, ConnectionError)
 
 
 class TlsMinVersionCase(TlsTestCase):
@@ -679,15 +683,11 @@ class TlsMinVersion(TlsMinVersionCase):
     def test_radius_tls_takes_tls12(self):
         self.assertEqual(self.radsec12("radius-tls"), "Access-Accept")
 
-# FIXME -- works according to openssl s_client
-#    def test_tacacs_tls_refuses_a_tls12_handshake(self):
-#        with self.assertRaises(HANDSHAKE_REFUSED):
-#            self.tacacs12("tacacs-tls")
+    def test_tacacs_tls_refuses_a_tls12_handshake(self):
+        self.assertProtocolVersionRefused(lambda: self.tacacs12("tacacs-tls"))
 
-# FIXME -- tac_plus-ng refused TLSv1_2 unless it's enabled via "tla min version = TLSv1_2"
-#   def test_listener_without_aaa_protocol_refuses_a_tls12_handshake(self):
-#       with self.assertRaises(HANDSHAKE_REFUSED):
-#           self.radsec12("tls")
+    def test_listener_without_aaa_protocol_refuses_a_tls12_handshake(self):
+        self.assertProtocolVersionRefused(lambda: self.radsec12("tls"))
 
     def test_tls13_on_every_listener(self):
         self.assertTrue(self.connect_tls(listener="tacacs-tls").pap("alice", "alicepw").ok)
@@ -696,30 +696,29 @@ class TlsMinVersion(TlsMinVersionCase):
         self.assertEqual(r.code_name, "Access-Accept")
 
 
-#FIXME -- same issue as above, I think -- this likely gives a protocol error.
-#class TlsMinVersionTls13(TlsMinVersionCase):
-#    """tls min version = TLSv1.3 holds for RADIUS over TLS as well."""
-#
-#    MIN_VERSION = "\ttls min version = TLSv1.3\n"
-#
-#    def test_radius_tls_refuses_a_tls12_handshake(self):
-#        with self.assertRaises(HANDSHAKE_REFUSED):
-#            self.radsec12("radius-tls")
+class TlsMinVersionTls13(TlsMinVersionCase):
+    """tls min version = TLSv1.3 holds for RADIUS over TLS as well."""
+
+    MIN_VERSION = "\ttls min version = TLSv1.3\n"
+
+    def test_radius_tls_refuses_a_tls12_handshake(self):
+        self.assertProtocolVersionRefused(lambda: self.radsec12("radius-tls"))
 
 
-#FIXME, needs more evaluation
-#class TlsMinVersionTls12(TlsMinVersionCase):
-#    """tls min version = TLSv1.2 lets a TLS 1.2 handshake through anywhere; TACACS+ still answers only TLS 1.3."""
-#
-#    MIN_VERSION = "\ttls min version = TLSv1.2\n"
-#
-#    def test_radius_over_tls12_without_aaa_protocol(self):
-#        self.assertEqual(self.radsec12("tls"), "Access-Accept")
-#
-#    def test_tacacs_over_tls12_gets_no_answer(self):
-#        c = self.tacacs12("tacacs-tls")
-#        self.assertEqual(c.sock.version(), "TLSv1.2")
-#        self.assertRefused(lambda: c)
+class TlsMinVersionTls12(TlsMinVersionCase):
+    """tls min version = TLSv1.2 lets a TLS 1.2 handshake through anywhere; TACACS+ still answers only TLS 1.3."""
+
+    MIN_VERSION = "\ttls min version = TLSv1.2\n"
+
+    def test_radius_over_tls12_without_aaa_protocol(self):
+        self.assertEqual(self.radsec12("tls"), "Access-Accept")
+
+    def test_tacacs_over_tls12_gets_no_answer(self):
+        """The handshake goes through; tac_read() refuses the first packet of a TLS 1.2 session."""
+        c = self.tacacs12("tacacs-tls")
+        self.assertEqual(c.sock.version(), "TLSv1.2")
+        self.assertRefused(lambda: c)
+
 
 class TlsMinVersionBugCompatibility(TlsMinVersionCase):
     """bug compatibility 128 of the device of the address: TACACS+ over TLS 1.2, as before."""
