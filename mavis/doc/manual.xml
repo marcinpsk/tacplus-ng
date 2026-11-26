@@ -662,6 +662,10 @@ cache expire FTP = 0</screen>
         failure, and so does a group name of <literal>resolve gids</literal> that the list cannot carry. libmavis
         makes such an answer a failure too (<literal>RESULT</literal> is <literal>NAK</literal>): a script of a module
         does not run on it, and the <emphasis>groups</emphasis> module does not filter it.</para>
+        <para>Each line of an answer is an attribute number, a blank and the value; a LF in a value goes as a CR. The
+        <emphasis>external</emphasis>, <emphasis>external-mt</emphasis> and <emphasis>remote</emphasis> modules take an
+        answer with a NUL, with a line that is not an attribute, or without a LF at the end as a failure of the
+        request, which tac_plus-ng refuses (it is not a backend error, so no fallback applies).</para>
         <section>
           <title>Configuration directives</title>
           <para>The following configuration directives are available:</para>
