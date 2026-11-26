@@ -212,6 +212,35 @@ userPassword: heidipw
 shadowExpire: 1
 """).substitute(base=BASE, reader=READER, staff=STAFF)
 
+# for start(ldif=...): kim is a posixAccount in the group users (1000), and in netadmins (1001) by memberUid
+POSIX_ENTRIES = string.Template("""
+dn: ou=posix,$base
+objectClass: organizationalUnit
+ou: posix
+
+dn: uid=kim,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: kim
+cn: kim
+sn: kim
+userPassword: kimpw
+uidNumber: 2000
+gidNumber: 1000
+homeDirectory: /home/kim
+
+dn: cn=users,ou=posix,$base
+objectClass: posixGroup
+cn: users
+gidNumber: 1000
+
+dn: cn=netadmins,ou=posix,$base
+objectClass: posixGroup
+cn: netadmins
+gidNumber: 1001
+memberUid: kim
+""").substitute(base=BASE)
+
 
 def slapd_arg(value):
     """A slapd.conf argument: double quotes keep blanks, a backslash escapes a quote or a backslash."""
@@ -993,6 +1022,15 @@ member: cn=xylophone,ou=groups,$base
             self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
+    def test_posix_gids(self):
+        """GIDS: the gidNumber of the user and of the posixGroups with the user in memberUid."""
+        log = 'log gids { destination = "$tmp/gids.log" authentication format = "$${user} gids=$${gids}" }\n'
+        _, d = self.start(ldif=POSIX_ENTRIES, settings=log + "authentication log = gids\n")
+        with d.connect() as c:
+            self.assertEqual(c.pap("kim", "kimpw").status_name, "PASS")
+        line = d.wait_log("gids", "kim gids=").splitlines()[0]
+        self.assertEqual(sorted(line.split("=", 1)[1].split(",")), ["1000", "1001"], line)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
