@@ -212,6 +212,35 @@ userPassword: heidipw
 shadowExpire: 1
 """).substitute(base=BASE, reader=READER, staff=STAFF)
 
+# for start(ldif=...): kim is a posixAccount in the group users (1000), and in netadmins (1001) by memberUid
+POSIX_ENTRIES = string.Template("""
+dn: ou=posix,$base
+objectClass: organizationalUnit
+ou: posix
+
+dn: uid=kim,ou=people,$base
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: kim
+cn: kim
+sn: kim
+userPassword: kimpw
+uidNumber: 2000
+gidNumber: 1000
+homeDirectory: /home/kim
+
+dn: cn=users,ou=posix,$base
+objectClass: posixGroup
+cn: users
+gidNumber: 1000
+
+dn: cn=netadmins,ou=posix,$base
+objectClass: posixGroup
+cn: netadmins
+gidNumber: 1001
+memberUid: kim
+""").substitute(base=BASE)
+
 
 def slapd_arg(value):
     """A slapd.conf argument: double quotes keep blanks, a backslash escapes a quote or a backslash."""
@@ -993,6 +1022,20 @@ member: cn=xylophone,ou=groups,$base
             self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins in staff\n"), r)
         with d.connect() as c:
             self.assertEqual(c.pap("rescue", "rescuepw").status_name, "FAIL")
+
+    def test_posix_group_base(self):
+        """LDAP_BASE_POSIXGROUP is the base of the posixGroup searches.
+
+        kim is in netadmins by memberUid; netadmins is the primary group (gidNumber) of lars.
+        """
+        lars = person("lars", "objectClass: posixAccount\nuidNumber: 2001\ngidNumber: 1001\n"
+                              "homeDirectory: /home/lars\n")
+        for base, motd in (("ou=people," + BASE, ""), ("ou=posix," + BASE, "netadmins only\n")):
+            _, d = self.start(ldif=POSIX_ENTRIES + lars, LDAP_BASE_POSIXGROUP=base)
+            for user in ("kim", "lars"):
+                with self.subTest(base=base, user=user), d.connect() as c:
+                    r = c.ascii_login(user, user + "pw")
+                    self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
 
 
 @unittest.skipUnless(os.access(SLAPD, os.X_OK), "no OpenLDAP slapd")
