@@ -1959,6 +1959,20 @@ class LdapPython(LdapTests, DaemonTestCase):
                 self.assertEqual(c.pap(user, password).status_name, status)
         self.assertEqual([dn for dn, _ in slapd.binds()], [READER, ALICE, READER, BOB, READER, DAVE])
 
+    def test_root_dse_per_connection(self):
+        """The back-end reads the root DSE on a new connection only, not after each bind."""
+        slapd, d = self.start()
+        counts = []
+        for user, password, status in (("alice", "alicepw", "PASS"), ("bob", "wrong", "FAIL"),
+                                       ("dave", "davepw", "PASS")):
+            with d.connect() as c:
+                self.assertEqual(c.pap(user, password).status_name, status, user)
+            with open(slapd.log, errors="replace") as f:
+                counts.append(f.read().count('SRCH base="" '))
+        # the first connection read the root DSE; the binds after it read it no more
+        self.assertGreater(counts[0], 0)
+        self.assertEqual(counts, counts[:1] * 3)
+
     def test_searches_as_ldap_user(self):
         """Only LDAP_USER can read the directory: the searches and the group walk of each request run as LDAP_USER."""
         _, d = self.start(access=READER_ONLY)
