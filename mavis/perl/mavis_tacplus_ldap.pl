@@ -130,6 +130,13 @@ FLAG_AUTHORIZE_ONLY
 TLS_OPTIONS
 	Extra options for use with LDAPS or start_tls, in Perl hash syntax.
 	See https://metacpan.org/pod/Net::LDAP for details.
+	The server certificate is checked ("verify => 'require'") unless
+	TLS_OPTIONS sets "verify": it must chain to a trusted CA and match
+	the host name of the URL, or "sslserver => 'name'" if set.
+	"cafile => '/path/to/ca.pem'" or
+	"capath => '/path/to/dir'" names the CA instead of the CAs of the
+	system; "verify => 'none'" turns the check off. An invalid value
+	stops the back-end.
 	Default: unset
 	Example: "sslversion => 'tlsv1_2'"
 
@@ -262,7 +269,48 @@ if ($LDAP_SERVER_TYPE eq 'tacacs_schema') {
 	$LDAP_FILTER_CHPW = $LDAP_FILTER;
 }
 
-%tls_options = eval $ENV{'TLS_OPTIONS'} if exists $ENV{'TLS_OPTIONS'};
+# check the certificate of the server unless TLS_OPTIONS says otherwise, e.g. "verify => 'none'"
+if (exists $ENV{'TLS_OPTIONS'}) {
+	# no values in the messages (e.g. a key password), also not in a Perl warning
+	my @list = do { local $SIG{__WARN__} = sub {}; eval $ENV{'TLS_OPTIONS'} };
+	die "invalid TLS_OPTIONS: not a list of Perl key-value pairs\n" if $@ || @list % 2;
+	# Net::LDAP takes "-verify" for "verify"
+	while (my ($k, $v) = splice @list, 0, 2) {
+		$k =~ s/^-//;
+		$tls_options{$k} = $v;
+	}
+}
+$tls_options{'verify'} = 'require' unless exists $tls_options{'verify'};
+# Net::LDAP takes an unknown verify value as 'none'
+die "invalid TLS_OPTIONS: verify is not none, optional or require\n"
+	unless defined $tls_options{'verify'} && $tls_options{'verify'} =~ /^(?:none|optional|require)\z/i;
+
+# IO::Socket::SSL checks the name with the brackets of an IPv6 address in the URL: give it the address
+sub tls_name($) {
+	return $_[0] =~ m{^(?:\w+://)?\[([^\]]*)\]} ? (sslserver => $1) : ();
+}
+
+# Net::LDAP->new() for each URL until one answers; IO::Socket::SSL dies for a CA file it cannot read
+sub ldap_connect {
+	my ($hosts, @args) = @_;
+	my $error = "no LDAP server";
+	for my $url (ref $hosts ? @$hosts : ($hosts)) {
+		my $ldap = eval { Net::LDAP->new($url, @args, tls_name($url), %tls_options) or do { $error = $@; undef } };
+		return $ldap if $ldap;
+		$error = $@ if $@;
+	}
+	chomp $error;
+	print STDERR "no connection to the LDAP server: $error\n";
+	return undef;
+}
+
+# StartTLS on $ldap: the error, or undef
+sub start_tls_error($) {
+	my ($ldap) = @_;
+	my $mesg = eval { $ldap->start_tls(tls_name($ldap->host), %tls_options) };
+	return $@ =~ s/\n\z//r unless $mesg;
+	return $mesg->code ? $mesg->error : undef;
+}
 
 if (exists $ENV{'LDAP_HOSTS'}) {
 	$LDAP_HOSTS	= [];
@@ -342,9 +390,9 @@ sub starttls() {
 		print STDERR "the connection to the LDAP server has no TLS: the binds send the passwords in clear text\n";
 		return 1;
 	}
-	my $mesg = $ldap->start_tls(%tls_options);
-	return 1 unless $mesg->code;
-	print STDERR "StartTLS: ", $mesg->error, "\n";
+	my $error = start_tls_error($ldap);
+	return 1 unless defined $error;
+	print STDERR "StartTLS: $error\n";
 	return 0;
 }
 
@@ -438,7 +486,7 @@ while ($in = <>) {
   retry_once:
 
 	unless ($ldap) {
-		$ldap = Net::LDAP->new($LDAP_HOSTS, timeout=>$LDAP_CONNECT_TIMEOUT, %tls_options);
+		$ldap = ldap_connect($LDAP_HOSTS, timeout=>$LDAP_CONNECT_TIMEOUT);
 		unless ($ldap) {
 			$V[AV_A_USER_RESPONSE] = "No answer from LDAP backend.";
 			goto fatal;
@@ -537,7 +585,7 @@ while ($in = <>) {
 					$ldap->disconnect;
 					$ldap = undef;
 				}
-				$ldap = Net::LDAP->new($LDAP_MASTER, %tls_options);
+				$ldap = ldap_connect($LDAP_MASTER);
 				unless ($ldap) {
 					$V[AV_A_USER_RESPONSE] = "No answer from LDAP backend.";
 					goto fatal;
