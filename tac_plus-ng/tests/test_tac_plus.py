@@ -4,11 +4,13 @@ run-tests builds it next to tac_plus-ng. The daemon runs under spawnd
 with config.TAC_PLUS around the policy, in tac_plus syntax.
 """
 
+import grp
 import os
+import shutil
 import time
 import unittest
 
-from tactest import DaemonTestCase, Stub, config, prefix
+from tactest import GROUP_DB, LINUX, DaemonTestCase, Stub, config, prefix, run_with_group_db
 from tactest.daemon import parse_only
 from tactest.tacacs import AUTHEN_TYPE_ASCII, Packet
 
@@ -238,6 +240,103 @@ class SingleConnectionMayClose(TacPlusTestCase):
         self.assertTrue(idle.closed(timeout=5), "the idle single connection stays open")
         self.assertFalse(keep.closed(timeout=1), "the connection of the may-close = no host closes")
         self.assertEqual(keep.pap("alice", "alicepw").status_name, "PASS")
+
+
+class ModuleScriptOnMalformedList(TacPlusTestCase):
+    """A module script with a deny rule and a malformed TACMEMBER: libmavis fails the answer, also for tac_plus."""
+
+    CONFIG = Stub.module(childs=(1, 1), script=r"""
+		script out {
+			if ($$TACMEMBER =~ /blocked/) {
+				set $$RESULT = NAK
+				return
+			}
+		}""") + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = guest {
+		service = shell { default command = permit }
+	}
+	group = blocked {
+		service = shell { default command = permit }
+	}
+"""
+
+    def author(self, user, member):
+        Stub(self.daemon).set(users={user: {"password": "pw", "member": member}})
+        return self.connect().author(user, ["service=shell", "cmd="]).status_name
+
+    def test_deny_rule(self):
+        self.assertEqual(self.author("carol", '"guest"'), "PASS_ADD")
+        self.assertEqual(self.author("dave", '"guest","blocked"'), "FAIL")
+        # a line break: the tac_plus parser takes it as a blank, the list decoder as malformed
+        self.assertEqual(self.author("erin", '"guest",\n"blocked"'), "FAIL")
+
+
+class GroupsFilterOnMalformedList(TacPlusTestCase):
+    """The groups module and a malformed TACMEMBER: libmavis fails the answer, also for tac_plus."""
+
+    CONFIG = """
+	mavis module = groups {
+		groups filter = /^guest$$/
+	}
+""" + Stub.module(childs=(1, 1)) + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = guest {
+		service = shell { default command = permit }
+	}
+"""
+
+    def test_filter(self):
+        stub = Stub(self.daemon)
+        stub.set(users={"carol": {"password": "pw", "member": '"guest","blocked"'}})
+        self.assertEqual(self.connect().author("carol", ["service=shell", "cmd="]).status_name, "PASS_ADD")
+        stub.set(users={"dave": {"password": "pw", "member": '"guest",\n"blocked"'}})
+        self.assertEqual(self.connect().author("dave", ["service=shell", "cmd="]).status_name, "FAIL")
+
+
+BACKSLASH_GID = 4243
+
+
+@unittest.skipUnless(TAC_PLUS and LINUX and shutil.which("unshare"), "tac_plus, a user and mount namespace")
+@unittest.skipIf(os.environ.get(GROUP_DB), "runs only outside the namespace")
+class ResolvedGroupNameWithBackslash(unittest.TestCase):
+    """"resolve gids attribute = TACMEMBER" and a group name with a backslash: tac_plus finds the group of that name.
+
+    The test runs ResolvedGroupNameInNamespace in a user and mount namespace with a group database that has such a
+    name.
+    """
+
+    def test_member(self):
+        run_with_group_db(self, "ops\\team:x:%d:\n" % BACKSLASH_GID, "test_tac_plus.ResolvedGroupNameInNamespace")
+
+
+@unittest.skipUnless(os.environ.get(GROUP_DB), "runs in the namespace of ResolvedGroupNameWithBackslash")
+class ResolvedGroupNameInNamespace(TacPlusTestCase):
+    CONFIG = None
+
+    def test_author(self):
+        self.assertEqual(grp.getgrgid(BACKSLASH_GID).gr_name, "ops\\team")
+        for option in ("gid", "gids"):
+            with self.subTest(option=option):
+                d = self.start_daemon("""
+	mavis module = groups {
+		resolve %(option)s = yes
+		resolve %(option)s attribute = TACMEMBER
+	}
+""" % {"option": option} + Stub.module(childs=(1, 1)) + """
+	user backend = mavis
+	login backend = mavis
+	pap backend = mavis
+	group = ops\\team {
+		service = shell { default command = permit }
+	}
+""", name="resolve-" + option)
+                Stub(d).set(users={"bob": {"password": "pw", option: str(BACKSLASH_GID)}})
+                self.assertEqual(self.connect(d).author("bob", ["service=shell", "cmd="]).status_name, "PASS_ADD")
 
 
 if __name__ == "__main__":

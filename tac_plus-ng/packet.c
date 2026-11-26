@@ -175,6 +175,13 @@ void send_acct_reply(tac_session *session, u_char status, char *msg, char *data)
 /* send an authorization reply packet */
 void send_author_reply_final(tac_session *session, u_char status, char *msg, char *data, int arg_cnt, char **args)
 {
+    if (session->bad_backend_data) {
+	if (status == TAC_PLUS_AUTHOR_STATUS_PASS_ADD || status == TAC_PLUS_AUTHOR_STATUS_PASS_REPL) {
+	    report(session, LOG_ERR, ~0, "user %s: malformed backend data, authorization fails", session->username.txt);
+	    status = TAC_PLUS_AUTHOR_STATUS_FAIL;
+	}
+	arg_cnt = 0;
+    }
     int msg_len = msg ? (int) strlen(msg) : 0;
     int data_len = data ? (int) strlen(data) : 0;
     int arglen[arg_cnt + 1];
@@ -330,6 +337,10 @@ static int delay_packet(struct context *, tac_pak *, int);
 
 void send_authen_reply(tac_session *session, int status, char *msg, int msg_len, u_char *data, int data_len, u_char flags)
 {
+    if (session->bad_backend_data && status == TAC_PLUS_AUTHEN_STATUS_PASS) {
+	report(session, LOG_ERR, ~0, "user %s: malformed backend data, authentication fails", session->username.txt);
+	status = TAC_PLUS_AUTHEN_STATUS_FAIL;
+    }
     if (data && !data_len)
 	data_len = (int) strlen((char *) data);
     if (msg && !msg_len)
@@ -396,6 +407,14 @@ static void set_response_authenticator(tac_session *session, rad_pak_hdr *pak)
 
 static int rad_send_reply(tac_session *session, u_char status)
 {
+    if (session->bad_backend_data && status != RADIUS_CODE_ACCESS_REJECT && status != RADIUS_CODE_ACCOUNTING_RESPONSE) {
+	report(session, LOG_ERR, ~0, "user %s: malformed backend data, access is rejected", session->username.txt);
+	status = RADIUS_CODE_ACCESS_REJECT;
+    }
+    if (session->bad_backend_data) {
+	memset(session->radius_data->data, 0, sizeof(session->radius_data->data));
+	session->radius_data->data_len = 0;
+    }
     tac_pak *pak = new_rad_pak(session, status);
 
     if ((common_data.debug | session->ctx->debug) & DEBUG_PACKET_FLAG)

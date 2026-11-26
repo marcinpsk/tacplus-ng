@@ -294,6 +294,138 @@ void av_add(av_ctx *ac, int av_attribute, char *separator, char *format, ...)
     }
 }
 
+// -1: the list cannot carry a CR, LF or NUL, or a backslash before the closing quote
+int av_add_quoted(av_ctx *ac, int av_attribute, char *value, size_t len)
+{
+    if (memchr(value, '\n', len) || memchr(value, '\r', len) || memchr(value, 0, len) || (len && value[len - 1] == '\\'))
+	return -1;
+    char *buf = Xcalloc(1, 2 * len + 3);
+    char *b = buf;
+    *b++ = '"';
+    for (size_t i = 0; i < len; i++) {
+	if (value[i] == '"')
+	    *b++ = '\\';
+	*b++ = value[i];
+    }
+    *b = '"';
+    av_list_append(ac, av_attribute, buf);
+    free(buf);
+    return 0;
+}
+
+// Append value to the list in av_attribute, on the heap (av_add() copies on the stack); blanks are an empty list
+void av_list_append(av_ctx *ac, int av_attribute, char *value)
+{
+    char *old = av_get(ac, av_attribute);
+    if (!old || !old[strspn(old, " \t")]) {
+	av_set(ac, av_attribute, value);
+	return;
+    }
+    size_t ol = strlen(old), vl = strlen(value);
+    char *s = Xcalloc(1, ol + vl + 2);
+    memcpy(s, old, ol);
+    s[ol] = ',';
+    memcpy(s + ol + 1, value, vl);
+    av_set(ac, av_attribute, s);
+    free(s);
+}
+
+// The list in av_attribute is malformed: the answer is a FAIL, so that no reader uses it (logged once)
+void av_list_refuse(av_ctx *ac, int av_attribute, char *who)
+{
+    char *r = av_get(ac, AV_A_RESULT);
+    if (!r || strcmp(r, AV_V_RESULT_FAIL)) {
+	logmsg("%s: %s of user %s is malformed, the answer fails", who, av_char[av_attribute].name, av_get(ac, AV_A_USER));
+	av_set(ac, AV_A_RESULT, AV_V_RESULT_FAIL);
+    }
+}
+
+// Make the list in av_attribute malformed and the answer a FAIL; a list never has a LF, so its readers refuse it too
+void av_list_set_malformed(av_ctx *ac, int av_attribute, char *who)
+{
+    av_set(ac, av_attribute, "\n");
+    av_list_refuse(ac, av_attribute, who);
+}
+
+// Cut the next value off *list and decode it in place: 1 a value, 0 the end, -1 malformed
+int av_list_next(char **list, char **value, int *quoted)
+{
+    char *s = *list + strspn(*list, " \t"), *e = NULL;
+    if (!*s)
+	return 0;
+    if (quoted)
+	*quoted = (*s == '"' || *s == '\'');
+    if (*s == '"' || *s == '\'') {
+	char q = *s;
+	char *o = ++s;
+	*value = o;
+	for (; *s != q; s++) {
+	    if (!*s || *s == '\r' || *s == '\n')
+		return -1;
+	    if (*s == '\\' && s[1] == q)
+		s++;
+	    *o++ = *s;
+	}
+	*o = 0;
+	s++;
+	s += strspn(s, " \t");
+    } else {
+	*value = s;
+	s += strcspn(s, ",\r\n");
+	for (e = s; e > *value && (e[-1] == ' ' || e[-1] == '\t'); e--);
+	if (e == *value)
+	    return -1;
+    }
+    char separator = *s;
+    if (separator && separator != ',')
+	return -1;
+    if (e)
+	*e = 0;
+    if (separator) {
+	s++;
+	if (!s[strspn(s, " \t")])
+	    return -1;
+    }
+    *list = s;
+    return 1;
+}
+
+static int av_lists[] = { AV_A_MEMBEROF, AV_A_TACMEMBER, AV_A_SSHKEY, AV_A_SSHKEYHASH, AV_A_SSHKEYID, -1 };
+
+// 1 for the attributes in the list format
+int av_list_attribute(int av_attribute)
+{
+    for (int i = 0; av_lists[i] > -1; i++)
+	if (av_lists[i] == av_attribute)
+	    return 1;
+    return 0;
+}
+
+// The list attribute of ac that is malformed, or -1; MEMBEROF needs quoted values
+int av_lists_check(av_ctx *ac)
+{
+    for (int i = 0; av_lists[i] > -1; i++) {
+	char *v = av_get(ac, av_lists[i]);
+	if (v && av_list_check(v, av_lists[i] == AV_A_MEMBEROF))
+	    return av_lists[i];
+    }
+    return -1;
+}
+
+// 0: a well-formed list (with quoted values only if quoted_only), -1: malformed
+int av_list_check(char *list, int quoted_only)
+{
+    char *copy = Xstrdup(list), *s = copy, *v;
+    int res, quoted;
+    while ((res = av_list_next(&s, &v, &quoted)) > 0)
+	if (quoted_only && !quoted) {
+	    res = -1;
+	    break;
+	}
+    free(copy);
+    return res;
+}
+
 char *av_get(av_ctx *ac, int av_attribute)
 {
     if (av_attribute < 0 || av_attribute > AV_A_ARRAYSIZE) {

@@ -60,7 +60,9 @@ class BadGroupList(DaemonTestCase):
         return self.connect().pap("alice", "pw").status_name
 
     def test_issue265_unknown_group_then_a_syntax_error(self):
-        self.assertEqual(self.login(',"nosuchgroup"'), "FAIL")
+        for member in (',"nosuchgroup"', '"nosuchgroup","x"y'):
+            with self.subTest(member=member):
+                self.assertEqual(self.login(member), "FAIL")
 
     def test_issue265_script_out_list_of_a_user_without_groups(self):
         """What the "script out" of #189 makes of a user without groups: ',"no-login-profile"'."""

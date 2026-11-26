@@ -30,6 +30,7 @@
 
 import base64
 import glob
+import grp
 import json
 import os
 import pwd
@@ -46,7 +47,8 @@ import time
 import unittest
 from unittest import mock
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
+from tactest import (GROUP_DB, LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix,
+                     run_with_group_db)
 from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
@@ -612,6 +614,354 @@ class PasswordExpiry(DaemonTestCase):
 
     def test_default_password_expired(self):
         self.assertEqual(self.login("old"), ("PASS", "Password has expired.\n"))
+
+
+LIST_POLICY = BACKEND + r"""
+	alias admins_alias { admins }
+	group ops { }
+	group admins { }
+	group "a\"b" { }
+	group "x\"y,z" { }
+	ruleset {
+		rule blocked { script { if (memberof == "cn=blocked\\,x,dc=example") { deny } } }
+		rule blocked_quote { script { if (memberof == "cn=d\"e,f,dc=example") { deny } } }
+		rule admins { script { if (member == admins) { motd banner = "admins\n" permit } } }
+		rule quote { script { if (member == "a\"b") { motd banner = "quote\n" permit } } }
+		rule quote_comma { script { if (member == "x\"y,z") { motd banner = "quote and comma\n" permit } } }
+		rule comma { script { if (memberof == "cn=a\\,b,dc=example") { motd banner = "comma\n" permit } } }
+		rule dn { script { if (memberof == "cn=q\\\"r,dc=example") { motd banner = "dn\n" permit } } }
+		rule staff { script { if (memberof == "cn=staff,dc=example") { motd banner = "staff\n" permit } } }
+		rule ops { script { if (member == ops) { motd banner = "ops\n" permit } } }
+		rule everyone { script { permit } }
+	}
+"""
+
+
+class ListValues(DaemonTestCase):
+    """The list attributes of a backend: TACMEMBER, SSHKEY, SSHKEYHASH, SSHKEYID and MEMBEROF.
+
+    A value is a comma separated list of the entries of its attribute.
+    Inside double quotes a backslash escapes a double quote or a backslash.
+    """
+
+    CONFIG = Stub.module(childs=(1, 1)) + LIST_POLICY
+
+    @classmethod
+    def setUpClass(cls):
+        # the daemon gets the environment of the tests
+        os.environ["TACTEST_LIST_GROUP"] = "admins"
+        cls.addClassCleanup(os.environ.pop, "TACTEST_LIST_GROUP")
+        super().setUpClass()
+
+    def setUp(self):
+        super().setUp()
+        self.stub = Stub(self.daemon)
+
+    def login(self, **attributes):
+        self.stub.set(users={"bob": dict(password="pw", **attributes)})
+        r = self.connect().ascii_login("bob", "pw")
+        return r.status_name, r.server_msg
+
+    def test_list_entries(self):
+        for member, motd in (('"ops"', "ops\n"), ("ops", "ops\n"), ('"ops","admins"', "admins\n"),
+                             ('"ops", admins', "admins\n"), ("ops,admins", "admins\n"), (r'"a\"b",ops', "quote\n"),
+                             (r'"a\"b"', "quote\n"), ("'a\"b'", "quote\n"), (r'"op\\s"', ""),
+                             (r'"x\"y,z"', "quote and comma\n"), (r'ops,"x\"y,z"', "quote and comma\n")):
+            with self.subTest(member=member):
+                self.assertEqual(self.login(member=member), ("PASS", motd))
+
+    def test_value_is_literal(self):
+        """A value of a backend is not a configuration text: no ${VAR}, no alias and no other escapes in it."""
+        for member in ('"${TACTEST_LIST_GROUP}"', '"admins_alias"', r'"\141dmins"'):
+            with self.subTest(member=member):
+                self.assertEqual(self.login(member=member), ("PASS", ""))
+
+    def test_value_has_only_entries_of_its_attribute(self):
+        """Text after the list, a closing brace or an empty value is a parse error: the user does not log in."""
+        for member in ('"ops" } { member = "admins"', '"ops" member = "admins"', '"ops" }', '"ops",', '"ops",,admins',
+                       ',"ops"'):
+            with self.subTest(member=member):
+                self.assertEqual(self.login(member=member)[0], "FAIL")
+
+    @unittest.skipUnless("openssl" in features(), "SSH keys need a build with OpenSSL")
+    def test_ssh_key_value_has_only_ssh_keys(self):
+        key = ssh_ed25519_key()
+        self.assertEqual(self.login(member="ops", sshkey='"%s"' % key), ("PASS", "ops\n"))
+        self.assertEqual(self.login(member="ops", sshkey='"%s" } { member = "admins"' % key)[0], "FAIL")
+
+    def test_memberof_deny_rule(self):
+        """A memberof deny rule matches a DN with an escaped comma, and a DN with a quote and a comma."""
+        for memberof in (r'"cn=blocked\,x,dc=example"', r'"cn=staff,dc=example","cn=blocked\,x,dc=example"',
+                         r'"cn=d\"e,f,dc=example"', r'"cn=staff,dc=example","cn=d\"e,f,dc=example"'):
+            with self.subTest(memberof=memberof):
+                self.assertEqual(self.login(memberof=memberof)[0], "FAIL")
+
+    def test_malformed_memberof_is_refused(self):
+        """A MEMBEROF that is not a list of quoted values is a parse error, not a list that ends early."""
+        for memberof in (r'"cn=staff,dc=example" "cn=blocked\,x,dc=example"', '"cn=staff,dc=example',
+                         'cn=staff,dc=example', '"cn=staff,dc=example"x'):
+            with self.subTest(memberof=memberof):
+                self.assertEqual(self.login(memberof=memberof)[0], "FAIL")
+        self.assertEqual(self.login(memberof='"cn=staff,dc=example"'), ("PASS", "staff\n"))
+
+    def test_memberof_escapes(self):
+        """A quote in a DN, escaped, is part of that DN and does not end the list.
+
+        Only a backslash before the quote is an escape: a DN with an
+        escaped comma or backslash keeps its bytes.
+        """
+        for memberof, motd in ((r'"cn=a\,b,dc=example"', "comma\n"), (r'"cn=q\\"r,dc=example","cn=staff,dc=example"', "dn\n"),
+                               (r'"cn=a\"b,dc=example","cn=staff,dc=example"', "staff\n"),
+                               (r'"cn=a\\b,dc=example","cn=staff,dc=example"', "staff\n")):
+            with self.subTest(memberof=memberof):
+                self.assertEqual(self.login(memberof=memberof), ("PASS", motd))
+
+
+@unittest.skipUnless("pcre2" in features(), "the groups filter is a PCRE")
+class ListValuesGroupsFilter(DaemonTestCase):
+    """The groups module reads and writes the list attributes with the same escapes as the daemon."""
+
+    CONFIG = """
+	mavis module = groups {
+		groups filter = /^(ops|a.b|x.y,z|root)$$/
+		memberof filter = /staff|,b,|d.e,f/
+		resolve gids = yes
+		resolve gids attribute = TACMEMBER
+	}
+""" + Stub.module(childs=(1, 1)) + LIST_POLICY
+
+    def test_malformed_list(self):
+        """The groups module fails an answer with a malformed list, also with "resolve gids"; tac_plus-ng refuses it too."""
+        stub = Stub(self.daemon)
+        for attributes in ({"member": '"ops" "admins"'}, {"member": '"ops","admins'},
+                           {"memberof": '"cn=staff,dc=example" "cn=x,dc=example"'}, {"memberof": 'cn=staff,dc=example'},
+                           {"member": '"ops" "admins"', "gids": "0"}):
+            with self.subTest(attributes=attributes):
+                stub.set(users={"bob": dict(password="pw", **attributes)})
+                r = self.connect().ascii_login("bob", "pw")
+                self.assertEqual(r.status_name, "FAIL", r)
+
+    def test_escaped_values_pass_the_filter(self):
+        stub = Stub(self.daemon)
+        for attributes, motd in (({"member": r'"a\"b","admins"'}, "quote\n"),
+                                 ({"memberof": r'"cn=a\"b,dc=example","cn=staff,dc=example"'}, "staff\n"),
+                                 ({"memberof": r'"cn=a\,b,dc=example"'}, "comma\n"),
+                                 ({"member": r'"x\"y,z","admins"'}, "quote and comma\n")):
+            with self.subTest(attributes=attributes):
+                stub.set(users={"bob": dict(password="pw", **attributes)})
+                r = self.connect().ascii_login("bob", "pw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd))
+
+    def test_deny_rule_after_the_filter(self):
+        """The groups module writes a DN with a quote and a comma back as one value, and the deny rule matches it."""
+        stub = Stub(self.daemon)
+        for user, memberof in (("deny1", r'"cn=d\"e,f,dc=example"'),
+                               ("deny2", r'"cn=staff,dc=example","cn=d\"e,f,dc=example"')):
+            with self.subTest(memberof=memberof):
+                stub.set(users={user: dict(password="pw", memberof=memberof)})
+                self.assertEqual(self.connect().ascii_login(user, "pw").status_name, "FAIL")
+                # the rule denies it, not a parse error
+                self.wait_log("authentication", "\t%s\ttty0\t127.0.0.1\tshell login denied by ACL" % user)
+
+
+@unittest.skipUnless("pcre2" in features(), "the script uses a PCRE")
+class ScriptOnMalformedList(DaemonTestCase):
+    """A "script out" of a module does not run on a malformed list: the answer fails, and the daemon refuses it too."""
+
+    CONFIG = Stub.module(childs=(1, 1), script=r"""
+		script out {
+			if ($$TACMEMBER =~ /blocked/) {
+				set $$RESULT = NAK
+				return
+			}
+			eval $$MEMBEROF =~ /^(.*)$$/
+			set $$MEMBEROF = $$1
+		}""") + LIST_POLICY
+
+    def test_script_out(self):
+        stub = Stub(self.daemon)
+        stub.set(users={"bob": {"password": "pw", "memberof": '"cn=staff,dc=example"'}})
+        self.assertEqual(self.connect().ascii_login("bob", "pw").server_msg, "staff\n")
+        stub.set(users={"bob": {"password": "pw", "memberof": '"cn=staff,dc=example"\n"cn=blocked\\,x,dc=example"'}})
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+        stub.set(users={"bob": {"password": "pw", "member": '"ops",\n"blocked"'}})
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+
+
+FAIL_CLOSED_POLICY = BACKEND + r"""
+	device trusting {
+		address = 127.0.10.1
+		key = tactest
+		permit if-authenticated = yes
+	}
+	group ops { }
+	ruleset {
+		rule format { script { if ("$${memberof}" =~ /staff/) { motd banner = "format\n" permit } } }
+		rule new { script { if (member =~ /^newgrp/) { motd banner = "newgrp\n" permit } } }
+		rule everyone { script { permit } }
+	}
+"""
+
+
+@unittest.skipUnless("pcre2" in features(), "the rules use a PCRE")
+class MalformedListValues(DaemonTestCase):
+    """A reply with a malformed list is a FAIL in each place that reads the reply."""
+
+    CONFIG = Stub.module(childs=(1, 1)) + FAIL_CLOSED_POLICY
+    MALFORMED = ({"member": '"ops",'}, {"memberof": '"cn=staff,dc=example" "cn=x,dc=example"'},
+                 {"member": '"ops"\n"newgrp"'}, {"memberof": '"cn=staff,dc=example"\n"cn=x,dc=example"'})
+
+    def setUp(self):
+        super().setUp()
+        self.stub = Stub(self.daemon)
+
+    def set_user(self, name, **attributes):
+        self.stub.set(users={name: dict(password="pw", **attributes)})
+
+    def test_login(self):
+        for attributes in self.MALFORMED:
+            with self.subTest(attributes=attributes):
+                self.set_user("bob", **attributes)
+                self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+
+    @unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+    def test_authorization_of_a_user_authenticated_on_the_device(self):
+        """"permit if-authenticated" applies to a user the backend does not know, not to one with a malformed reply."""
+        self.set_user("bob", member='"ops"')
+        r = self.connect(source="127.0.10.1").author("nobody", ["service=shell", "cmd="], authen_method=5)
+        self.assertEqual(r.status_name, "PASS_ADD")
+        for attributes in self.MALFORMED:
+            with self.subTest(attributes=attributes):
+                self.set_user("bob", **attributes)
+                r = self.connect(source="127.0.10.1").author("bob", ["service=shell", "cmd="], authen_method=5)
+                self.assertEqual(r.status_name, "FAIL")
+
+    def test_log_format_of_a_malformed_memberof(self):
+        """The rule with "${memberof}" never sees a malformed list."""
+        self.set_user("bob", memberof='"cn=staff,dc=example"')
+        self.assertEqual(self.connect().ascii_login("bob", "pw").server_msg, "format\n")
+        self.set_user("bob", memberof='"cn=staff,dc=example" x')
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+
+    def test_no_group_from_a_malformed_list(self):
+        """The values of a malformed list do not reach the groups of the realm."""
+        for group, rest in (("newgrp1", '"x'), ("newgrp2", '"%s"' % ("x" * 0x10000))):
+            with self.subTest(group=group):
+                self.set_user("carol", member='"%s",%s' % (group, rest))
+                self.assertEqual(self.connect().ascii_login("carol", "pw").status_name, "FAIL")
+                self.set_user("dan", member=group)
+                self.assertEqual(self.connect().ascii_login("dan", "pw").server_msg, "")
+
+    @unittest.skipUnless("openssl" in features(), "SSH keys need a build with OpenSSL")
+    def test_no_group_from_an_answer_that_fails_later(self):
+        """An answer with a valid TACMEMBER and an SSHKEY that fails adds no group to the realm."""
+        for group, sshkey in (("newgrp3", '"%s"' % ("A" * 0x10000)), ("newgrp4", '"not a key"')):
+            with self.subTest(group=group):
+                self.set_user("carol", member='"%s"' % group, sshkey=sshkey)
+                self.assertEqual(self.connect().ascii_login("carol", "pw").status_name, "FAIL")
+                self.set_user("dan", member=group)
+                self.assertEqual(self.connect().ascii_login("dan", "pw").server_msg, "")
+
+    @unittest.skipUnless("openssl" in features(), "SSH keys need a build with OpenSSL")
+    def test_empty_ssh_key(self):
+        self.set_user("bob", sshkey='""')
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+        code, out = parse_only(self.scratch_file("tac_plus-ng.cfg", """\
+id = spawnd { listen { port = 4949 } }
+id = tac_plus-ng {
+	user carol {
+		password pap = clear carolpw
+		ssh-key = ""
+	}
+}
+"""))
+        self.assertGreater(code, 0, out)
+        self.assertIn("Empty SSH key", out)
+
+
+class MalformedMemberofMfa(DaemonTestCase):
+    """The "mavis mfa acl" on a malformed MEMBEROF: the login fails, it does not go on without MFA."""
+
+    CONFIG = Stub.module(childs=(1, 1)) + BACKEND + """
+	acl mfa-staff { if (memberof == "cn=staff,dc=example") permit }
+	mavis mfa acl = mfa-staff
+""" + PERMIT
+
+    def test_mfa_acl(self):
+        stub = Stub(self.daemon)
+        stub.set(users={"bob": {"password": "pw", "memberof": '"cn=staff,dc=example" "cn=x,dc=example"'}})
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
+        self.assertEqual(stub.requests(type="MFA"), [])
+
+
+def system_group():
+    """A group of the system database other than gid 0, with a name that a configuration takes as it is."""
+    for g in sorted(grp.getgrall(), key=lambda g: g.gr_gid):
+        if g.gr_gid and re.fullmatch(r"[a-z_][a-z0-9_-]*", g.gr_name) and grp.getgrgid(g.gr_gid).gr_name == g.gr_name:
+            return g
+    return None
+
+
+GROUP = system_group()
+
+
+@unittest.skipUnless(GROUP, "no group other than gid 0 in the group database")
+class GroupsResolveGids(DaemonTestCase):
+    """"resolve gids attribute = TACMEMBER" with more names than the old 8 kB buffer took.
+
+    The last gid is a group of the system database (gid 1 is "daemon" on Debian, "bin" on Alpine).
+    """
+
+    CONFIG = """
+	mavis module = groups {
+		resolve gids = yes
+		resolve gids attribute = TACMEMBER
+	}
+""" + Stub.module(childs=(1, 1)) + BACKEND + """
+	group %(name)s { }
+	ruleset {
+		rule last { script { if (member == %(name)s) { motd banner = "last\\n" permit } } }
+		rule everyone { script { permit } }
+	}
+""" % {"name": GROUP.gr_name if GROUP else "none"}
+
+    def test_all_names(self):
+        Stub(self.daemon).set(users={"bob": {"password": "pw", "gids": "0," * 2100 + str(GROUP.gr_gid)}})
+        r = self.connect().ascii_login("bob", "pw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "last\n"))
+
+
+GROUP_GID = 4242
+
+
+@unittest.skipUnless(LINUX and shutil.which("unshare"), "a user and mount namespace (Linux, unshare)")
+@unittest.skipIf(os.environ.get(GROUP_DB), "runs only outside the namespace")
+class GroupNameTheListCannotCarry(unittest.TestCase):
+    """A name from "resolve gids" that MEMBEROF cannot carry (a backslash at the end) makes tac_plus-ng refuse the answer.
+
+    The test runs GroupNameInNamespace in a user and mount namespace with a group database that has such a name.
+    """
+
+    def test_refused(self):
+        run_with_group_db(self, "bs\\:x:%d:\n" % GROUP_GID, "test_mavis.GroupNameInNamespace")
+
+
+@unittest.skipUnless(os.environ.get(GROUP_DB), "runs in the namespace of GroupNameTheListCannotCarry")
+class GroupNameInNamespace(DaemonTestCase):
+    CONFIG = """
+	mavis module = groups {
+		resolve gids = yes
+		resolve gids attribute = MEMBEROF
+	}
+""" + Stub.module(childs=(1, 1)) + BACKEND + PERMIT
+
+    def test_login(self):
+        self.assertEqual(grp.getgrgid(GROUP_GID).gr_name, "bs\\")
+        stub = Stub(self.daemon)
+        stub.set(users={"bob": {"password": "pw", "gids": "0"}})
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "PASS")
+        stub.set(users={"bob": {"password": "pw", "gids": "0,%d" % GROUP_GID}})
+        self.assertEqual(self.connect().ascii_login("bob", "pw").status_name, "FAIL")
 
 
 class PasswordChange(DaemonTestCase):
