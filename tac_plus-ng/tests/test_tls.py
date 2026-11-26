@@ -978,9 +978,31 @@ class PeerCertSanValidation(TlsTestCase):
     def test_ip_san_of_the_peer_is_used(self):
         self.assertEqual(self.device("own_address", "127.0.0.9"), "checked")
 
-    def test_without_validation_the_ip_san_selects_nothing(self):
-        """localhost (127.0.0.0/8) doesn't validate: the address SAN is skipped, the address selects the device."""
+    def test_by_default_the_ip_san_of_another_device_selects_nothing(self):
+        """localhost (127.0.0.0/8) validates by default since 2534c96: the SAN is not the peer's address."""
         self.assertEqual(self.device("xr_address", "127.0.0.10"), "localhost")
+
+
+class PeerCertCnAddress(TlsTestCase):
+    """An IP address as the CN of a client certificate selects a device only if it is the peer's address."""
+
+    LISTEN = {"tls": "tls = yes"}
+    BODY = TLS_REALM + """
+	device xr {
+		address = 127.0.0.65
+		key = xrkey
+	}
+""" + policy(("xr", "localhost"))
+    CLIENTS = {"xr_cn": "/CN=127.0.0.65"}
+
+    def device(self, source):
+        return self.device_and_transport(self.connect_tls("xr_cn", source=source))["tactest-device"]
+
+    def test_cn_address_of_the_peer(self):
+        self.assertEqual(self.device("127.0.0.65"), "xr")
+
+    def test_cn_address_of_another_device_selects_nothing(self):
+        self.assertEqual(self.device("127.0.0.9"), "localhost")
 
 
 class PipeLogAfterReject(TlsTestCase):
