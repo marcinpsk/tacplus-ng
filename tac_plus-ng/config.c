@@ -2743,22 +2743,6 @@ static void cache_user_profile(tac_session *session, enum token res)
     session->ctx->user_profile_cache[j].valid_until = io_now.tv_sec + 120;
 }
 
-// A cache hit skips the profile acl, too. Keep the motd banner it may have set.
-static void cache_user_profile_motd(tac_session *session)
-{
-    if (!session->user || session->user_is_session_specific)
-	return;
-
-    uint32_t crc32 = calc_user_profile_crc(session);
-    for (int i = 0; i < USER_PROFILE_CACHE_SIZE; i++)
-	if (session->ctx->user_profile_cache[i].user == session->user && session->ctx->user_profile_cache[i].crc32 == crc32
-	    && session->ctx->user_profile_cache[i].serial == session->user->serial
-	    && session->ctx->user_profile_cache[i].valid_until >= io_now.tv_sec) {
-	    session->ctx->user_profile_cache[i].motd_banner = session->motd_banner;
-	    return;
-	}
-}
-
 enum token eval_ruleset_r(tac_session *session, tac_realm *realm, int parent_first)
 {
     enum token res = S_unknown;
@@ -2816,17 +2800,15 @@ static enum token eval_profile_acl(tac_session *session, tac_profile *p, int par
 enum token eval_ruleset(tac_session *session, tac_realm *realm)
 {
     enum token res = lookup_user_profile(session);
-    if (res != S_unknown) {
+    if (res != S_unknown)
 	report(DEBACL | DEBUG_REGEX_FLAG,
 	       "%s@%s: cached: %s (profile: %s)", session->username.txt,
 	       session->nac_addr_ascii.txt, codestring[res].txt, session->profile ? session->profile->name.txt : "n/a");
-	return res;
-    }
-    res = eval_ruleset_r(session, realm, session->ctx->realm->script_realm_parent_first);
-    if (res == S_permit && session->profile && session->profile->acl) {
+    else
+	res = eval_ruleset_r(session, realm, session->ctx->realm->script_realm_parent_first);
+    // the cache key does not hold all the fields the profile acl can test, so the acl runs for each request
+    if (res == S_permit && session->profile && session->profile->acl)
 	res = eval_profile_acl(session, session->profile, session->ctx->realm->script_realm_parent_first);
-	cache_user_profile_motd(session);
-    }
     if (res == S_permit)
 	return res;
     return S_deny;
