@@ -1295,7 +1295,7 @@ class LdapPerl(LdapTests, DaemonTestCase):
         ca = self.ca()
         self.stderr_log = self.scratch_file("reconnect.log", "")
         slapd = self.slapd(tls=self.ldaps(ca, "security simple_bind=1\nidletimeout 1\n"), starttls=True)
-        extra = "".join(f'\t\tsetenv {name} = "{value}"\n' for name, value in self.TRUST(ca.cert).items())
+        extra = setenv(self.TRUST(ca.cert))
         d = self.start_daemon(POLICY.substitute(module=self.module(slapd.url, extra + "\t\tchilds min = 1\n"
                                                                    "\t\tchilds max = 1\n"),
                                                 staff=STAFF, base=BASE, last=WIDE - 1))
@@ -1794,12 +1794,13 @@ class LdapPython(LdapTests, DaemonTestCase):
                     self.assertTrue(slapd.binds())
                     self.assertEqual([dn for dn, over_tls in slapd.binds() if not over_tls], [])
                 self.assertNotIn(CLEAR_TEXT_WARNING, self.stderr(log))
-        with self.subTest("no StartTLS on the server"):
-            log = self.capture_stderr("plain")
-            slapd, d = self.start(starttls_default=True)
-            self.assert_login(d, "FAIL")
-            self.assertEqual(slapd.binds(), [])
-            self.assertIn("StartTLS: ", self.stderr(log))
+        for name, env in (("no StartTLS on the server", {}), ("LDAP_SKIP_STARTTLS=0", {"LDAP_SKIP_STARTTLS": "0"})):
+            with self.subTest(name):
+                log = self.capture_stderr("plain" + "-0" * bool(env))
+                slapd, d = self.start(starttls_default=True, **env)
+                self.assert_login(d, "FAIL")
+                self.assertEqual(slapd.binds(), [])
+                self.assertIn("StartTLS: ", self.stderr(log))
 
     @unittest.skip("this back-end does not read USE_STARTTLS: see test_starttls_default and test_skip_starttls")
     def test_starttls_required(self):
@@ -1913,6 +1914,13 @@ class LdapPython(LdapTests, DaemonTestCase):
                 # check=False: the back-end exits on purpose
                 self.start(check=False, **env)
                 self.assertIn(message, self.stderr(log, message))
+                # the exit status, not only the message: the back-end must not go on
+                clean = {k: v for k, v in os.environ.items() if not k.startswith(("LDAP_", "TLS_", "FLAG_"))}
+                p = subprocess.run([PYTHON, LDAP_PYTHON], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, env={**clean, "LDAP_HOSTS": "ldap://127.0.0.1:1", **env},
+                                   timeout=60, check=False)
+                self.assertNotEqual(p.returncode, 0, p.stderr.decode())
+                self.assertIn(message, p.stderr.decode())
 
 
 if __name__ == "__main__":
