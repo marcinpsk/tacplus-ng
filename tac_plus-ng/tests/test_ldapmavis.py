@@ -181,7 +181,8 @@ shadowExpire: 1
 
 def slapd_arg(value):
     """A slapd.conf argument: double quotes keep blanks, a backslash escapes a quote or a backslash."""
-    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def person(uid, extra=""):
@@ -555,6 +556,79 @@ class AdPeer:
         self.sock.close()
 
 
+def recv_exact(sock, n):
+    """n bytes from sock, fewer only at the end of the stream."""
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def ldap_message(sock):
+    """The next LDAP message (BER) from sock as (bytes, message ID, protocol op tag), None at the end."""
+    head = recv_exact(sock, 2)
+    if len(head) < 2:
+        return None
+    length = recv_exact(sock, head[1] & 0x7f) if head[1] & 0x80 else b""
+    body = recv_exact(sock, int.from_bytes(length, "big") if length else head[1])
+    id_len = body[1]
+    return head + length + body, int.from_bytes(body[2:2 + id_len], "big"), body[2 + id_len]
+
+
+class HoldingProxy:
+    """A TCP proxy to slapd that holds the answer to a search with `hold` in its request.
+
+    The proxy gives the held answer to the client before it sends the next
+    search on, so the late answer arrives before the answer to that search.
+    """
+
+    def __init__(self, port, hold):
+        self.upstream = ("127.0.0.1", port)
+        self.hold = hold.encode()
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = f"ldap://127.0.0.1:{self.sock.getsockname()[1]}"
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def close(self):
+        self.sock.close()
+
+    def accept(self):
+        while True:
+            try:
+                client, _ = self.sock.accept()
+            except OSError:
+                return
+            server = socket.create_connection(self.upstream)
+            state = {"ids": set(), "held": [], "lock": threading.Lock()}
+            threading.Thread(target=self.to_server, args=(client, server, state), daemon=True).start()
+            threading.Thread(target=self.to_client, args=(server, client, state), daemon=True).start()
+
+    def to_server(self, client, server, state):
+        while (m := ldap_message(client)) is not None:
+            data, msgid, op = m
+            with state["lock"]:
+                if op == 0x63 and self.hold in data:      # SearchRequest
+                    state["ids"].add(msgid)
+                elif op == 0x63 and state["held"]:
+                    client.sendall(b"".join(state["held"]))
+                    state["held"].clear()
+            server.sendall(data)
+        server.close()
+
+    def to_client(self, server, client, state):
+        while (m := ldap_message(server)) is not None:
+            data, msgid, _ = m
+            with state["lock"]:
+                if msgid in state["ids"]:
+                    state["held"].append(data)
+                else:
+                    client.sendall(data)
+        client.close()
+
+
 MODULE = string.Template("""
 	mavis module = $module {
 		setenv LDAP_HOSTS = "$url"
@@ -847,11 +921,16 @@ member: cn=xylophone,ou=groups,$base
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "labs and xparent\n"), r)
 
     def test_filter_characters_in_the_user_name(self):
-        """A "*" in the user name matches no other user (RFC 4515), also when "mavis user filter" lets it through."""
-        _, d = self.start(policy="\tacl any-user { permit }\n\tmavis user filter = any-user\n")
+        """A "*" in the user name matches no other user (RFC 4515), also when "mavis user filter" lets it through.
+
+        The user alic* exists: the escaped filter finds this user only.
+        """
+        _, d = self.start(ldif=person("alic*"), policy="\tacl any-user { permit }\n\tmavis user filter = any-user\n")
         for user in ("alic*", "*"):
             with self.subTest(user=user), d.connect() as c:
                 self.assertEqual(c.pap(user, "alicepw").status_name, "FAIL")
+        with d.connect() as c:
+            self.assertEqual(c.pap("alic*", "alic*pw").status_name, self.LITERAL_STAR_USER)
 
     def test_empty_user_name(self):
         """tac_plus-ng passes no empty user name on (PAP: ERROR, ASCII: it asks again); the next login works."""
@@ -903,6 +982,15 @@ member: cn=xylophone,ou=groups,$base
             r = c.ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
+    def test_wide_group_tree(self):
+        """More groups than the old group walk array of ldapmavis-mt had, an answer above 64 KB: the last group counts."""
+        ldif = "".join(f"\ndn: cn=wide-{i},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: wide-{i}\n"
+                       f"member: uid=wide,ou=people,{BASE}\n" for i in range(WIDE))
+        _, d = self.start(ldif=person("wide") + ldif, LDAP_SIZELIMIT=str(2 * WIDE))
+        with d.connect(timeout=30.0) as c:
+            r = c.ascii_login("wide", "widepw")
+        self.assertEqual((r.status_name, r.server_msg), ("PASS", "wide\n"), r)
+
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
         _, d = self.start()
@@ -940,6 +1028,7 @@ member: cn=xylophone,ou=groups,$base
 @unittest.skipUnless(os.path.exists(LDAPMAVIS), "the build has no ldapmavis-mt (OpenLDAP or pthreads missing)")
 class LdapMt(LdapTests, DaemonTestCase):
     CONFIG = None
+    LITERAL_STAR_USER = "PASS"
     NO_CHECK = (("LDAP_OPT_X_TLS_REQUIRE_CERT", "LDAP_OPT_X_TLS_NEVER"),)
     STARTTLS = {"USE_STARTTLS": "1"}
 
@@ -1026,6 +1115,35 @@ class LdapMt(LdapTests, DaemonTestCase):
             self.assertEqual(self.login(d), "FAIL")
         self.assertEqual(backend_fds(d), before)
 
+    def test_late_group_answer(self):
+        """A group search that times out: its late answer does not take the place of the next search.
+
+        The direct groups are late-slow and late-direct, late-direct is in
+        late-parent, late-parent in l3. The proxy holds the answer for
+        late-slow longer than LDAP_TIMEOUT, so only late-slow is lost.
+        """
+        def group(name, extra=""):
+            return (f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: groupOfNames\nobjectClass: extensibleObject\n"
+                    f"cn: {name}\nmember: cn=nobody,{BASE}\n{extra}")
+        memberof = (person("late", f"objectClass: extensibleObject\nmemberOf: cn=late-slow,ou=groups,{BASE}\n"
+                                   f"memberOf: cn=late-direct,ou=groups,{BASE}\n")
+                    + group("late-slow") + group("late-direct", f"memberOf: cn=late-parent,ou=groups,{BASE}\n")
+                    + group("late-parent", f"memberOf: cn=l3,ou=groups,{BASE}\n") + group("l3"))
+        member = (person("late") + group("late-slow", f"member: uid=late,ou=people,{BASE}\n")
+                  + group("late-direct", f"member: uid=late,ou=people,{BASE}\n")
+                  + group("late-parent", f"member: cn=late-direct,ou=groups,{BASE}\n")
+                  + group("l3", f"member: cn=late-parent,ou=groups,{BASE}\n"))
+        for walk, ldif in (("memberOf", memberof), ("groupOfNames", member)):
+            with self.subTest(walk=walk):
+                slapd = self.slapd(ldif)
+                proxy = HoldingProxy(slapd.port, f"cn=late-slow,ou=groups,{BASE}")
+                self.addCleanup(proxy.close)
+                module = self.module(proxy.url, '\t\tsetenv LDAP_TIMEOUT = "1"\n')
+                d = self.start_daemon(POLICY.substitute(module=module, staff=STAFF, base=BASE, last=WIDE - 1))
+                with d.connect(timeout=30.0) as c:
+                    r = c.ascii_login("late", "latepw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
+
     def test_request_without_a_user_name(self):
         """No or an empty user name: FAIL, and the backend answers the next request.
 
@@ -1051,15 +1169,6 @@ class LdapMt(LdapTests, DaemonTestCase):
             finally:
                 watchdog.cancel()
                 p.kill()
-
-    def test_wide_group_tree(self):
-        """A user in more groups than the old fixed array of the group walk had; the last group still counts."""
-        ldif = "".join(f"\ndn: cn=wide-{i},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: wide-{i}\n"
-                       f"member: uid=wide,ou=people,{BASE}\n" for i in range(WIDE))
-        _, d = self.start(ldif=person("wide") + ldif, LDAP_SIZELIMIT=str(2 * WIDE))
-        with d.connect(timeout=30.0) as c:
-            r = c.ascii_login("wide", "widepw")
-        self.assertEqual((r.status_name, r.server_msg), ("PASS", "wide\n"), r)
 
     def test_wide_memberof_tree(self):
         """memberOf: the direct group of the user has WIDE parents, and only the last parent is in cn=wide-<last>."""
@@ -1190,6 +1299,7 @@ class Libldap(unittest.TestCase):
 @unittest.skipUnless(perl_ldap(), "no Net::LDAP or IO::Socket::SSL for Perl")
 class LdapPerl(LdapTests, DaemonTestCase):
     CONFIG = None
+    LITERAL_STAR_USER = "FAIL"      # the Perl back-end refuses a user name with "*" before the search
     NO_CHECK = (("TLS_OPTIONS", "verify => 'none'"),)
     # StartTLS is mandatory by default; None keeps the LDAP_SKIP_STARTTLS=1 of start() away
     STARTTLS = {"LDAP_SKIP_STARTTLS": None}
