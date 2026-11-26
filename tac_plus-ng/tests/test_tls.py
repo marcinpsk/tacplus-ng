@@ -746,7 +746,7 @@ class RadiusOverDtls(TlsTestCase):
     """RADIUS over DTLS (RFC 7360) on a "protocol = UDP tls = yes" listener, through "openssl s_client -dtls1_2"."""
 
     UDP = True
-    LISTEN = {"dtls": "protocol = UDP tls = yes aaa.protocol = radius.udp"}
+    LISTEN = {"dtls": "protocol = UDP tls = yes aaa.protocol = radius.dtls"}
     BODY = TLS_REALM + DEVICES.replace("key = ipkey", "key = ipkey\n\t\tradius.key = radsecret") + RADSEC
 
     @classmethod
@@ -760,17 +760,13 @@ class RadiusOverDtls(TlsTestCase):
                               timeout=10.0)
         return self.radius("radius/dtls", listener="dtls", sock=sock, timeout=10.0)
 
-#FIXME -- works with tactest
-#    def test_access_accept(self):
-#        r = self.dtls().access_request("alice", "alicepw")
-#        self.assertEqual(r.code_name, "Access-Accept", r)
-#        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
+    def test_access_accept(self):
+        r = self.dtls().access_request("alice", "alicepw")
+        self.assertEqual(r.code_name, "Access-Accept", r)
+        self.assertEqual(r.get(radius.REPLY_MESSAGE), [b"certnas"], "device not selected by the certificate")
 
-#FIXME -- works with native tactest
-#    def test_access_reject(self):
-#        self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
-
-# Quite some other tests below are likely to fail, too. I'm not familiar enought with Python to fix this. -Marc
+    def test_access_reject(self):
+        self.assertEqual(self.dtls().access_request("alice", "wrong").code_name, "Access-Reject")
 
     def test_several_requests_in_one_session(self):
         c = self.dtls()
@@ -802,7 +798,6 @@ class RadiusDtlsAutoDetect(RadiusOverDtls):
     """"tls = auto" on the UDP listener: DTLS and plain RADIUS on the same port."""
 
     LISTEN = {"dtls": "protocol = UDP tls = auto"}
-    BODY = TLS_REALM + "\ntls min version = TLSv1.2\n" + RADSEC
 
     test_plain_radius_on_the_dtls_listener_gets_no_answer = None    # the port takes plain RADIUS too
 
@@ -829,14 +824,14 @@ class RadiusDtlsListenerRealmAutoDetect(RadiusDtlsAutoDetect):
     """"tls auto-detect = yes" in the realm also on a "tls = yes" UDP listener: plain RADIUS works there too."""
 
     LISTEN = {"dtls": "protocol = UDP tls = yes"}
-    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes tls min version = TLSv1.2\n"
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = yes\n"
 
 
 class RadiusDtlsRealmAutoDetectOff(RadiusOverDtls):
     """"tls auto-detect = no" in the realm on a "tls = auto" UDP listener: the listener takes DTLS only."""
 
     LISTEN = {"dtls": "protocol = UDP tls = auto"}
-    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = no tls min version = TLSv1.2\n"
+    BODY = RadiusOverDtls.BODY + "\ttls auto-detect = no\n"
 
 
 class RadiusOverDtlsPsk(TlsTestCase):
@@ -845,7 +840,7 @@ class RadiusOverDtlsPsk(TlsTestCase):
     UDP = True
     LISTEN = {"dtls": "protocol = UDP tls = yes tls psk = yes", "auto": "protocol = UDP tls = auto tls psk = yes"}
     CIPHER = "PSK-AES128-GCM-SHA256"
-    BODY = PSK + DEVICES + RADSEC + '\ttls ciphers = "%s"\ntls min version = TLSv1.2\n' % CIPHER
+    BODY = PSK + DEVICES + RADSEC + '\ttls ciphers = "%s"\n' % CIPHER
     CLIENTS = {}
 
     @classmethod
