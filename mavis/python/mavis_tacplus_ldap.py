@@ -269,39 +269,50 @@ def user_bind(dn, password):
 	return user_conn.rebind(user=dn, password=password)
 
 # A helper function for resolving nested groupOfNames groups: ################
+# Breadth first: each group comes at its shallowest depth, so the depth limit does not depend on the search order.
 def expand_groupOfNames(g):
 	H = { }
-	def expand_groupOfNames_sub(m, depth):
-		if ldap_nested_group_depth is not None and ldap_nested_group_depth <= depth:
-			return [ ]
-		if ((not m in H) and ((m is g) or memberof_regex.match(m))):
-			if not m is g:
-				H[m] = True
+	# depth 1: the groups of the user, as in the memberOf walk
+	level, depth = [g], 0
+	while level and (ldap_nested_group_depth is None or depth < ldap_nested_group_depth):
+		depth += 1
+		found = [ ]
+		for m in level:
 			conn.search(search_base = LDAP_BASE_GROUP,
 				search_filter = LDAP_FILTER_GROUP.format(m),
 				search_scope=LDAP_SCOPE_GROUP, attributes = ['dn'])
 			for e in conn.entries:
-				expand_groupOfNames_sub(e.entry_dn, depth + 1)
-	expand_groupOfNames_sub(g, 0)
+				if not e.entry_dn in H and memberof_regex.match(e.entry_dn):
+					H[e.entry_dn] = True
+					found.append(e.entry_dn)
+		level = found
 	return H.keys()
 
 # A helper function for resolving nested memberOf groups: ####################
+# Breadth first, as expand_groupOfNames().
 def expand_memberof(g):
 	H = { }
-	def expand_memberof_sub(m, depth):
-		if ldap_nested_group_depth is not None and ldap_nested_group_depth <= depth:
-			return [ ]
-		if not m in H and memberof_regex.match(m):
-			if memberof_filter is None or memberof_filter.match(m):
-				H[m] = True
-				conn.search(search_base = m, search_filter = '(objectclass=*)',
-					search_scope=ldap3.BASE, attributes = ['memberOf'])
-				for e in conn.entries:
-					for m in e.memberOf:
-						expand_memberof_sub(m, depth + 1)
-	for m in g:
-		if memberof_regex.match(m):
-			expand_memberof_sub(m, 0)
+	level, depth = list(g), 0
+	while level and (ldap_nested_group_depth is None or depth < ldap_nested_group_depth):
+		depth += 1
+		# a dict: each parent once, in the order of the answers
+		found = { }
+		for m in level:
+			if not m in H and memberof_regex.match(m):
+				if memberof_filter is None or memberof_filter.match(m):
+					H[m] = True
+					# the parents of the last level are beyond the limit
+					if ldap_nested_group_depth is None or depth < ldap_nested_group_depth:
+						conn.search(search_base = m, search_filter = '(objectclass=*)',
+							search_scope=ldap3.BASE, attributes = ['memberOf'])
+						for e in conn.entries:
+							for p in e.memberOf:
+								# queue only what the next level takes
+								if p in H or p in found:
+									continue
+								if memberof_regex.match(p) and (memberof_filter is None or memberof_filter.match(p)):
+									found[p] = True
+		level = list(found)
 	return H.keys()
 
 

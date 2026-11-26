@@ -963,6 +963,15 @@ member: cn=xylophone,ou=groups,$base
             r = c.ascii_login("alice", "alicepw")
         self.assertEqual((r.status_name, r.server_msg), ("PASS", "netadmins only\n"), r)
 
+    def test_nested_group_depth(self):
+        """LDAP_NESTED_GROUP_DEPTH=1 gives the groups of the user, 2 also the groups of these groups."""
+        for depth, motd in (("0", ""), ("1", "netadmins only\n"), ("2", "netadmins in staff\n")):
+            with self.subTest(depth=depth):
+                _, d = self.start(LDAP_NESTED_GROUP_DEPTH=depth)
+                with d.connect() as c:
+                    r = c.ascii_login("alice", "alicepw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+
     def test_password_change(self):
         """An empty password at an ASCII login starts the password change dialog ("login backend = mavis chpass")."""
         _, d = self.start()
@@ -1729,10 +1738,6 @@ class LdapPython(LdapTests, DaemonTestCase):
     def test_filter_characters_in_a_group_dn(self):
         pass
 
-    @unittest.skip("the groupOfNames walk of the Python back-end gives no groups for LDAP_NESTED_GROUP_DEPTH=1")
-    def test_group_depth(self):
-        pass
-
     @unittest.skip("without the root DSE the Python back-end does not use the generic server type")
     def test_no_root_dse(self):
         pass
@@ -1747,6 +1752,43 @@ class LdapPython(LdapTests, DaemonTestCase):
         if not tls and not starttls_default:
             kwargs.setdefault("LDAP_SKIP_STARTTLS", "1")
         return super().start(ldif, policy, tls, **kwargs)
+
+    # the memberOf walk of the Python back-end reaches each group at its shallowest depth too
+    test_memberof_depth_order = LdapMt.test_memberof_depth_order
+
+    def test_memberof_depth_limit_searches(self):
+        """memberOf: the walk gives the groups of the last level it may give, but does not search their parents.
+
+        Depth 1: nora is in l3, l3 is in zz. Depth 2: nora is in cyc-a, cyc-a in cyc-b, cyc-b in zz.
+        """
+        for depth, chain, motd in (("1", ("l3", "zz"), "l3\n"), ("2", ("cyc-a", "cyc-b", "zz"), "cycle\n")):
+            ldif = person("nora", f"objectClass: extensibleObject\nmemberOf: cn={chain[0]},ou=groups,{BASE}\n")
+            for name, parent in zip(chain, chain[1:] + (None,)):
+                ldif += f"\ndn: cn={name},ou=groups,{BASE}\nobjectClass: groupOfNames\nobjectClass: extensibleObject\n"
+                ldif += f"cn: {name}\nmember: cn=nobody,{BASE}\n"
+                ldif += f"memberOf: cn={parent},ou=groups,{BASE}\n" if parent else ""
+            with self.subTest(depth=depth):
+                slapd, d = self.start(ldif=ldif, LDAP_NESTED_GROUP_DEPTH=depth)
+                with d.connect() as c:
+                    r = c.ascii_login("nora", "norapw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", motd), r)
+                with open(slapd.log, errors="replace") as f:
+                    log = f.read()
+                bases = [n for n in chain if re.search(rf'SRCH base="cn={n},ou=groups,{BASE}" scope=0 ', log, re.I)]
+                self.assertEqual(bases, list(chain[:int(depth) - 1]))
+
+    def test_group_depth_overlapping_paths(self):
+        """Depth 2, una is in ga and gb, ga is in gb, gb is in l3: l3 is two levels from una, in both search orders."""
+        groups = {"ga": "uid=una,ou=people,{base}", "gb": "uid=una,ou=people,{base}\nmember: cn=ga,ou=groups,{base}",
+                  "l3": "cn=gb,ou=groups,{base}"}
+        for order in (("ga", "gb", "l3"), ("gb", "ga", "l3")):
+            ldif = person("una") + "".join(f"\ndn: cn={g},ou=groups,{BASE}\nobjectClass: groupOfNames\ncn: {g}\n"
+                                           f"member: {groups[g].format(base=BASE)}\n" for g in order)
+            with self.subTest(order=order):
+                _, d = self.start(ldif=ldif, LDAP_NESTED_GROUP_DEPTH="2")
+                with d.connect() as c:
+                    r = c.ascii_login("una", "unapw")
+                self.assertEqual((r.status_name, r.server_msg), ("PASS", "l3\n"), r)
 
     def capture_stderr(self, name):
         """The next start() runs the back-end through a script that writes its stderr to the file name.
