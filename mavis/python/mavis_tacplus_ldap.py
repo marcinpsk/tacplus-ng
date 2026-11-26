@@ -97,7 +97,7 @@ LDAP_MEMBEROF_FILTER
 	Default: unset
 
 LDAP_TACMEMBER
-	LDAP attribute to use for group membership (fallback only).
+	LDAP attribute with more group names of the user, for TACMEMBER.
 	Default: "tacMember"
 
 LDAP_TACMEMBER_MAP_OU
@@ -464,12 +464,10 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 
 		TACMEMBER = [];
 
-		if L == None:
-			if len(entry[LDAP_TACMEMBER]) > 0:
-				TACMEMBER.extend(entry[LDAP_TACMEMBER])
-		else:
+		if L is not None:
 			D.set_memberof("\"" + "\",\"".join(L) + "\"")
 			TACMEMBER.extend([memberof_regex.sub(r'\1', l) for l in L])
+		TACMEMBER.extend(entry[LDAP_TACMEMBER])
 
 		if LDAP_TACMEMBER_MAP_OU != None:
 			for ou in entry.entry_dn.split(','):
