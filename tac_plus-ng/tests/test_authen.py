@@ -32,7 +32,7 @@ import re
 import subprocess
 import unittest
 
-from tactest import DaemonError, DaemonTestCase, config, features, tacacs
+from tactest import DaemonError, DaemonTestCase, config, features, needs_loopback_net, tacacs
 from tactest.daemon import READY_TIMEOUT, parse_only
 from tactest.detect import sanitizer_reports
 
@@ -176,6 +176,7 @@ class MaxAttempts(DaemonTestCase):
 """)
         self.assert_two_attempts(lambda: self.connect(daemon=d), "alice", "alicepw")
 
+    @needs_loopback_net
     def test_realm_max_attempts(self):
         d = self.start_daemon("""
 	realm lab {
@@ -193,6 +194,7 @@ class MaxAttempts(DaemonTestCase):
         self.assert_two_attempts(lambda: self.connect(daemon=d, source="127.0.0.5"), "carol", "carolpw")
 
 
+@needs_loopback_net
 class SingleConnection(DaemonTestCase):
     """Several sessions on one connection (RFC 8907 4.3), here from the single-connection device."""
 
@@ -317,6 +319,7 @@ class Type6(DaemonTestCase):
     def test_type6_enable_with_the_encrypted_text_fails(self):
         self.assertEqual(self.connect().enable(ENABLEPW_6, user="alice").status_name, "FAIL")
 
+    @needs_loopback_net
     def test_type6_device_key(self):
         self.assertTrue(self.connect(source="127.0.0.6", key="naskey").pap("alice", "alicepw").ok)
 

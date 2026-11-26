@@ -46,7 +46,7 @@ import time
 import unittest
 from unittest import mock
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, prefix
+from tactest import LINUX, SOURCE, DaemonTestCase, Stub, config, detect, features, needs_loopback_net, prefix
 from tactest.daemon import alive as daemon_alive, parse_only, sanitizer_env, sanitizers
 
 BACKEND = """
@@ -179,7 +179,7 @@ CISCO_VENDOR = 9
 VENDOR_SPECIFIC = 26
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class DaclAnsweredAtOnce(DaemonTestCase):
     """A DACL from a MAVIS module that answers at once, without a back-end round trip (tacinfo_cache).
 
@@ -383,7 +383,6 @@ GROUP_POLICY = BACKEND + "".join("\tgroup %s { }\n" % g for g in GROUPS) + """
 """ % GROUPS[-1]
 
 
-@unittest.skipUnless("pcre2" in features(), "the script uses a PCRE")
 class ManyGroups(DaemonTestCase):
     CONFIG = Stub.module(childs=(1, 1), script=APPEND_GROUP) + GROUP_POLICY
 
@@ -527,6 +526,7 @@ ENABLEPW_6 = r"JGRZhS_TGAab^`ZXC]XKadGG]ihdiNAAB"
 
 
 @unittest.skipUnless("openssl" in features(), "type 6 needs a build with OpenSSL")
+@needs_loopback_net
 class Type6HostProfile(DaemonTestCase):
     """The type6-key of a MAVIS host profile decrypts the type 6 values of that profile, also the earlier ones."""
 

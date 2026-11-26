@@ -12,7 +12,7 @@ import os
 import struct
 import unittest
 
-from tactest import LINUX, SOURCE, DaemonTestCase, Stub, features, radius, tacacs, tls
+from tactest import SOURCE, DaemonTestCase, Stub, features, needs_loopback_net, radius, tacacs, tls
 
 DICTIONARY = os.path.join(SOURCE, "tac_plus-ng", "sample", "radius-dict.cfg")
 RADIUS_SECRET = "radsecret"
@@ -172,8 +172,7 @@ class RadiusConditions(DaemonTestCase):
         self.assertEqual(set(self.holds([dns])) & {"dns", "not-dns", "dns-regex"}, {"not-dns", "dns-regex"})
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
-@unittest.skipUnless("pcre2" in features(), "rewrite profiles need PCRE2")
+@needs_loopback_net
 class Rewrite(DaemonTestCase):
     """The rewrite profile of a device script changes the user name before the daemon looks up the user to log in.
 
@@ -258,7 +257,7 @@ REALM_RULESET = """
 """
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class ScriptOrder(DaemonTestCase):
     """script-order (bottom-up by default, or top-down) and "skip parent-script" for profiles, devices, realms.
 
@@ -612,7 +611,7 @@ class ScriptFlow(DaemonTestCase):
         self.assertEqual(command("shutdown"), "FAIL")
 
 
-@unittest.skipUnless(LINUX, "127.0.0.0/8 local addresses")
+@needs_loopback_net
 class PermitIfAuthenticated(DaemonTestCase):
     """permit if-authenticated = yes: authorization of a user the daemon doesn't know, not authenticated by it."""
 
@@ -643,7 +642,6 @@ class PermitIfAuthenticated(DaemonTestCase):
         self.assertEqual(self.unknown_user("127.0.0.1", self.AUTHEN_METH_LOCAL), "FAIL")
 
 
-@unittest.skipUnless("pcre2" in features(), "the script out uses a PCRE")
 class MavisAttributes(FlagTestCase):
     """memberof and identity-source on the MAVIS answer of a user.
 
