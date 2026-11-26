@@ -316,6 +316,12 @@ def translate_ldap_error(conn):
 	return "Permission denied (" + message.replace("\n", "") + ")."
 
 
+# An LDAP exception in a request: ERROR, and the next request opens a new connection, with StartTLS
+def backend_error(D, e):
+	print(e, file=sys.stderr)
+	conn.strategy.close()
+	D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+
 LDAP_SERVER_TYPE=None
 try_once = True
 
@@ -373,148 +379,145 @@ Please set the LDAP_USER and LDAP_PASSWD environment variables.', file=sys.stder
 		# a bind per request: a closed connection gives ERROR here, and the next request opens a new one
 		try:
 			bound = ldap_bind(conn)
-		except ldap3.core.exceptions.LDAPException as e:
-			print(e, file=sys.stderr)
-			# the next request opens a new connection, with StartTLS
-			conn.strategy.close()
-			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
+		except (ldap3.core.exceptions.LDAPException, OSError) as e:
+			backend_error(D, e)
 			continue
 		if not bound:
 			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "LDAP bind failure.")
 			continue
 
-	conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE,
-		search_filter=LDAP_FILTER.format(escape_filter_chars(D.user)),
-		attributes=["memberOf", "shadowExpire", "uidNumber", "gidNumber",
-			"loginShell", "homeDirectory", "sshPublicKey", "krbPasswordExpiration",
-			LDAP_TACMEMBER])
-	if len(conn.entries) == 0:
-		D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
-		continue
-	elif len(conn.entries) != 1:
-		D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "User name not unique.")
-		continue
+	# a search or a password change that fails is a backend error, not the end of the back-end
+	try:
+		conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE,
+			search_filter=LDAP_FILTER.format(escape_filter_chars(D.user)),
+			attributes=["memberOf", "shadowExpire", "uidNumber", "gidNumber",
+				"loginShell", "homeDirectory", "sshPublicKey", "krbPasswordExpiration",
+				LDAP_TACMEMBER])
+		if len(conn.entries) == 0:
+			D.write(MAVIS_DOWN, AV_V_RESULT_NOTFOUND, None)
+			continue
+		elif len(conn.entries) != 1:
+			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "User name not unique.")
+			continue
 
-	entry = conn.entries[0]
+		entry = conn.entries[0]
 
-	user_msg = None
-	if D.is_tacplus_authc:
-		if LDAP_SERVER_TYPE == "generic":
-			expiry = None
-			if len (entry.shadowExpire) > 0:
-				if int(entry.shadowExpire[0]) > -1:
-					expiry = int(entry.shadowExpire[0]) * 86400
-			else:
-				if len (entry.krbPasswordExpiration) > 0:
-					r = re.compile(r'^(\d\d\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z$')
-					m = r.search(entry.krbPasswordExpiration[0])
-					if len(m.groups()) == 6:
-						t = (int (m.group(1)), int(m.group(2)), int(m.group(3)),
-							int(m.group(4)), int(m.group(5)), int(m.group(6)),
-							0, 0, 0)
-						expiry = int(calendar.timegm(t))
-			if expiry is not None:
-				if expiry < time.time():
-					user_msg = "Password has expired."
-					if D.get_caller_cap_chpw and has_extension_password_modify is not None:
-						D.password_mustchange(True)
-					else:
-						D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, user_msg)
-						continue
+		user_msg = None
+		if D.is_tacplus_authc:
+			if LDAP_SERVER_TYPE == "generic":
+				expiry = None
+				if len (entry.shadowExpire) > 0:
+					if int(entry.shadowExpire[0]) > -1:
+						expiry = int(entry.shadowExpire[0]) * 86400
 				else:
-					D.set_expiry(expiry)
+					if len (entry.krbPasswordExpiration) > 0:
+						r = re.compile(r'^(\d\d\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z$')
+						m = r.search(entry.krbPasswordExpiration[0])
+						if len(m.groups()) == 6:
+							t = (int (m.group(1)), int(m.group(2)), int(m.group(3)),
+								int(m.group(4)), int(m.group(5)), int(m.group(6)),
+								0, 0, 0)
+							expiry = int(calendar.timegm(t))
+				if expiry is not None:
+					if expiry < time.time():
+						user_msg = "Password has expired."
+						if D.get_caller_cap_chpw and has_extension_password_modify is not None:
+							D.password_mustchange(True)
+						else:
+							D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, user_msg)
+							continue
+					else:
+						D.set_expiry(expiry)
 		# before the group walk: a wrong password is a FAIL also if a group search fails
-		try:
 			bound = user_bind(entry.entry_dn, D.password)
-		except (ldap3.core.exceptions.LDAPException, OSError):
-			D.write(MAVIS_FINAL, AV_V_RESULT_ERROR, "No answer from LDAP backend.")
-			continue
-		chpw_conn = user_conn
-		if not bound:
-			if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
-				and user_conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
-				and re.search(r"DSID-.*, data (532|773)[, ]", user_conn.result["message"])):
-				D.password_mustchange(True)
-				user_msg = translate_ldap_error(user_conn)
-				# the failed bind left user_conn anonymous (RFC 4511 4.2.1), and AD refuses the change there
-				chpw_conn = conn
-			else:
-				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(user_conn))
+			chpw_conn = user_conn
+			if not bound:
+				if (LDAP_SERVER_TYPE == "microsoft" and D.get_caller_cap_chpw()
+					and user_conn.result["result"] == ldap3.core.results.RESULT_INVALID_CREDENTIALS
+					and re.search(r"DSID-.*, data (532|773)[, ]", user_conn.result["message"])):
+					D.password_mustchange(True)
+					user_msg = translate_ldap_error(user_conn)
+					# the failed bind left user_conn anonymous (RFC 4511 4.2.1), and AD refuses the change there
+					chpw_conn = conn
+				else:
+					D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(user_conn))
+					continue
+
+		D.set_dn(entry.entry_dn)
+
+		if len(entry.uidNumber) > 0:
+			D.set_uid(entry.uidNumber[0])
+		if len(entry.loginShell) > 0:
+			D.set_shell(entry.loginShell[0])
+		if len(entry.homeDirectory) > 0:
+			D.set_home(entry.homeDirectory[0])
+
+		L = None
+		if len(entry.memberOf) > 0:
+			if LDAP_SKIP_MEMBEROF is None or LDAP_SKIP_MEMBEROF == "1":
+				L = expand_memberof(entry.memberOf)
+			if LDAP_SKIP_GROUPOFNAMES is None:
+				LDAP_SKIP_GROUPOFNAMES = "1"
+		else:
+			if LDAP_SKIP_GROUPOFNAMES is None or LDAP_SKIP_GROUPOFNAMES == "1":
+				L = expand_groupOfNames(entry.entry_dn)
+
+		TACMEMBER = [];
+
+		if L == None:
+			if len(entry[LDAP_TACMEMBER]) > 0:
+				TACMEMBER.extend(entry[LDAP_TACMEMBER])
+		else:
+			D.set_memberof("\"" + "\",\"".join(L) + "\"")
+			TACMEMBER.extend([memberof_regex.sub(r'\1', l) for l in L])
+
+		if LDAP_TACMEMBER_MAP_OU != None:
+			for ou in entry.entry_dn.split(','):
+				r = ou_regex.match(ou)
+				if r:
+					TACMEMBER.append(r.group(1))
+
+		if len(entry.gidNumber) > 0:
+			D.set_gid(entry.gidNumber[0])
+		if len(entry.gidNumber) > 0 and (LDAP_SKIP_POSIXGROUP is None or LDAP_SKIP_POSIXGROUP == "0"):
+			conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
+				search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(entry.gidNumber[0]),
+				attributes=["cn"])
+			if len(conn.entries) == 1:
+				TACMEMBER.extend(conn.entries[0].cn)
+			conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
+				search_filter='(&(objectclass=posixGroup)(memberUid={}))'.format(escape_filter_chars(D.user)),
+				attributes=["cn"])
+			for e in conn.entries:
+				TACMEMBER.extend(e.cn)
+
+		if len(TACMEMBER) > 0:
+			D.set_tacmember("\"" + "\",\"".join(TACMEMBER) + "\"")
+
+		if len(entry.sshPublicKey) > 0:
+			D.set_sshpubkey("\"" + "\",\"".join(entry.sshPublicKey) + "\"")
+
+		# the password change comes last: a failed group search leaves the old password
+		if D.is_tacplus_chpw:
+			if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
+				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
 				continue
+			if ((LDAP_SERVER_TYPE == "microsoft"
+					and not chpw_conn.extend.microsoft.modify_password(
+					entry.entry_dn, D.password_new, D.password))
+				or  (LDAP_SERVER_TYPE == "generic"
+					and not chpw_conn.extend.standard.modify_password (
+					entry.entry_dn, D.password, D.password_new))):
+				D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(chpw_conn))
+				continue
+			user_msg = "Password change was successful."
+			D.password_mustchange(False)
 
-	D.set_dn(entry.entry_dn)
+		if D.is_tacplus_authc:
+			D.remember_password(False)
 
-	if len(entry.uidNumber) > 0:
-		D.set_uid(entry.uidNumber[0])
-	if len(entry.loginShell) > 0:
-		D.set_shell(entry.loginShell[0])
-	if len(entry.homeDirectory) > 0:
-		D.set_home(entry.homeDirectory[0])
-
-	L = None
-	if len(entry.memberOf) > 0:
-		if LDAP_SKIP_MEMBEROF is None or LDAP_SKIP_MEMBEROF == "1":
-			L = expand_memberof(entry.memberOf)
-		if LDAP_SKIP_GROUPOFNAMES is None:
-			LDAP_SKIP_GROUPOFNAMES = "1"
-	else:
-		if LDAP_SKIP_GROUPOFNAMES is None or LDAP_SKIP_GROUPOFNAMES == "1":
-			L = expand_groupOfNames(entry.entry_dn)
-
-	TACMEMBER = [];
-
-	if L == None:
-		if len(entry[LDAP_TACMEMBER]) > 0:
-			TACMEMBER.extend(entry[LDAP_TACMEMBER])
-	else:
-		D.set_memberof("\"" + "\",\"".join(L) + "\"")
-		TACMEMBER.extend([memberof_regex.sub(r'\1', l) for l in L])
-
-	if LDAP_TACMEMBER_MAP_OU != None:
-		for ou in entry.entry_dn.split(','):
-			r = ou_regex.match(ou)
-			if r:
-				TACMEMBER.append(r.group(1))
-
-	if len(entry.gidNumber) > 0:
-		D.set_gid(entry.gidNumber[0])
-	if len(entry.gidNumber) > 0 and (LDAP_SKIP_POSIXGROUP is None or LDAP_SKIP_POSIXGROUP == "0"):
-		conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
-			search_filter='(&(objectclass=posixGroup)(gidNumber={}))'.format(entry.gidNumber[0]),
-			attributes=["cn"])
-		if len(conn.entries) == 1:
-			TACMEMBER.extend(conn.entries[0].cn)
-		conn.search(search_base=LDAP_BASE, search_scope=LDAP_SCOPE_POSIXGROUP,
-			search_filter='(&(objectclass=posixGroup)(memberUid={}))'.format(escape_filter_chars(D.user)),
-			attributes=["cn"])
-		for e in conn.entries:
-			TACMEMBER.extend(e.cn)
-
-	if len(TACMEMBER) > 0:
-		D.set_tacmember("\"" + "\",\"".join(TACMEMBER) + "\"")
-
-	if len(entry.sshPublicKey) > 0:
-		D.set_sshpubkey("\"" + "\",\"".join(entry.sshPublicKey) + "\"")
-
-	# the password change comes last: a failed group search leaves the old password
-	if D.is_tacplus_chpw:
-		if LDAP_SERVER_TYPE != "microsoft" and has_extension_password_modify is None:
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, "Password change is unsupported.")
-			continue
-		if ((LDAP_SERVER_TYPE == "microsoft"
-				and not chpw_conn.extend.microsoft.modify_password(
-				entry.entry_dn, D.password_new, D.password))
-			or  (LDAP_SERVER_TYPE == "generic"
-				and not chpw_conn.extend.standard.modify_password (
-				entry.entry_dn, D.password, D.password_new))):
-			D.write(MAVIS_FINAL, AV_V_RESULT_FAIL, translate_ldap_error(chpw_conn))
-			continue
-		user_msg = "Password change was successful."
-		D.password_mustchange(False)
-
-	if D.is_tacplus_authc:
-		D.remember_password(False)
-
-	D.write(MAVIS_FINAL, AV_V_RESULT_OK, user_msg)
+		D.write(MAVIS_FINAL, AV_V_RESULT_OK, user_msg)
+	except (ldap3.core.exceptions.LDAPException, OSError) as e:
+		backend_error(D, e)
 
 # End
