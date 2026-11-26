@@ -3971,6 +3971,19 @@ aaa authorization commands 15 cmdlist</screen>
             </row>
             <row>
               <entry>
+                <literal>TLS_OPTIONS</literal>
+              </entry>
+              <entry>
+                <para>Extra options for <literal>ldaps://</literal> URLs and StartTLS, in Perl hash syntax. See <ulink url="https://metacpan.org/pod/Net::LDAP">the Net::LDAP documentation</ulink> for details.</para>
+                <para>The back-end checks the certificate of the server (<literal>verify =&gt; 'require'</literal>), unless <literal>TLS_OPTIONS</literal> sets <literal>verify</literal>. The certificate must chain to a CA of the system, and it must match the host name or IP address of the URL, or the name that <literal>sslserver =&gt; 'name'</literal> sets. <literal>cafile =&gt; '/path/to/ca.pem'</literal> or <literal>capath =&gt; '/path/to/dir'</literal> uses these CAs instead of the CAs of the system. A failed check is a backend error, and the back-end writes the reason to stderr.</para>
+                <para><literal>verify =&gt; 'none'</literal> turns the check off. This changes the behavior: older versions did not check the certificate. A site with a server certificate that the back-end cannot check must name its CA with <literal>cafile</literal> or <literal>capath</literal>, or keep the old behavior with <literal>setenv TLS_OPTIONS = "verify =&gt; 'none'"</literal>.</para>
+                <para>A value that is not a list of Perl key-value pairs, or a <literal>verify</literal> other than <literal>none</literal>, <literal>optional</literal> or <literal>require</literal>, stops the back-end with a message on stderr.</para>
+                <para>Default: unset (the certificate of the server is checked)</para>
+                <para>Example: <literal>"cafile =&gt; '/path/to/ca.pem'"</literal></para>
+              </entry>
+            </row>
+            <row>
+              <entry>
                 <literal>FLAG_CHPW</literal>
               </entry>
               <entry>

@@ -4891,8 +4891,10 @@ int async 1
                 <literal>TLS_OPTIONS</literal>
               </entry>
               <entry>
-                <para>Extra options for use with LDAPS or start_tls, in Perl hash syntax. See <ulink url="https://metacpan.org/pod/Net::LDAP">the Net::LDLAP documentation</ulink> for details.</para>
-                <para>The back-end checks the certificate of the server (<literal>verify =&gt; 'require'</literal>), unless <literal>TLS_OPTIONS</literal> sets <literal>verify</literal>. Name the CA of the server with <literal>cafile</literal>. <literal>verify =&gt; 'none'</literal> turns the check off.</para>
+                <para>Extra options for use with LDAPS or start_tls, in Perl hash syntax. See <ulink url="https://metacpan.org/pod/Net::LDAP">the Net::LDAP documentation</ulink> for details.</para>
+                <para>The back-end checks the certificate of the server on <literal>ldaps://</literal> URLs and after StartTLS (<literal>verify =&gt; 'require'</literal>), unless <literal>TLS_OPTIONS</literal> sets <literal>verify</literal>. The certificate must chain to a CA of the system, and it must match the host name or IP address of the URL, or the name that <literal>sslserver =&gt; 'name'</literal> sets. <literal>cafile =&gt; '/path/to/ca.pem'</literal> (a file) or <literal>capath =&gt; '/path/to/dir'</literal> (a directory with hashed names, see <literal>openssl rehash</literal>) uses these CAs instead of the CAs of the system. A failed check is a backend error, and the back-end writes the reason to stderr, e.g. <literal>certificate verify failed</literal> or <literal>hostname verification failed</literal>.</para>
+                <para><literal>verify =&gt; 'none'</literal> turns the check off.</para>
+                <para>A value that is not a list of Perl key-value pairs, or a <literal>verify</literal> other than <literal>none</literal>, <literal>optional</literal> or <literal>require</literal>, stops the back-end with a message on stderr. The message does not show the values.</para>
                 <para>Default: unset (the certificate of the server is checked)</para>
                 <para>Example: <literal>"sslversion =&gt; 'tlsv1_3'"</literal>, <literal>"cafile =&gt; '/path/to/ca.pem'"</literal></para>
               </entry>
@@ -4918,6 +4920,7 @@ int async 1
           </tbody>
         </tgroup>
       </informaltable>
+      <para><literal>mavis_ldap_authonly.pl</literal> only authenticates users. It reads <literal>LDAP_HOSTS</literal>, <literal>LDAP_BASE</literal>, <literal>LDAP_SCOPE</literal>, <literal>LDAP_FILTER</literal>, <literal>LDAP_USER</literal>, <literal>LDAP_PASSWD</literal>, <literal>FLAG_CACHE_CONNECTION</literal>, <literal>LDAP_SKIP_STARTTLS</literal> and <literal>TLS_OPTIONS</literal> as above, but its default <literal>LDAP_FILTER</literal> is <literal>"(uid=%s)"</literal>. It also checks the certificate of the server by default. This changes the behavior: older versions of <literal>mavis_ldap_authonly.pl</literal> did not check the certificate and had no <literal>TLS_OPTIONS</literal>. A site with a server certificate that the back-end cannot check must name its CA, e.g. <literal>setenv TLS_OPTIONS = "cafile =&gt; '/path/to/ca.pem'"</literal>, or keep the old behavior with <literal>setenv TLS_OPTIONS = "verify =&gt; 'none'"</literal>.</para>
       <section>
         <title>Multi-threaded LDAP Backend</title>
         <para><literal>ldapmavis-mt</literal> (<emphasis>mt</emphasis> stands for <emphasis>multi-threaded</emphasis>) basically evaluates the same envrionment variables as <literal>mavis_tacplus-ng_ldap.pl</literal>. It needs to be be invoked via the <literal>external-mt</literal> module and is suited for long-lasting authentication session, e.g. due to multi-factor authentication.</para>
