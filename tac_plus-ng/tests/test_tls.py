@@ -545,8 +545,8 @@ class Psk(TlsTestCase):
     BODY = PSK + policy(("psknas", "pskclear", "localhost"))
     CLIENTS = {}
 
-    def connect_psk(self, identity="psknas", key=PSK_KEY, timeout=10.0):
-        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), identity, key, timeout=timeout)
+    def connect_psk(self, identity="psknas", key=PSK_KEY, timeout=10.0, **kw):
+        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), identity, key, timeout=timeout, **kw)
         return self.connect(sock=sock, timeout=timeout)
 
     def test_pap_over_psk(self):
@@ -575,6 +575,28 @@ class Psk(TlsTestCase):
     def test_unknown_identity_is_refused(self):
         self.assertRefused(lambda: self.connect_psk(identity="nosuchnas"))
 
+    def test_suite_not_in_cipher_suites_is_refused(self):
+        self.assertRefused(lambda: self.connect_psk(cipher="TLS_CHACHA20_POLY1305_SHA256"))
+
+
+class PskDefaultCipherSuites(TlsTestCase):
+    """TLS 1.3 PSK with the default "tls cipher-suites": the session takes the suite that the handshake selects."""
+
+    LISTEN = Psk.LISTEN
+    BODY = PSK.replace("\ttls cipher-suites = TLS_AES_128_GCM_SHA256\n", "") + policy(("psknas", "localhost"))
+    CLIENTS = {}
+
+    def pap_with_cipher(self, cipher):
+        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), "psknas", PSK_KEY, timeout=10.0,
+                             cipher=cipher)
+        return self.connect(sock=sock, timeout=10.0).pap("alice", "alicepw").ok
+
+    def test_last_suite_of_the_list(self):
+        """psk_find_session_cb() took the first suite of the list, not the one of the handshake."""
+        self.assertTrue(self.pap_with_cipher("TLS_AES_128_GCM_SHA256"))
+
+    def test_second_suite_of_the_list(self):
+        self.assertTrue(self.pap_with_cipher("TLS_CHACHA20_POLY1305_SHA256"))
 
 
 RADSEC = """

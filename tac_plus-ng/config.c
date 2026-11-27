@@ -203,84 +203,6 @@ static unsigned int psk_server_cb(SSL * ssl, const char *identity, unsigned char
 static SSL_CTX *ssl_init(struct realm *, int dtls, int use_tls_psk);
 #endif
 
-#if defined(WITH_SSL) && !defined(OPENSSL_IS_BORINGSSL)
-static int tls13_cipher_name_matches(const SSL_CIPHER *cipher, char *name, size_t name_len)
-{
-    const char *cipher_name = SSL_CIPHER_get_name(cipher);
-
-    return cipher_name && strlen(cipher_name) == name_len && !strncmp(cipher_name, name, name_len);
-}
-
-static int tls13_cipher_version_matches(const SSL_CIPHER *cipher)
-{
-    const char *version = SSL_CIPHER_get_version(cipher);
-
-    return version && !strcmp(version, "TLSv1.3");
-}
-
-static const SSL_CIPHER *tls13_cipher_find_by_name(const STACK_OF(SSL_CIPHER) *ciphers, char *name, size_t name_len)
-{
-    if (!ciphers)
-	return NULL;
-
-    for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
-	const SSL_CIPHER *cipher = sk_SSL_CIPHER_value(ciphers, i);
-	if (cipher && tls13_cipher_version_matches(cipher) && tls13_cipher_name_matches(cipher, name, name_len))
-	    return cipher;
-    }
-
-    return NULL;
-}
-
-static const SSL_CIPHER *tls13_cipher_find_first(const STACK_OF(SSL_CIPHER) *ciphers)
-{
-    if (!ciphers)
-	return NULL;
-
-    for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
-	const SSL_CIPHER *cipher = sk_SSL_CIPHER_value(ciphers, i);
-	if (cipher && tls13_cipher_version_matches(cipher))
-	    return cipher;
-    }
-
-    return NULL;
-}
-
-static const SSL_CIPHER *tls13_psk_cipher_find(SSL *ssl, char *cipher_suites)
-{
-    const STACK_OF(SSL_CIPHER) * ciphers = SSL_get_client_ciphers(ssl);
-    if (!ciphers)
-	ciphers = SSL_get_ciphers(ssl);
-
-    if (!cipher_suites)
-	return tls13_cipher_find_first(ciphers);
-
-    char *cipher_list = cipher_suites;
-    char cipher_list_buf[strlen(cipher_list) + 1];
-    memcpy(cipher_list_buf, cipher_list, strlen(cipher_list) + 1);
-
-    for (char *candidate = cipher_list_buf; candidate;) {
-	char *next = strchr(candidate, ':');
-	if (next)
-	    *next++ = 0;
-	size_t candidate_len = strlen(candidate);
-	if (!candidate_len) {
-	    report(NULL, LOG_ERR, ~0, "%s:%d empty TLS 1.3 cipher suite entry", __FILE__, __LINE__);
-	    return NULL;
-	}
-
-	const SSL_CIPHER *cipher = tls13_cipher_find_by_name(ciphers, candidate, candidate_len);
-	if (cipher)
-	    return cipher;
-
-	report(NULL, LOG_ERR, ~0, "%s:%d TLS 1.3 cipher suite '%s' was not offered or enabled", __FILE__, __LINE__, candidate);
-	return NULL;
-	candidate = next;
-    }
-    return NULL;
-}
-#endif
-
 static char *confdir_strdup(char *in)
 {
 #define S "$CONFDIR/"
@@ -6578,7 +6500,7 @@ static int psk_find_session_cb(SSL *ssl, const unsigned char *identity, size_t i
 
     // FIXME Use PSK session file?
 
-    const SSL_CIPHER *cipher = tls13_psk_cipher_find(ssl, ctx->realm->tls_cipher_suites);
+    const SSL_CIPHER *cipher = SSL_get_pending_cipher(ssl);	// from the ClientHello and "tls cipher-suites"
 
     if (!cipher) {
 	report(NULL, LOG_ERR, ~0, "%s:%d TLS 1.3 PSK cipher suite selection failed", __FILE__, __LINE__);
