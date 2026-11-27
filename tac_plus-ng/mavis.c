@@ -471,8 +471,8 @@ static void mavis_lookup_final(tac_session *session, av_ctx *avc)
 		salt[20] = 0;
 		hash = crypt(pass, salt);
 
-		if (!hash || *hash == '*') {
-		    // ... but fall back to MD5 if that doesn't work (libxcrypt gives a failure token, not NULL).
+		if (!hash || strncmp(hash, "$6$", 3)) {
+		    // ... but fall back to MD5 if that doesn't work (libxcrypt gives a failure token, other systems a DES hash).
 		    salt[1] = '1';
 		    salt[11] = '$';
 		    salt[12] = 0;
