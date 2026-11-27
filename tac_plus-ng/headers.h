@@ -830,6 +830,7 @@ struct context_logfile {
 
 void cleanup(struct context *, int);
 void reject_conn(struct context *ctx, const char *hint, const char *func, int line);
+int tls_min_version(struct context *);
 
 /* acct.c */
 void accounting(tac_session *, tac_pak_hdr *);

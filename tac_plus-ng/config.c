@@ -6739,7 +6739,7 @@ static void ssl_apply_options(SSL_CTX *ctx, struct realm *r, int use_tls_psk)
 	}
 }
 
-static int sni_cb(SSL *ssl, int *al __attribute__((unused)), void *arg __attribute__((unused)))
+static int sni_cb(SSL *ssl, int *al, void *arg __attribute__((unused)))
 {
     struct context *ctx = SSL_get_app_data(ssl);
     const char *servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
@@ -6750,6 +6750,11 @@ static int sni_cb(SSL *ssl, int *al __attribute__((unused)), void *arg __attribu
 
     if (r != ctx->realm) {
 	ctx->realm = r;
+	if (!ctx->udp && SSL_version(ssl) < tls_min_version(ctx)) {	// OpenSSL selects the version before this callback
+	    ctx->hint = "TLS version";
+	    *al = SSL_AD_PROTOCOL_VERSION;
+	    return SSL_TLSEXT_ERR_ALERT_FATAL;
+	}
 	while (r && !r->tls)
 	    r = r->parent;
 	if (!r || !r->tls || !SSL_set_SSL_CTX(ssl, r->tls))

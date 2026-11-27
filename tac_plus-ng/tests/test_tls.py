@@ -767,6 +767,38 @@ class TlsMinVersionBugCompatibility(TlsMinVersionCase):
         self.assertTrue(c.pap("alice", "alicepw").ok)
 
 
+class TlsMinVersionSni(TlsTestCase):
+    """The realm that the SNI selects sets the lowest TLS version, not the realm of the listener."""
+
+    LISTEN = {"radius-tls": "tls = yes aaa.protocol = radius.tls"}
+    BODY = TLS_REALM + """
+	tls sni required = yes
+	tls sni = localhost
+	realm strict {
+		tls sni = strict.tactest
+		tls min version = TLSv1.3
+	}
+""" + DEVICES + RADSEC
+
+    def radsec(self, sni, maximum):
+        ctx = self.context("certnas", minimum=TLS12, maximum=maximum)
+        ctx.check_hostname = False
+        raw = socket.create_connection((self.daemon.address, self.daemon.ports["radius-tls"]), timeout=5.0)
+        self.addCleanup(raw.close)
+        sock = ctx.wrap_socket(raw, server_hostname=sni)
+        return self.radius("radsec", tcp=True, listener="radius-tls", sock=sock).access_request("alice", "alicepw").code_name
+
+    def test_tls12_for_the_realm_of_the_listener(self):
+        self.assertEqual(self.radsec("localhost", TLS12), "Access-Accept")
+
+    def test_tls13_for_the_realm_of_the_sni(self):
+        self.assertEqual(self.radsec("strict.tactest", ssl.TLSVersion.TLSv1_3), "Access-Accept")
+
+    def test_tls12_for_the_realm_of_the_sni_is_refused(self):
+        """sni_cb() changed the realm, but the minimum stayed the one of the realm of the listener."""
+        self.assertProtocolVersionRefused(lambda: self.radsec("strict.tactest", TLS12))
+
+
 class RadiusOverDtls(TlsTestCase):
     """RADIUS over DTLS (RFC 7360) on a "protocol = UDP tls = yes" listener, through "openssl s_client -dtls1_2"."""
 
