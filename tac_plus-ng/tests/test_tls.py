@@ -1041,7 +1041,9 @@ class Pkcs11(TlsTestCase):
         code, out = cls.parse_text("\ttls pkcs11-pin = 1234\n")
         if code:
             cls.ca.remove()
-            raise unittest.SkipTest("no OpenSSL provider pkcs11: %s" % out.strip())
+            if code == os.EX_CONFIG:    # OSSL_PROVIDER_load() failed; the daemon prints nothing for it
+                raise unittest.SkipTest("no OpenSSL provider pkcs11")
+            raise AssertionError("the PKCS#11 probe exited with %d:\n%s" % (code, out))
 
     @classmethod
     def parse_text(cls, body):
