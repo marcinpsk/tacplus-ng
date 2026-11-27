@@ -115,7 +115,7 @@ class CA:
                                     "keyUsage = critical, keyCertSign, cRLSign\n"
                                     "subjectKeyIdentifier = hash\n")
 
-    def issue(self, name, subject, server=False, san=None, days=2, expired=False, aki="keyid"):
+    def issue(self, name, subject, server=False, san=None, days=2, expired=False, aki="keyid", issuer=None, ca=False):
         """(certificate, key) for subject, e.g. "/CN=nas1"; san e.g. "DNS:nas1, IP:127.0.0.5".
 
         expired: valid for one day in 2020. "openssl x509 -req" takes no
@@ -126,16 +126,24 @@ class CA:
         serial without a keyIdentifier, None no AuthorityKeyIdentifier at
         all. The last two are how a certificate reaches the daemon with
         aki->keyid == NULL or no AKI.
+
+        issuer: (certificate, key) of an intermediate CA to sign with
+        instead of the root. ca: make an intermediate CA certificate.
         """
         key, csr, crt = self.path(name + ".key"), self.path(name + ".csr"), self.path(name + ".crt")
         self._newkey(key)
         _openssl("req", "-batch", "-new", "-key", key, "-subj", subject, "-config", self._config(), "-out", csr)
-        ext = "basicConstraints = CA:false\nkeyUsage = critical, digitalSignature\n"
-        ext += "extendedKeyUsage = %s\n" % ("serverAuth" if server else "clientAuth")
+        if ca:
+            ext = "basicConstraints = critical, CA:true\nkeyUsage = critical, keyCertSign, cRLSign\n"
+            ext += "subjectKeyIdentifier = hash\n"
+        else:
+            ext = "basicConstraints = CA:false\nkeyUsage = critical, digitalSignature\n"
+            ext += "extendedKeyUsage = %s\n" % ("serverAuth" if server else "clientAuth")
         ext += "authorityKeyIdentifier = %s\n" % (aki if aki else "none")
         if san:
             ext += "subjectAltName = %s\n" % san
         ext = self._ext(name + ".ext", ext)
+        ca_cert, ca_key = issuer or (self.cert, self.key)
         if expired:
             db = self.path(name + ".db")
             os.mkdir(db)
@@ -145,11 +153,11 @@ class CA:
             cnf = self._ext(name + ".ca.cnf", "[ca]\ndefault_ca = c\n[c]\ndatabase = %s/index.txt\nserial = %s/serial\n"
                                               "new_certs_dir = %s\ndefault_md = sha256\npolicy = p\n"
                                               "unique_subject = no\n[p]\ncommonName = optional\n" % (db, db, db))
-            _openssl("ca", "-batch", "-notext", "-config", cnf, "-cert", self.cert, "-keyfile", self.key,
+            _openssl("ca", "-batch", "-notext", "-config", cnf, "-cert", ca_cert, "-keyfile", ca_key,
                      "-in", csr, "-extfile", ext, "-startdate", "20200101000000Z", "-enddate", "20200102000000Z",
                      "-out", crt)
         else:
-            _openssl("x509", "-req", "-in", csr, "-CA", self.cert, "-CAkey", self.key, "-CAcreateserial",
+            _openssl("x509", "-req", "-in", csr, "-CA", ca_cert, "-CAkey", ca_key, "-CAcreateserial",
                      "-days", str(days), "-sha256", "-extfile", ext, "-out", crt)
         return crt, key
 

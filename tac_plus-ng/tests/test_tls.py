@@ -1045,6 +1045,33 @@ class PeerCertValidationOfChildRealm(TlsTestCase):
         self.assertRefused(lambda: self.connect_tls(client=None, listener="child-any", source="127.0.0.10"))
 
 
+class PeerCertIntermediateCa(TlsTestCase):
+    """"tls ca-file" with only the intermediate CA that signed the client certificate, not the root."""
+
+    LISTEN = {"tls": "tls = yes"}
+    BODY = None
+    CLIENTS = {}
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        sub = cls.ca.issue("sub", "/O=tactest/CN=tactest sub", ca=True)
+        cls.certs["certnas"] = cls.ca.issue("certnas", "/CN=certnas.tactest", issuer=sub)
+        cls.sub = sub[0]
+
+    def pap(self, validation):
+        body = '\ttls cert-file = "%s"\n\ttls key-file = "%s"\n\ttls ca-file = "%s"\n' % (self.ca.server + (self.sub,))
+        body += "\ttls.peer.cert.validation = %s\n" % validation + POLICY
+        return self.connect_tls(daemon=self.start_daemon(body, listen=self.LISTEN)).pap("alice", "alicepw").ok
+
+    def test_validation_cert(self):
+        """X509_verify_cert_post_handshake() did not take X509_V_FLAG_PARTIAL_CHAIN of the handshake."""
+        self.assertTrue(self.pap("cert"))
+
+    def test_validation_any(self):
+        self.assertTrue(self.pap("any"))
+
+
 PKCS11_PARSE = "id = spawnd { listen = { port = 4949 } }\nid = tac_plus-ng {\n%s}\n"
 
 

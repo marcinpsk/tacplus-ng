@@ -1532,6 +1532,7 @@ static int X509_verify_cert_post_handshake(SSL *ssl, mem_t *mem, char **reason)
     }
 
     X509_STORE_CTX_set_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx(), ssl);
+    X509_VERIFY_PARAM_set1(X509_STORE_CTX_get0_param(ctx), SSL_get0_param(ssl));	// as in the handshake, not from the store
 
     int res = X509_verify_cert(ctx);
     if (res != 1) {
