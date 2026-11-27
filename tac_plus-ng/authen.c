@@ -75,14 +75,6 @@
 
 #if defined(WITH_CRYPTO)
 #include "misc/mysha1.h"
-#if OPENSSL_VERSION_NUMBER < 0x30000000
-#else
-#include <openssl/types.h>
-#include <openssl/evp.h>
-#include <openssl/provider.h>
-OSSL_PROVIDER *ossl_legacy = NULL;
-OSSL_PROVIDER *ossl_default = NULL;
-#endif
 #endif
 
 #define DEBAUTHC session, LOG_DEBUG, DEBUG_AUTHEN_FLAG
@@ -393,6 +385,46 @@ static int verify_cisco_asa_md5(const char *username, const char *password, cons
     *h = 0;
 
     return strcmp(hash64, hash_in);
+}
+
+static inline void cleanse_string(char *s)
+{
+#ifdef WITH_SSL
+    OPENSSL_cleanse(s, strlen(s));
+#else
+    for (volatile char *v = s; *v; v++)
+	*v = 0;
+#endif
+}
+
+/* A failed password is kept as a salted hash, for "retry with identical password". */
+static void password_bad_digest(const u_char *salt, size_t salt_len, const char *password, u_char *digest)
+{
+#ifdef WITH_SSL
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    unsigned int len = 0;
+    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
+    EVP_DigestUpdate(ctx, salt, salt_len);
+    EVP_DigestUpdate(ctx, password, strlen(password));
+    EVP_DigestFinal_ex(ctx, digest, &len);
+    EVP_MD_CTX_free(ctx);
+#else
+    struct iovec iov[2] = {
+	{.iov_base = (void *) salt,.iov_len = salt_len },
+	{.iov_base = (void *) password,.iov_len = strlen(password) },
+    };
+    memset(digest, 0, 32);
+    md5v(digest, 16, iov, 2);
+#endif
+}
+
+static int password_is_bad(tac_session *session, const char *password)
+{
+    u_char digest[sizeof(session->password_bad_hash)];
+    if (!session->password_bad)
+	return 0;
+    password_bad_digest(session->password_bad_salt, sizeof(session->password_bad_salt), password, digest);
+    return !memcmp(digest, session->password_bad_hash, sizeof(digest));
 }
 
 static enum token compare_pwdat(struct pwdat *a, char *username, char *b, enum hint_enum *hint)
@@ -827,14 +859,17 @@ static enum token check_access(tac_session *session, struct pwdat *pwdat, char *
 {
     enum token res = S_deny;
     enum token host_res = author_eval_host(session, session->ctx->host, session->ctx->realm->script_host_parent_first);
+    int compared = 0;
 
     if (session->mavisauth_res != S_unknown) {
 	res = session->mavisauth_res;
 	session->mavisauth_res = S_unknown;
 	if (res == S_error && session->ctx->host->authfallback == TRISTATE_YES)
 	    res = S_deny;
-    } else if (pwdat)
+    } else if (pwdat) {
 	res = compare_pwdat(pwdat, session->username.txt, passwd, hint);
+	compared = 1;
+    }
 
     switch (res) {
     case S_permit:
@@ -857,19 +892,28 @@ static enum token check_access(tac_session *session, struct pwdat *pwdat, char *
 	    *hint = hint_denied_by_acl;
 	}
 
-	session->password_bad = NULL;
+	session->password_bad = BISTATE_NO;
 	user_expiry_check(&res, session->user, hint);
 
 	if (resp && res != S_permit) {
 	    if (session->ctx->host->reject_banner)
 		*resp = eval_log_format(session, session->ctx, NULL, session->ctx->host->reject_banner, io_now.tv_sec, NULL);
-	    session->password_bad = session->password;
+	    if (passwd) {
+		for (size_t i = 0; i < sizeof(session->password_bad_salt); i++)
+		    session->password_bad_salt[i] = (u_char) arc4random_uniform(256);
+		password_bad_digest(session->password_bad_salt, sizeof(session->password_bad_salt), passwd, session->password_bad_hash);
+		session->password_bad = BISTATE_YES;
+	    }
 	    session->password = NULL;
 	}
     }
 
     if (resp && !*resp)
 	*resp = session->user_msg.txt;
+
+    // erase only after the ruleset, as its "password" conditions read the password
+    if (compared && passwd)
+	cleanse_string(passwd);
 
     return res;
 }
@@ -1257,8 +1301,11 @@ static void do_enable(tac_session *session)
 	    return;
 	}
 
-	if (session->enable)	// no user name: an ASA "enable password" hash has none in it
+	if (session->enable) {	// no user name: an ASA "enable password" hash has none in it
 	    res = compare_pwdat(session->enable, NULL, session->authen_data->msg, &hint);
+	    if (session->authen_data->msg)
+		cleanse_string(session->authen_data->msg);
+	}
     }
 
     char *resp = (res == S_permit) ? NULL : eval_log_format(session, session->ctx, NULL, li_permission_denied, io_now.tv_sec, NULL);
@@ -1328,7 +1375,7 @@ static void do_ascii_login(tac_session *session)
     if (query_mavis_auth_login(session, do_ascii_login, pw_ix))
 	return;
 
-    if (session->user && session->password && session->password_bad && !strcmp(session->password, session->password_bad)) {
+    if (session->user && session->password && password_is_bad(session, session->password)) {
 	/* Safeguard against router-initiated login retries. Stops
 	 * backend from prematurely locking the user's account,
 	 * eventually.
@@ -2146,10 +2193,6 @@ void authen_init(void)
     li_password_expires = parse_log_format_inline("\"${PASSWORD_EXPIRES}\n\"", __FILE__, __LINE__);
     li_denied_by_acl = parse_log_format_inline("\"${DENIED_BY_ACL}\"", __FILE__, __LINE__);
     li_backend_failed = parse_log_format_inline("\"${BACKEND_FAILED}\"", __FILE__, __LINE__);
-#if OPENSSL_VERSION_NUMBER >= 0x30000000
-    ossl_legacy = OSSL_PROVIDER_load(NULL, "legacy");
-    ossl_default = OSSL_PROVIDER_load(NULL, "default");
-#endif
 }
 
 char *check_client_bug_invalid_remote_address(tac_session *session)

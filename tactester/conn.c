@@ -85,6 +85,8 @@ void conn_free(struct conn *conn)
 	free(conn->peer_cafile);
     if (conn->tls_cipher_suites)
 	free(conn->tls_cipher_suites);
+    if (conn->tls_ciphers)
+	free(conn->tls_ciphers);
     if (conn->tls_psk_dhe_groups)
 	free(conn->tls_psk_dhe_groups);
     if (conn->readbuf)
@@ -187,6 +189,13 @@ void conn_set_tls_peer_ca(struct conn *conn, char *peer_cafile)
     if (conn->peer_cafile)
 	free(conn->peer_cafile);
     conn->peer_cafile = strdup(peer_cafile);
+}
+
+void conn_set_tls_ciphers(struct conn *conn, char *ciphers)
+{
+    if (conn->tls_ciphers)
+	free(conn->tls_ciphers);
+    conn->tls_ciphers = strdup(ciphers);
 }
 
 void conn_set_tls_cipher_suites(struct conn *conn, char *cipher_suites)
@@ -407,9 +416,35 @@ static int psk_use_session_cb(SSL *ssl, const EVP_MD *md __attribute__((unused))
 
 static int conn_apply_tls_options(struct conn *conn)
 {
-    if (conn->tls_cipher_suites) {
+    // the defaults are not kept in conn: conn_free() frees what the setters gave
+    const char *ciphers = conn->tls_ciphers ? conn->tls_ciphers : // TLS1_2, OpenSSL names
+        "ECDHE-ECDSA-AES256-GCM-SHA384" //
+        ":ECDHE-RSA-AES256-GCM-SHA384" //
+        ":ECDHE-ECDSA-AES256-SHA384" //
+        ":ECDHE-RSA-AES256-SHA384" //
+        ":ECDHE-ECDSA-CHACHA20-POLY1305" //
+        ":ECDHE-RSA-CHACHA20-POLY1305" //
+        ":ECDHE-ECDSA-AES128-GCM-SHA256" //
+        ":ECDHE-RSA-AES128-GCM-SHA256" //
+        ":ECDHE-ECDSA-AES128-SHA256" //
+        ":ECDHE-RSA-AES128-SHA256";
+    const char *cipher_suites = conn->tls_cipher_suites ? conn->tls_cipher_suites : // TLS1_3
+        "TLS_AES_256_GCM_SHA384" //
+        ":TLS_CHACHA20_POLY1305_SHA256" //
+        ":TLS_AES_128_GCM_SHA256";
+
+    if (ciphers) {
 #ifdef TLS1_3_VERSION
-	if (!SSL_CTX_set_ciphersuites(conn->ctx, conn->tls_cipher_suites))
+	if (!SSL_CTX_set_cipher_list(conn->ctx, ciphers))
+	    return -1;
+#else
+	return -1;
+#endif
+    }
+
+    if (cipher_suites) {
+#ifdef TLS1_3_VERSION
+	if (!SSL_CTX_set_ciphersuites(conn->ctx, cipher_suites))
 	    return -1;
 #else
 	return -1;
@@ -483,9 +518,11 @@ int conn_connect(struct conn *conn)
 
     SSL_CTX_set_options(conn->ctx, SSL_OP_ALL);
     SSL_CTX_set_options(conn->ctx, SSL_OP_NO_QUERY_MTU);
+    X509_VERIFY_PARAM_set_flags(SSL_CTX_get0_param(conn->ctx), X509_V_FLAG_PARTIAL_CHAIN);
 
     if (conn_apply_tls_options(conn)) {
 	SSL_CTX_free(conn->ctx);
+	conn->ctx = NULL;
 	return -1;
     }
 
@@ -493,11 +530,13 @@ int conn_connect(struct conn *conn)
 #if OPENSSL_VERSION_NUMBER < 0x30000000
 	if (SSL_CTX_load_verify_locations(conn->ctx, conn->peer_cafile, NULL) != 1) {
 	    SSL_CTX_free(conn->ctx);
+	    conn->ctx = NULL;
 	    return -1;
 	}
 #else
 	if (SSL_CTX_load_verify_file(conn->ctx, conn->peer_cafile) != 1) {
 	    SSL_CTX_free(conn->ctx);
+	    conn->ctx = NULL;
 	    return -1;
 	}
 #endif
@@ -516,16 +555,19 @@ int conn_connect(struct conn *conn)
     if (conn->client_cert) {
 	if (!SSL_CTX_use_certificate_chain_file(conn->ctx, conn->client_cert)) {
 	    SSL_CTX_free(conn->ctx);
+	    conn->ctx = NULL;
 	    return -1;
 	}
 
 	if (!SSL_CTX_use_PrivateKey_file(conn->ctx, conn->client_key ? conn->client_key : conn->client_cert, SSL_FILETYPE_PEM)) {
 	    SSL_CTX_free(conn->ctx);
+	    conn->ctx = NULL;
 	    return -1;
 	}
 
 	if (!SSL_CTX_check_private_key(conn->ctx)) {
 	    SSL_CTX_free(conn->ctx);
+	    conn->ctx = NULL;
 	    return -1;
 	}
     }
@@ -542,6 +584,7 @@ int conn_connect(struct conn *conn)
     conn->ssl = SSL_new(conn->ctx);
     if (!conn->ssl) {
 	SSL_CTX_free(conn->ctx);
+	conn->ctx = NULL;
 	return -1;
     }
     SSL_set_mtu(conn->ssl, 1456);

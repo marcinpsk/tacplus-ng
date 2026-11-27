@@ -258,6 +258,29 @@ class MaxRounds(DaemonTestCase):
         self.assertTrue(c.closed(), "the connection stays open")
 
 
+class RulesetPasswordCondition(DaemonTestCase):
+    """A "password" condition of the ruleset sees the password of the login, for every type of stored password.
+
+    compare_pwdat() erased the password after the comparison, and
+    check_access() evaluates the ruleset after it: the condition saw an
+    empty password, and the permit rule did not match.
+    """
+
+    CONFIG = """
+	user clear { password login = clear goodpw }
+	user sha512 { password login = crypt $$6$$tactestsalt$$qVHnXCein9TuHEM0Vb3Ei/LO2KF8TLDa/HMmKbdftWlgtYb34NLA12CVeCco0mJ0XCp2Fkqkt5jZJvAQx2urq0 }
+	user md5 { password login = crypt $$1$$tactest$$HvVmMA2wbY9iaIOXGcQi01 }
+	ruleset {
+		rule { script { if (password == goodpw) permit deny } }
+	}
+"""
+
+    def test_password_condition_after_the_comparison(self):
+        for user in ("clear", "sha512", "md5"):
+            with self.subTest(user=user):
+                self.assertEqual(self.connect().ascii_login(user, "goodpw").status_name, "PASS")
+
+
 # "alicepw", "enablepw" and "naskey", encrypted with the type6-key "demo"
 ALICEPW_6 = r"g^^PIBaDAZOHeG^fIU^eY_RUPZ`^]X"
 ENABLEPW_6 = r"JGRZhS_TGAab^`ZXC]XKadGG]ihdiNAAB"

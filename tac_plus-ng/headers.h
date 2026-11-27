@@ -205,6 +205,7 @@ struct tac_host {
 	BISTATE(skip_parent_script);
 #ifdef WITH_SSL
 	TRISTATE(tls_peer_cert_san_validation);
+	TRISTATE(tls_peer_cert_cn_validation);
 #endif
     } __attribute__((__packed__));
     tac_host *parent;
@@ -365,6 +366,7 @@ struct config {
     tac_realm *default_realm;	/* actually the one called "default" */
     uint32_t syslog_filter;
     int dscp;
+    int pkcs11;
 };
 
 struct tac_acl {
@@ -485,11 +487,17 @@ struct realm {
     char *tls_cert;
     char *tls_key;
     char *tls_pass;
-    char *tls_ciphers;
-    char *tls_cipher_suites;
+    char *tls_ciphers;		// TLS1_2
+    char *tls_cipher_suites;	// TLS1_3
     char *tls_psk_dhe_groups;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000
+    char *tls_pkcs11_pin;
+    char *tls_pkcs11_cert_uri;
+    char *tls_pkcs11_key_uri;
+#endif
     char *tls_cafile;
     int tls_verify_depth;
+    int tls_min_version;
     struct sni_list *sni_list;
     u_char *alpn_vec;
     size_t alpn_vec_len;
@@ -617,7 +625,8 @@ struct tac_session {
     u_int priv_lvl;		/* requested privilege level */
     char *password;
     char *password_new;
-    char *password_bad;
+    u_char password_bad_salt[16];	/* a failed password: salted hash, not the clear text */
+    u_char password_bad_hash[32];
     char *password_prompt;	/* set by "message PASSWORD" in a rule */
     char *challenge;
     char *motd;
@@ -667,6 +676,7 @@ struct tac_session {
 	BISTATE(revmap_pending);
 	BISTATE(revmap_timedout);
 	BISTATE(enable_getuser);
+	BISTATE(password_bad);
 	BISTATE(password_bad_again);
 	BISTATE(passwd_mustchange);
 	BISTATE(passwd_changeable);

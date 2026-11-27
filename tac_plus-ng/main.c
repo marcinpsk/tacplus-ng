@@ -59,6 +59,14 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/err.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000
+#include <openssl/types.h>
+#include <openssl/evp.h>
+#include <openssl/provider.h>
+OSSL_PROVIDER *ossl_legacy = NULL;
+OSSL_PROVIDER *ossl_default = NULL;
+OSSL_PROVIDER *ossl_pkcs11 = NULL;
+#endif
 #endif
 
 static const char rcsid[] __attribute__((used)) = "$Id$";
@@ -94,7 +102,8 @@ static void cleanup_spawnd(struct context *ctx __attribute__((unused)), int cur 
 
 static int compare_session(const void *a, const void *b)
 {
-    return ((tac_session *) a)->session_id - ((tac_session *) b)->session_id;
+    int x = ((tac_session *) a)->session_id, y = ((tac_session *) b)->session_id;
+    return (x > y) - (x < y);
 }
 
 static u_int context_id = 0;
@@ -360,10 +369,23 @@ int main(int argc, char **argv, char **envp)
     cfg_init();
 
     buffer_setsize(0x8000, 0x10);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000
+    ossl_legacy = OSSL_PROVIDER_load(NULL, "legacy");
+    ossl_default = OSSL_PROVIDER_load(NULL, "default");
+#endif
 
     if (!common_data.io)
 	common_data.io = io_init();
     cfg_read_config(common_data.conffile, parse_decls, common_data.id ? common_data.id : common_data.progname);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000
+    if (config.pkcs11) {
+	ossl_pkcs11 = OSSL_PROVIDER_load(NULL, "pkcs11");
+	if (!ossl_pkcs11) {
+	    report(NULL, LOG_ERR, ~0, "%s %d: OSSL_PROVIDER_load() failed to load pkcs11", __func__, __LINE__);
+            tac_exit(EX_CONFIG);
+	}
+    }
+#endif
     complete_realm(config.default_realm);
 
     if (common_data.parse_only)
@@ -378,6 +400,7 @@ int main(int argc, char **argv, char **envp)
 	report(NULL, LOG_INFO, ~0, "Version " VERSION " initialized");
 
     umask(022);
+    srandom(time(NULL)); // seed random(), whether it's being used or not
 
     mavis_detach();
 
@@ -751,6 +774,7 @@ static void set_host_by_dn(struct context *ctx, char *in, int *m)
 	    tac_host *h = lookup_host(t, ctx->realm);
 	    if (h) {
 		ctx->host = h;
+	        report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Matching device: %s (%s:%d)", ctx->host->name.txt, __func__, __LINE__);
 		*m = c;
 		return;
 	    }
@@ -772,6 +796,7 @@ static void set_host_by_dn(struct context *ctx, char *in, int *m)
 	    tac_host *h = lookup_host(t, ctx->realm);
 	    if (h) {
 		ctx->host = h;
+	        report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Matching device: %s (%s:%d)", ctx->host->name.txt, __func__, __LINE__);
 		*m = c;
 		return;
 	    }
@@ -799,6 +824,7 @@ static void set_host_by_cn(struct context *ctx, char *t, int *m)
 	tac_host *h = lookup_host(t, ctx->realm);
 	if (h) {
 	    ctx->host = h;
+	    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Matching device: %s (%s:%d)", ctx->host->name.txt, __func__, __LINE__);
 	    *m = c;
 	    return;
 	}
@@ -815,8 +841,10 @@ static void set_host_by_psk_identity(struct context *ctx, char *t)
     char *at = strchr(t, '@');
     if (at) {
 	ctx->host = lookup_host(t, ctx->realm);
-	if (ctx->host)
+	if (ctx->host) {
+	    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Matching device: %s (%s:%d)", ctx->host->name.txt, __func__, __LINE__);
 	    return;
+	}
 	t = at + 1;
     }
     set_host_by_cn(ctx, t, NULL);
@@ -920,6 +948,8 @@ static void accept_control_tls(struct context *ctx, int cur)
 	return;
     }
     tac_host *by_address = ctx->host;	// before the PSK branch: "goto done" uses it
+    if (by_address)
+	report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Initial device: %s (%s:%d)", ctx->host->name.txt, __func__, __LINE__);
 
 #ifndef OPENSSL_NO_PSK
     if (ctx->tls_psk_identity.txt) {
@@ -1238,21 +1268,28 @@ static void accept_control_tls(struct context *ctx, int cur)
 				default:
 				    continue;
 				}
-				su_convert(&su, AF_INET);
+				su_convert(&su, AF_INET6);
 				struct in6_addr addr = { };
 				su_ptoh(&su, &addr);
-				if (by_address->tls_peer_cert_san_validation == TRISTATE_YES && memcmp(&addr, &ctx->device_addr, sizeof(addr)))
-				    continue;
-				radixtree_t *rxt = lookup_hosttree(ctx->realm);
-				if (rxt) {
-				    struct in6_addr agg_addr = addr;
-				    check_aggregate(ctx->realm, &agg_addr, S_device);
-				    tac_host *h = radix_lookup(rxt, &agg_addr, NULL);
-				    if (h) {
-					ctx->host = h;
-					prio = CERT_SAN_PRIO;
+				if (by_address->tls_peer_cert_san_validation == TRISTATE_YES) {
+				    if (memcmp(&addr, &ctx->device_addr, sizeof(addr))) {
+					report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Cert SAN IP address not validated.");
+					continue;
 				    }
-				}
+				    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Cert SAN IP address validated.");
+				    radixtree_t *rxt = lookup_hosttree(ctx->realm);
+				    if (rxt) {
+					struct in6_addr agg_addr = addr;
+					check_aggregate(ctx->realm, &agg_addr, S_device);
+					tac_host *h = radix_lookup(rxt, &agg_addr, NULL);
+					if (h) {
+					    ctx->host = h;
+					    prio = CERT_SAN_PRIO;
+					    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Matching device: %s (%s:%d)", ctx->host->name.txt, __func__, __LINE__);
+					}
+				    }
+				} else
+				    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Cert SAN IP address validation not enabled, skipped.");
 			    }
 #undef CERT_SAN_PRIO
 			    continue;
@@ -1287,7 +1324,30 @@ static void accept_control_tls(struct context *ctx, int cur)
 		if (!ctx->host)
 		    set_host_by_dn(ctx, (char *) ctx->tls_peer_cert_subject.txt, NULL);
 
-		// check for cn match:
+		// check for cn match
+		sockaddr_union su = { 0 };
+		if (!ctx->host && ctx->tls_peer_cn.txt && !su_pton(&su, ctx->tls_peer_cn.txt)) {
+		    su_convert(&su, AF_INET6);
+		    struct in6_addr addr = { };
+		    su_ptoh(&su, &addr);
+		    if (by_address->tls_peer_cert_cn_validation == TRISTATE_YES) {
+			if (!memcmp(&addr, &ctx->device_addr, sizeof(addr))) {
+			    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Cert CN IP address validated.");
+			    radixtree_t *rxt = lookup_hosttree(ctx->realm);
+			    if (rxt) {
+				struct in6_addr agg_addr = addr;
+				check_aggregate(ctx->realm, &agg_addr, S_device);
+				tac_host *h = radix_lookup(rxt, &agg_addr, NULL);
+				if (h) {
+				    ctx->host = h;
+				    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Matching device: %s", ctx->host->name.txt);
+				}
+			    }
+			} else
+			    report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Cert CN IP address not validated.");
+		    } else
+			report(NULL, LOG_DEBUG, DEBUG_PACKET_FLAG, "Cert CN IP address validation not enabled, skipped.");
+		}
 		if (!ctx->host)
 		    set_host_by_cn(ctx, ctx->tls_peer_cn.txt, NULL);
 	    }
@@ -1378,6 +1438,7 @@ void complete_host(tac_host *h)
 	HS(target_realm, NULL);
 #ifdef WITH_SSL
 	HS(tls_peer_cert_san_validation, TRISTATE_DUNNO);
+	HS(tls_peer_cert_cn_validation, TRISTATE_DUNNO);
 #ifndef OPENSSL_NO_PSK
 	HS(tls_psk_id, NULL);
 	HS(tls_psk_key, NULL);
@@ -1754,6 +1815,7 @@ static void accept_control_common(int s, struct scm_data_accept_ext *sd_ext, soc
 	    }
 	}
     }
+
     ctx->rad_acct = (sd_ext->sd.flags & SCM_FLAG_RADACCT) ? BISTATE_YES : BISTATE_NO;
     ctx->aaa_protocol = sd_ext->sd.aaa_protocol;
     ctx->sock = s;
@@ -1908,9 +1970,11 @@ static int dtls_ver_ok(u_int ver, u_char v)
 #define TLS_PEEK_LEN 6		// what accept_control_check_tls() reads of a record
 
 // 0x16 (handshake) or 0x17 (application data): a DTLS record of one of the versions, else 0
+// A ClientHello can have the DTLS 1.0 record version for any DTLS version (RFC 6347 4.1).
 static int dtls_record_type(u_int versions, u_char *buf, size_t len)
 {
-    if (len < TLS_PEEK_LEN || (buf[0] != 0x16 && buf[0] != 0x17) || buf[1] != 0xfe || !dtls_ver_ok(versions, buf[2]))
+    if (len < TLS_PEEK_LEN || (buf[0] != 0x16 && buf[0] != 0x17) || buf[1] != 0xfe
+	|| !(dtls_ver_ok(versions, buf[2]) || (buf[0] == 0x16 && buf[2] == (DTLS1_VERSION & 0xff))))
 	return 0;
     return buf[0];
 }
@@ -2081,6 +2145,18 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 	accept_control_check_tls_final(ctx);
 }
 
+// The lowest TLS version a TLS (not DTLS) connection may negotiate. "tls min version" of the realm,
+// else by the aaa.protocol of the listener: RADIUS over TLS (RFC 6614) allows TLS 1.2, TACACS+ over
+// TLS (RFC 9887) requires TLS 1.3, and so does a listener that doesn't say.
+static int tls_min_version(struct context *ctx)
+{
+    if (ctx->realm->tls_min_version > 0)
+	return ctx->realm->tls_min_version;
+    if (ctx->aaa_protocol == S_radius_tls || (ctx->host->bug_compatibility & CLIENT_BUG_BAD_TLS_VERSION))
+	return TLS1_2_VERSION;
+    return TLS1_3_VERSION;
+}
+
 static void accept_control_check_tls_final(struct context *ctx)
 {
     if (ctx->host && (ctx->use_tls || ctx->use_dtls)) {
@@ -2136,6 +2212,8 @@ static void accept_control_check_tls_final(struct context *ctx)
 		    versions >>= 8;
 		}
 		ver |= 0x0300;
+		if (ver < tls_min_version(ctx))
+		    ver = tls_min_version(ctx);
 	    }
 	    SSL_set_min_proto_version(ctx->tls, ver);
 	    SSL_set_fd(ctx->tls, ctx->sock);

@@ -230,6 +230,7 @@ maintainer			S_maintainer
 mask				S_mask
 mavis				S_mavis
 max				S_max
+min				S_min
 max-attempts			S_maxattempts
 max-rounds			S_maxrounds
 member				S_member
@@ -474,6 +475,7 @@ tls.peer.cert.issuer		S_tls_peer_cert_issuer
 tls.peer.cert.subject		S_tls_peer_cert_subject
 tls.peer.cert.san		S_tls_peer_cert_san
 tls.peer.cert.san.validation	S_tls_peer_cert_san_validation
+tls.peer.cert.cn.validation	S_tls_peer_cert_cn_validation
 tls.peer.cert.sha1		S_tls_peer_cert_sha1
 tls.peer.cert.sha256		S_tls_peer_cert_sha256
 tls.peer.cert.validation	S_tls_peer_cert_validation
@@ -639,4 +641,7 @@ hex				S_hex
 base64				S_base64
 more				S_more
 reuse-port			S_reuse_port
+pkcs11-pin			S_pkcs11_pin
+pkcs11-key-uri			S_pkcs11_key_uri
+pkcs11-cert-uri			S_pkcs11_cert_uri
 #

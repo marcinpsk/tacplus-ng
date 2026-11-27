@@ -81,7 +81,8 @@ static void cleanup_spawnd(struct context *ctx __attribute__((unused)), int cur 
 
 static int compare_session(const void *a, const void *b)
 {
-    return ((tac_session *) a)->session_id - ((tac_session *) b)->session_id;
+    int x = ((tac_session *) a)->session_id, y = ((tac_session *) b)->session_id;
+    return (x > y) - (x < y);
 }
 
 static u_int context_id = 0;

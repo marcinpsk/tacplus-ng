@@ -145,6 +145,34 @@ class BareExclmark(TacPlusTestCase):
                 self.assertIn("Expected '=', but got '%s'" % name, out)
 
 
+class SessionIdsFarApart(TacPlusTestCase):
+    """Sessions on one connection whose ids differ by more than 2^31: the session tree keeps them apart.
+
+    tac_plus keeps the session id in network byte order: on a little-endian host, these ids are 0x7fffffff and
+    0x80000001.
+    """
+
+    CONFIG = """
+	host = single {
+		address = 127.0.0.1/32
+		single-connection = yes
+	}
+	user = alice {
+		login = clear alicepw
+	}
+"""
+
+    def test_two_logins_in_parallel(self):
+        with self.connect() as c:
+            sessions = [c.session(session_id) for session_id in (0xFFFFFF7F, 0x01000080)]
+            for s in sessions:
+                self.assertEqual(s.start(authen_type=AUTHEN_TYPE_ASCII).status_name, "GETUSER")
+            for s in sessions:
+                self.assertEqual(s.cont(user_msg="alice").status_name, "GETPASS")
+            for s in sessions:
+                self.assertEqual(s.cont(user_msg="alicepw").status_name, "PASS")
+
+
 class SingleConnectionMayClose(TacPlusTestCase):
     """With single-connection may-close, the end of a session closes the connection; the context is freed once."""
 

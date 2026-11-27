@@ -239,6 +239,13 @@ static void parse_server(struct sym *sym, int skip)
 		    conn_set_tls_cipher_suites(conn, sym->buf);
 		sym_get(sym);
 		continue;
+	    case S_ciphers:
+		sym_get(sym);
+		parse(sym, S_equal);
+		if (!skip)
+		    conn_set_tls_ciphers(conn, sym->buf);
+		sym_get(sym);
+		continue;
 	    case S_psk:
 		sym_get(sym);
 		switch (sym->code) {

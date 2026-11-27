@@ -787,7 +787,7 @@ class TlsPskConditions(FlagTestCase):
 	}
 	device pskother {
 		tls psk id = pskother
-		tls psk key = clear demoDemo
+		tls psk key = clear demoDemoDemoDemo
 	}
 """ % PSK_KEY + USER + shell_profile(TLS_CONDITIONS + [
         ("psknas", "tls.psk.identity == psknas"),
@@ -810,7 +810,7 @@ class TlsPskConditions(FlagTestCase):
         self.assertEqual(names(r), ["aes128", "bits128", "psk-regex", "psknas"])
 
     def test_other_identity(self):
-        r = self.psk_holds("pskother", b"demoDemo".hex())
+        r = self.psk_holds("pskother", b"demoDemoDemoDemo".hex())
         self.assertTrue(r.ok, r)
         self.assertEqual(names(r), ["aes128", "bits128", "psk-regex"])
 

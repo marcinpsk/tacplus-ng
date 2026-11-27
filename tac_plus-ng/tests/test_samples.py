@@ -599,9 +599,9 @@ class TlsSample(TlsSampleCase):
         self.assertEqual((r.status_name, r.prompts), ("PASS", ["Welcome\nPassword: "]))
 
     def test_psk(self):
-        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), "psk-demo", "0123456789ab", timeout=10.0)
+        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), "psk-demo", "0123456789abcdef0123456789abcdef", timeout=10.0)
         self.assertEqual(self.connect(sock=sock, timeout=10.0).pap("demo", "demo").status_name, "PASS")
-        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), "psk-demo", "0123456789ac", timeout=10.0)
+        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), "psk-demo", "0123456789abcdef0123456789abcdee", timeout=10.0)
         with self.assertRaises(Closed):
             self.connect(sock=sock, timeout=10.0).pap("demo", "demo")
 

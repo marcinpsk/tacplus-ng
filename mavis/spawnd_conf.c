@@ -47,7 +47,7 @@ static void parse_acl(struct sym *sym)
     if (!acl_last || acl_last->negate != negate || acl_last->token != sc) {
 	while (*acl)
 	    acl = &(*acl)->next;
-	acl = calloc(1, sizeof(struct acl));
+	*acl = calloc(1, sizeof(struct acl));
 	if (!acl_start)
 	    acl_start = *acl;
 	acl_last = *acl;
@@ -193,10 +193,9 @@ static void parse_listen(struct sym *sym)
 	    case S_true:
 		ctx->tls_versions = (TLS1_2_VERSION & 0xff)
 		    | ((TLS1_3_VERSION & 0xff) << 8);
-		ctx->dtls_versions = (DTLS1_VERSION & 0xff)
-		    | ((DTLS1_2_VERSION & 0xff) << 16)
+		ctx->dtls_versions = (DTLS1_2_VERSION & 0xff)
 #ifdef DTLS1_3_VERSION
-		    | ((DTLS1_3_VERSION & 0xff) << 24)
+		    | ((DTLS1_3_VERSION & 0xff) << 8)
 #endif
 		    ;
 		sym_get(sym);

@@ -64,7 +64,7 @@ OBJ +=	h_esta.o h_mfmt.o h_mff.o mysendfile.o bug.o
 $(OBJ): headers.h ../mavis/mavis.h
 
 $(PROG)$(EXEC_EXT): $(OBJ)
-	$(CC) -o $@ $^ $(LIB)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIB)
 
 clean:
 	@rm -f *.o *.bak *~ $(PROG) core.[0-9]* core

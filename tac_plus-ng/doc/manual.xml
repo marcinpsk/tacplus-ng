@@ -2119,8 +2119,9 @@ mavis user filter = __internal__username_acl__ </screen>
             <para>You can choose whether to skip certificate validation (<literal>none</literal>), to check the fingerprint only (<literal>hash</literal>), to validate the full chain (<literal>cert</literal>) or to allow both of the latter (<literal>any</literal>, that's the default).</para>
           </listitem>
           <listitem>
+            <para><literal>tls.peer.cert.cn.validation = </literal>(<literal>yes</literal>|<literal>no</literal></para>
             <para><literal>tls.peer.cert.san.validation = </literal>(<literal>yes</literal>|<literal>no</literal></para>
-            <para>This option enables SAN IP validation. Defaults to <literal>no</literal>, but enabling it will skip device object selection based on the SAN IP if the latter doesn't equal the peer IP. Not sure whether there's a use case for this at all.</para>
+            <para>This options enable CN and SAN IP validation. Defaults to <literal>no</literal>, and enabling it will skip device object selection based on the SAN IP if the latter doesn't equal the device IP.</para>
           </listitem>
           <listitem>
             <para>
@@ -2151,13 +2152,13 @@ mavis user filter = __internal__username_acl__ </screen>
           <listitem>
             <para><literal>tls psk =</literal> ( <literal>yes</literal> | <literal>no</literal> )</para>
             <para>This enables PSK support at realm level, if supported by your OpenSSL version. Please note that PSK and cert-based authentication are mutually exclusive in OpenSSL, and a dedicated listener configuration with <literal>tls psk = yes</literal> in <emphasis role="bold">spawnd</emphasis> context might be required. Exception: For TLS1.3, <emphasis role="bold">tac_plus-ng</emphasis>will permit for PSK and certificate authentication on the same port by evaluating the initial ClientHello message.</para>
-            <para>PSK identity and key can be declared at device or realm level:</para>
+            <para>PSK identity and key can be declared at device or realm level. A PSK must have at least 128 bit (16 bytes), in every form of the key:</para>
             <screen xml:space="preserve">tls psk id = myid
-#tls psk key = clear demoDemo # plain text
-#tls psk key = 6 'FFM^eVF\gQS^ZeW`TYeaHeD^eKPMgXAAB' # type 6, requires master key
-#tls psk key = 7 2703130E0E725C555C # type 7
-#tls psk key = base64 'ZGVtb0RlbW9EZW1vCg==' # base64
-tls psk key = 0123456789abcdef # hex</screen>
+#tls psk key = clear demoDemoDemoDemo # plain text
+#tls psk key = 6 '_ifbOASUKMTdIGXHEXTBPDWF[`CeFOBY^GgMVcAbMQAAB' # type 6, here with "type6-key = demo"
+#tls psk key = 7 0202015604220A2C436A0C140A33170603 # type 7
+#tls psk key = base64 'ZGVtb0RlbW9EZW1vRGVtbw==' # base64
+tls psk key = 0123456789abcdef0123456789abcdef # hex</screen>
           </listitem>
           <listitem>
             <para><literal>tls psk key-exchange =</literal> ( <literal>dhe</literal> | <literal>auto</literal> | <literal>no-dhe</literal> )</para>
@@ -2171,6 +2172,13 @@ tls psk key = 0123456789abcdef # hex</screen>
               <emphasis>SNI</emphasis>
             </para>
             <para>This adds <emphasis>SNI</emphasis> to the server name list of the current realm. A TLS connection requesting <emphasis>SNI</emphasis> will automatically be mapped to that realm.</para>
+          </listitem>
+          <listitem>
+            <para>
+              <literal>tls min version =</literal>
+              <emphasis>version</emphasis>
+            </para>
+            <para>This sets the minimum TLS version, either <literal>TLSv1.3</literal> or <literal>TLSv1.2</literal>, for every TLS connection of the realm. Without it, the minimum depends on the <literal>aaa.protocol</literal> of the <literal>spawnd</literal> listener: <literal>TLSv1.2</literal> for <literal>radius.tls</literal> (RFC 6614), <literal>TLSv1.3</literal> for <literal>tacacs.tls</literal> (RFC 9887) and for a listener without <literal>aaa.protocol</literal>. A device with <literal>bug compatibility</literal> 128 gets <literal>TLSv1.2</literal> as well. DTLS is not affected.</para>
           </listitem>
         </itemizedlist>
         <para>Example:</para>

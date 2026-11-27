@@ -599,8 +599,8 @@ static void buf_add(struct sym *sym, char c)
     if (sym->pos >= (int) sizeof(sym->buf)) {
 	sym->buf[sizeof(sym->buf) - 1] = '\0';
 	parse_error(sym, "Line too long: sym=[%s%s%s] buf='%s%.*s%s'",
-		    common_data.font_red, codestring[sym->code].txt, common_data.font_plain, common_data.font_blue, sym->pos, sym->buf,
-		    common_data.font_plain);
+		    common_data.font_red, codestring[sym->code].txt, common_data.font_plain,
+		    common_data.font_blue, sym->pos, sym->buf, common_data.font_plain);
     }
     sym->buf[sym->pos++] = c;
 }
@@ -672,6 +672,13 @@ void sym_get(struct sym *sym)
 {
     if (sym->token_chain) {
 	struct token_list *token_list = sym->token_chain->list;
+	if (!token_list) { /* empty alias: pop the chain */
+	    struct token_chain *chain = sym->token_chain->next;
+	    free(sym->token_chain);
+	    sym->token_chain = chain;
+	    sym_get(sym);
+	    return;
+	}
 	strncpy(sym->buf, token_list->buf, sizeof(sym->buf));
 	sym->code = token_list->code;
 	report_cfg_error(LOG_DEBUG, DEBUG_PARSE_FLAG,
@@ -1135,35 +1142,44 @@ enum token keycode(char *keyword)
 
 int parse_int(struct sym *sym)
 {
-    int i;
-    char c;
-
-    int r = sscanf(sym->buf, "%d%c", &i, &c);
-    if (r == 2 && i == 0 && (c == 'x' || c == 'X'))
-	r = sscanf(sym->buf, "%x%c", &i, &c);
-    switch (r) {
-    case 2:
-	switch (c) {
-	default:
-	    goto bye;
-	case 'g':
-	case 'G':
-	    i <<= 10;
-	case 'm':
-	case 'M':
-	    i <<= 10;
-	case 'k':
-	case 'K':
-	    i <<= 10;
-	}
-    case 1:
-	sym_get(sym);
-	return i;
-    default:
-      bye:
+    char *s = sym->buf;
+    int negative = (*s == '-');
+    if (*s == '-' || *s == '+')
+	s++;
+    if (!isdigit((int) *s)) {
 	parse_error(sym, "expected an integer, but got '%s'", sym->buf);
 	return -1;
     }
+    int base = (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10;
+    char *end;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, base);
+    int shift = 0;
+    switch (*end) {
+    case 'g':
+    case 'G':
+	shift += 10;
+	/* FALLTHROUGH */
+    case 'm':
+    case 'M':
+	shift += 10;
+	/* FALLTHROUGH */
+    case 'k':
+    case 'K':
+	shift += 10;
+	end++;
+    }
+    if (*end)
+	parse_error(sym, "expected an integer, but got '%s'", sym->buf);
+    if (negative && shift)
+	parse_error(sym, "a negative integer takes no binary prefix");
+    unsigned long long max = negative ? (unsigned long long) INT_MAX + 1 : INT_MAX;
+    if (errno || v > (max >> shift))
+	parse_error(sym, "integer value too large");
+    sym_get(sym);
+    if (negative)
+	return v > INT_MAX ? INT_MIN : -(int) v;
+    return (int) (v << shift);
 }
 
 u_int parse_uint(struct sym *sym)

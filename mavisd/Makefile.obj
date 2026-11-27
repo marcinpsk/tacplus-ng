@@ -23,7 +23,7 @@ OBJS+=main.o conf.o signals.o
 $(OBJS): ../mavis/mavis.h headers.h
 
 $(PROG)$(EXEC_EXT): $(OBJS)
-	$(CC) -o $@ $^ $(LIB)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIB)
 
 clean:
 	@rm -f *.o *.so *.so *~ *.a core $(PROGS)

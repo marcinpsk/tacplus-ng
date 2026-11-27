@@ -34,6 +34,7 @@ struct conn {
     u_char *alpn;
     u_int alpn_len;
     char *peer_cafile;
+    char *tls_ciphers;
     char *tls_cipher_suites;
     char *tls_psk_dhe_groups;
     enum token tls_psk_key_exchange;
@@ -67,6 +68,7 @@ void conn_set_tls_alpn(struct conn *, char *alpn);
 void conn_set_tls_peer_cn(struct conn *, char *cn);
 void conn_set_tls_peer_san(struct conn *, char *san);
 void conn_set_tls_peer_ca(struct conn *, char *cafile);
+void conn_set_tls_ciphers(struct conn *, char *ciphers);
 void conn_set_tls_cipher_suites(struct conn *, char *cipher_suites);
 void conn_set_tls_psk_dhe_groups(struct conn *, char *groups);
 void conn_set_tls_psk_key_exchange(struct conn *, enum token mode);

@@ -38,6 +38,7 @@ NestedInclude is the exception to "no network": it starts a daemon to
 show that a configuration -P accepts is also the one that runs.
 """
 
+import base64
 import glob
 import os
 import re
@@ -264,6 +265,80 @@ class ErrorLine(unittest.TestCase):
     def test_unknown_keyword_with_crlf_line_ends(self):
         self.assert_error_line({"main.cfg": (self.HEAD + "\n\tbogus = 1\n}\n").replace("\n", "\r\n")},
                                "main.cfg", 4, "but got 'bogus'")
+
+
+class IntegerValues(unittest.TestCase):
+    """parse_int(): negative values are taken without a binary prefix; before, every one but -1 was "too large"."""
+
+    def parse(self, value):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "int.cfg")
+            with open(path, "w") as f:
+                f.write("id = spawnd { listen = { port = 4949 } }\nid = tac_plus-ng {\n\tretire limit = %s\n}\n" % value)
+            return check(path)
+
+    def test_accepted(self):
+        for value in ("1000", "0x10", "2k", "1G", "-1", "-5", "-0x10", "+7", "2147483647", "-2147483648", "-0x80000000"):
+            with self.subTest(value=value):
+                code, out = self.parse(value)
+                self.assertEqual(code, 0, out)
+
+    def test_refused(self):
+        for value, text in (("-1k", "a negative integer takes no binary prefix"),
+                            ("2G", "integer value too large"),
+                            ("2147483648", "integer value too large"),
+                            ("-2147483649", "integer value too large"),
+                            ("99999999999", "integer value too large"),
+                            ("12abc", "expected an integer, but got '12abc'"),
+                            ("0x", "expected an integer, but got '0x'")):
+            with self.subTest(value=value):
+                code, out = self.parse(value)
+                self.assertGreater(code, 0, out)
+                self.assertIn(text, out)
+
+
+C7 = b"dsfd;kfoA,.iyewrkldJKDHSUBsgvca69834ncxv9873254k;fg87"
+
+
+def type7(text, seed=2):
+    """The Cisco type 7 form of text, as c7decode() in config.c reads it."""
+    return "%02d" % seed + "".join("%02X" % (ord(c) ^ C7[(seed + i) % len(C7)]) for i, c in enumerate(text))
+
+
+class PskMinimumLength(unittest.TestCase):
+    """tls psk key: at least 128 bit (16 bytes), in every form of the key."""
+
+    TOO_SHORT = "PSK is too short, a minimum of 128 bit is required"
+
+    def setUp(self):
+        if "openssl" not in features():
+            self.skipTest("tac_plus-ng built without OpenSSL")
+
+    def parse(self, key):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "psk.cfg")
+            with open(path, "w") as f:
+                f.write("id = spawnd { listen = { port = 4949 tls = yes tls psk = yes } }\n"
+                        "id = tac_plus-ng {\n\ttls psk = yes\n\ttype6-key = demo\n"
+                        "\tdevice psknas {\n\t\ttls psk id = psknas\n\t\ttls psk key = %s\n\t}\n}\n" % key)
+            return check(path)
+
+    def test_accepted(self):
+        for key in ("hex " + "ab" * 16, "clear " + "x" * 16, "7 " + type7("x" * 16),
+                    'base64 "%s"' % base64.b64encode(b"x" * 16).decode(),
+                    "6 '_ifbOASUKMTdIGXHEXTBPDWF[`CeFOBY^GgMVcAbMQAAB'"):  # demoDemoDemoDemo
+            with self.subTest(key=key):
+                code, out = self.parse(key)
+                self.assertEqual(code, 0, out)
+
+    def test_refused(self):
+        for key in ("hex " + "ab" * 15, "clear " + "x" * 15, "7 " + type7("x" * 15),
+                    'base64 "%s"' % base64.b64encode(b"x" * 15).decode(),
+                    "6 'ZKAb`S]hPDBAbXWZNJQ_BecWeZIMFYAAB'"):  # demoDemo
+            with self.subTest(key=key):
+                code, out = self.parse(key)
+                self.assertGreater(code, 0, out)
+                self.assertIn(self.TOO_SHORT, out)
 
 
 class NestedInclude(DaemonTestCase):

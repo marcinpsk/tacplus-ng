@@ -35,9 +35,3 @@
 # length 0.
 nonnull-attribute:send_author_reply_final
 nonnull-attribute:send_acct_reply
-
-# tac_plus-ng/main.c compare_session(): the session tree of a connection
-# compares two session ids as "a - b" in int; ids that differ by more
-# than INT_MAX overflow. Needs two sessions open on one connection
-# (single-connection); not seen to misorder the tree with three.
-signed-integer-overflow:compare_session

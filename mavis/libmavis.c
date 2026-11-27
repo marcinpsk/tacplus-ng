@@ -296,7 +296,7 @@ void av_add(av_ctx *ac, int av_attribute, char *separator, char *format, ...)
 
 char *av_get(av_ctx *ac, int av_attribute)
 {
-    if (av_attribute < 0 || av_attribute > AV_A_ARRAYSIZE) {
+    if (av_attribute < 0 || av_attribute >= AV_A_ARRAYSIZE) {
 	Debug((DEBUG_AV, "%s(%d): out of bounds\n", __func__, av_attribute));
 	return NULL;
     }
@@ -383,7 +383,9 @@ int av_char_to_array(av_ctx *ac, char *buffer, fd_set *set)
 	av_value = strchr(av_start, ' ');
 	if (av_value) {
 	    *av_value++ = 0;
-	    if ((1 == sscanf(av_start, "%d", &av_attribute)) && (!set || FD_ISSET(av_attribute, set))) {
+	    if ((1 == sscanf(av_start, "%d", &av_attribute))
+		&& av_attribute >= 0 && av_attribute < AV_A_ARRAYSIZE
+		&& (!set || FD_ISSET(av_attribute, set))) {
 		char *t;
 		av_set(ac, av_attribute, av_value);
 		t = av_get(ac, av_attribute);

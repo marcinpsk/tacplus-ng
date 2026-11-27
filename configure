@@ -307,9 +307,22 @@ if ($DIRS !~ /^mavis /){
 
 my %DEFS;
 
+# 1 if the C compiler compiles and links the source with the arguments
+sub links($$) {
+	my ($code, $args) = @_;
+	require File::Temp;
+	my $dir = File::Temp::tempdir(CLEANUP => 1);
+	open(my $src, ">", "$dir/t.c") or die "$dir/t.c: $!\n";
+	print $src $code;
+	close($src);
+	(my $shdir = $dir) =~ s/'/'\\''/g;
+	return system("$DEFS{'CC'} -o '$shdir/t' '$shdir/t.c' $args >/dev/null 2>&1") == 0;
+}
+
 $DEFS{'DIRS'} = $DIRS unless $DIRS eq "";
 $DEFS{"DEF"} = "";
 $DEFS{"LD"} = "ld";
+$DEFS{"LDFLAGS"} = "";
 $DEFS{"BASE"} = $cwd;
 $DEFS{"BASE"} = $cwd;
 
@@ -484,18 +497,22 @@ if ($cctest =~ /clang/) {
 
 if (defined $DEFS{"CC_GCC"}) {
 	$DEFS{"CFLAGS"} = "-Wall -W -Wno-strict-prototypes -Wno-implicit-fallthrough";
+	$DEFS{"CFLAGS"} .= " -fstack-protector-strong";
 	if (exists $DEFS{'ASAN'}) {
 		$DEFS{"CFLAGS"} .= " -g";
 		$DEFS{"CC"} .= " -fsanitize=address";
 	}
 	if (!exists $DEFS{'DEBUG'} && !exists $DEFS{'GGDB'} && !exists $DEFS{'ASAN'}) {
-		$DEFS{"CFLAGS"} .= " -O2";
+		# glibc warns about _FORTIFY_SOURCE without optimization, and -Werror makes that an error
+		$DEFS{"CFLAGS"} .= " -O2 -D_FORTIFY_SOURCE=3";
 	} else {
 		$DEFS{"CFLAGS"} .= " -O0";
 	}
 	$DEFS{"CFLAGS_PIC"} = "-fPIC";
 	$DEFS{"LDOPT_R"} = "-Wl,-rpath,";
-	$DEFS{"LD_SHARED"} = "$DEFS{'CC'} -shared";
+	# -z is for ELF linkers, some linkers refuse it
+	$DEFS{"LDFLAGS"} = "-Wl,-z,relro,-z,now" if links("int main(void) { return 0; }\n", "-Wl,-z,relro,-z,now");
+	$DEFS{"LD_SHARED"} = "$DEFS{'CC'} -shared $DEFS{'LDFLAGS'}";
 
 	$DEFS{"CFLAGS"} .= " -Werror -Wno-deprecated-declarations -Wno-unused-result" if exists $DEFS{'DEBUG'} || exists $DEFS{'GGDB'};
 }
@@ -692,14 +709,8 @@ check_for("SCTP", "sctp", "netinet/sctp.h", "sctp", undef);
 check_for("PTHREAD", "pthread", "pthread.h", "pthread", undef);
 # musl has pthreads in libc and no libpthread.so, so ask the linker if the search found nothing.
 unless (exists $DEFS{"WITH_PTHREAD"}) {
-	require File::Temp;
-	my $dir = File::Temp::tempdir(CLEANUP => 1);
-	open(my $src, ">", "$dir/t.c") or die "$dir/t.c: $!\n";
-	print $src "#include <pthread.h>\nstatic void *f(void *a) { return a; }\n"
-		. "int main(void) { pthread_t t; return pthread_create(&t, 0, f, 0); }\n";
-	close($src);
-	(my $shdir = $dir) =~ s/'/'\\''/g;
-	if (system("$DEFS{'CC'} -o '$shdir/t' '$shdir/t.c' -lpthread >/dev/null 2>&1") == 0) {
+	if (links("#include <pthread.h>\nstatic void *f(void *a) { return a; }\n"
+		. "int main(void) { pthread_t t; return pthread_create(&t, 0, f, 0); }\n", "-lpthread")) {
 		$DEFS{"WITH_PTHREAD"} = 1;
 		check_for("PTHREAD", "pthread", "pthread.h", "pthread", undef);
 	}
