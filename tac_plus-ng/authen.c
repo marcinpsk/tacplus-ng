@@ -904,8 +904,12 @@ static enum token check_access(tac_session *session, struct pwdat *pwdat, char *
 		password_bad_digest(session->password_bad_salt, sizeof(session->password_bad_salt), passwd, session->password_bad_hash);
 		session->password_bad = BISTATE_YES;
 	    }
-	    session->password = NULL;
 	}
+    }
+
+    if (resp && res != S_permit && session->password) {	// also after a reject by the backend, which sets no user
+	cleanse_string(session->password);
+	session->password = NULL;
     }
 
     if (resp && !*resp)
