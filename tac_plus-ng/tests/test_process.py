@@ -77,6 +77,28 @@ class MayClose(DaemonTestCase):
             self.assertEqual(c.pap("alice", "alicepw").status_name, "PASS")
 
 
+class NegatedAcl(DaemonTestCase):
+    """spawnd "permit not <network>": the first entry that matches decides, also for two negated entries.
+
+    parse_acl() did not step over "not" and took it as the address, so
+    the configuration did not parse. It also put a negated entry into the
+    network list of the entry before it, so an address had to be outside
+    of both networks.
+    """
+
+    SPAWND = "\tpermit not 127.0.0.2/31\n\tpermit not 127.0.0.3/32\n"
+    CONFIG = POLICY
+
+    def test_address_outside_both_networks_is_permitted(self):
+        self.assertEqual(self.connect().pap("alice", "alicepw").status_name, "PASS")
+
+    def test_address_in_the_first_network_only_is_permitted(self):
+        self.assertEqual(self.connect(source="127.0.0.2").pap("alice", "alicepw").status_name, "PASS")
+
+    def test_address_in_both_networks_is_refused(self):
+        self.assertTrue(self.connect(source="127.0.0.3").closed(timeout=3), "the daemon took the connection")
+
+
 class KeepOpen(DaemonTestCase):
     """Without may-close the daemon answers further sessions on a connection, flag or not."""
 
