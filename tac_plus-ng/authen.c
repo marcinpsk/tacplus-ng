@@ -751,6 +751,8 @@ static void do_rad_mfa(tac_session * session);
 
 static int authen_final(tac_session *session, enum token res, char *info, enum hint_enum hint, char *msg, int msg_len, u_char *data, int data_len)
 {
+    if (session->bad_backend_data)
+	res = S_deny;
     if (res == S_permit && session->want_mfa == BISTATE_YES) {
 	session->authfn = do_mfa;
 	session->mfa_info = info;
@@ -772,6 +774,8 @@ static int authen_final(tac_session *session, enum token res, char *info, enum h
 
 static int init_rad_mfa(tac_session *session, enum token res, char *info, enum hint_enum hint, char *resp)
 {
+    if (session->bad_backend_data)
+	res = S_deny;
     if (res == S_permit && session->want_mfa == BISTATE_YES) {
 	session->authfn = do_rad_mfa;
 	session->mfa_info = info;
