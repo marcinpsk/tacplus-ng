@@ -2551,6 +2551,9 @@ static void do_radius_login(tac_session *session)
 	if (session->user) {
 	    res = check_access(session, pwdat, session->password, &hint, &resp);
 	    user_expiry_check(&res, session->user, &hint);
+	} else if (session->password) {
+	    cleanse_string(session->password);
+	    session->password = NULL;
 	}
     } else if (rd->type == S_chap) {
 	if (query_mavis_info_chap(session, do_radius_login))
