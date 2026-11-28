@@ -3023,9 +3023,22 @@ int mavis_type6_decrypts(char *in)
 
 void mavis_setenv_add(struct mavis_setenv **in, int *count, struct sym *sym, char *name, struct sym *as_written)
 {
-    size_t len = strlen(name) + strlen(sym->buf) + 2;
-    *in = Xrealloc(*in, (*count + 1) * sizeof(struct mavis_setenv));
-    struct mavis_setenv *e = &(*in)[(*count)++];
+    size_t name_len = strlen(name);
+    size_t len = name_len + strlen(sym->buf) + 2;
+    struct mavis_setenv *e = NULL;
+    // the last value of a name wins: replace an entry of the same name, else append
+    for (int i = 0; i < *count; i++)
+	if (!strncmp((*in)[i].parsed, name, name_len) && (*in)[i].parsed[name_len] == '=') {
+	    e = &(*in)[i];
+	    free(e->parsed);
+	    free(e->raw);
+	    free(e->file);
+	    break;
+	}
+    if (!e) {
+	*in = Xrealloc(*in, (*count + 1) * sizeof(struct mavis_setenv));
+	e = &(*in)[(*count)++];
+    }
     e->parsed = Xcalloc(1, len);
     snprintf(e->parsed, len, "%s=%s", name, sym->buf);
     // mavis_setenv_init() decrypts it with the final key; a read that ends at an escaped quote is no type 6 value
