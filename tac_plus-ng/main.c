@@ -1532,6 +1532,7 @@ static int X509_verify_cert_post_handshake(SSL *ssl, mem_t *mem, char **reason)
     }
 
     X509_STORE_CTX_set_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx(), ssl);
+    X509_VERIFY_PARAM_set1(X509_STORE_CTX_get0_param(ctx), SSL_get0_param(ssl));	// as in the handshake, not from the store
 
     int res = X509_verify_cert(ctx);
     if (res != 1) {
@@ -2148,7 +2149,7 @@ static void accept_control_check_tls(struct context *ctx, int cur __attribute__(
 // The lowest TLS version a TLS (not DTLS) connection may negotiate. "tls min version" of the realm,
 // else by the aaa.protocol of the listener: RADIUS over TLS (RFC 6614) allows TLS 1.2, TACACS+ over
 // TLS (RFC 9887) requires TLS 1.3, and so does a listener that doesn't say.
-static int tls_min_version(struct context *ctx)
+int tls_min_version(struct context *ctx)
 {
     if (ctx->realm->tls_min_version > 0)
 	return ctx->realm->tls_min_version;

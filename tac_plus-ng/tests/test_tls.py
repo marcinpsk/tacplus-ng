@@ -545,8 +545,8 @@ class Psk(TlsTestCase):
     BODY = PSK + policy(("psknas", "pskclear", "localhost"))
     CLIENTS = {}
 
-    def connect_psk(self, identity="psknas", key=PSK_KEY, timeout=10.0):
-        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), identity, key, timeout=timeout)
+    def connect_psk(self, identity="psknas", key=PSK_KEY, timeout=10.0, **kw):
+        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), identity, key, timeout=timeout, **kw)
         return self.connect(sock=sock, timeout=timeout)
 
     def test_pap_over_psk(self):
@@ -575,6 +575,28 @@ class Psk(TlsTestCase):
     def test_unknown_identity_is_refused(self):
         self.assertRefused(lambda: self.connect_psk(identity="nosuchnas"))
 
+    def test_suite_not_in_cipher_suites_is_refused(self):
+        self.assertRefused(lambda: self.connect_psk(cipher="TLS_CHACHA20_POLY1305_SHA256"))
+
+
+class PskDefaultCipherSuites(TlsTestCase):
+    """TLS 1.3 PSK with the default "tls cipher-suites": the session takes the suite that the handshake selects."""
+
+    LISTEN = Psk.LISTEN
+    BODY = PSK.replace("\ttls cipher-suites = TLS_AES_128_GCM_SHA256\n", "") + policy(("psknas", "localhost"))
+    CLIENTS = {}
+
+    def pap_with_cipher(self, cipher):
+        sock = tls.PskSocket((self.daemon.address, self.daemon.ports["psk"]), "psknas", PSK_KEY, timeout=10.0,
+                             cipher=cipher)
+        return self.connect(sock=sock, timeout=10.0).pap("alice", "alicepw").ok
+
+    def test_last_suite_of_the_list(self):
+        """psk_find_session_cb() took the first suite of the list, not the one of the handshake."""
+        self.assertTrue(self.pap_with_cipher("TLS_AES_128_GCM_SHA256"))
+
+    def test_second_suite_of_the_list(self):
+        self.assertTrue(self.pap_with_cipher("TLS_CHACHA20_POLY1305_SHA256"))
 
 
 RADSEC = """
@@ -743,6 +765,38 @@ class TlsMinVersionBugCompatibility(TlsMinVersionCase):
                          server_hostname="localhost", timeout=10.0)
         self.assertEqual(c.sock.version(), "TLSv1.2")
         self.assertTrue(c.pap("alice", "alicepw").ok)
+
+
+class TlsMinVersionSni(TlsTestCase):
+    """The realm that the SNI selects sets the lowest TLS version, not the realm of the listener."""
+
+    LISTEN = {"radius-tls": "tls = yes aaa.protocol = radius.tls"}
+    BODY = TLS_REALM + """
+	tls sni required = yes
+	tls sni = localhost
+	realm strict {
+		tls sni = strict.tactest
+		tls min version = TLSv1.3
+	}
+""" + DEVICES + RADSEC
+
+    def radsec(self, sni, maximum):
+        ctx = self.context("certnas", minimum=TLS12, maximum=maximum)
+        ctx.check_hostname = False
+        raw = socket.create_connection((self.daemon.address, self.daemon.ports["radius-tls"]), timeout=5.0)
+        self.addCleanup(raw.close)
+        sock = ctx.wrap_socket(raw, server_hostname=sni)
+        return self.radius("radsec", tcp=True, listener="radius-tls", sock=sock).access_request("alice", "alicepw").code_name
+
+    def test_tls12_for_the_realm_of_the_listener(self):
+        self.assertEqual(self.radsec("localhost", TLS12), "Access-Accept")
+
+    def test_tls13_for_the_realm_of_the_sni(self):
+        self.assertEqual(self.radsec("strict.tactest", ssl.TLSVersion.TLSv1_3), "Access-Accept")
+
+    def test_tls12_for_the_realm_of_the_sni_is_refused(self):
+        """sni_cb() changed the realm, but the minimum stayed the one of the realm of the listener."""
+        self.assertProtocolVersionRefused(lambda: self.radsec("strict.tactest", TLS12))
 
 
 class RadiusOverDtls(TlsTestCase):
@@ -1023,6 +1077,33 @@ class PeerCertValidationOfChildRealm(TlsTestCase):
         self.assertRefused(lambda: self.connect_tls(client=None, listener="child-any", source="127.0.0.10"))
 
 
+class PeerCertIntermediateCa(TlsTestCase):
+    """"tls ca-file" with only the intermediate CA that signed the client certificate, not the root."""
+
+    LISTEN = {"tls": "tls = yes"}
+    BODY = None
+    CLIENTS = {}
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        sub = cls.ca.issue("sub", "/O=tactest/CN=tactest sub", ca=True)
+        cls.certs["certnas"] = cls.ca.issue("certnas", "/CN=certnas.tactest", issuer=sub)
+        cls.sub = sub[0]
+
+    def pap(self, validation):
+        body = '\ttls cert-file = "%s"\n\ttls key-file = "%s"\n\ttls ca-file = "%s"\n' % (self.ca.server + (self.sub,))
+        body += "\ttls.peer.cert.validation = %s\n" % validation + POLICY
+        return self.connect_tls(daemon=self.start_daemon(body, listen=self.LISTEN)).pap("alice", "alicepw").ok
+
+    def test_validation_cert(self):
+        """X509_verify_cert_post_handshake() did not take X509_V_FLAG_PARTIAL_CHAIN of the handshake."""
+        self.assertTrue(self.pap("cert"))
+
+    def test_validation_any(self):
+        self.assertTrue(self.pap("any"))
+
+
 PKCS11_PARSE = "id = spawnd { listen = { port = 4949 } }\nid = tac_plus-ng {\n%s}\n"
 
 
@@ -1041,7 +1122,9 @@ class Pkcs11(TlsTestCase):
         code, out = cls.parse_text("\ttls pkcs11-pin = 1234\n")
         if code:
             cls.ca.remove()
-            raise unittest.SkipTest("no OpenSSL provider pkcs11: %s" % out.strip())
+            if code == os.EX_CONFIG:    # OSSL_PROVIDER_load() failed; the daemon prints nothing for it
+                raise unittest.SkipTest("no OpenSSL provider pkcs11")
+            raise AssertionError("the PKCS#11 probe exited with %d:\n%s" % (code, out))
 
     @classmethod
     def parse_text(cls, body):

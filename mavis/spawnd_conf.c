@@ -42,9 +42,12 @@ static void parse_acl(struct sym *sym)
     int cm;
 
     sym_get(sym);
-    if (sym->code == S_not)
+    if (sym->code == S_not) {
 	negate = 1;
-    if (!acl_last || acl_last->negate != negate || acl_last->token != sc) {
+	sym_get(sym);
+    }
+    // no merge of negated entries: "not A" then "not B" is not "not (A or B)"
+    if (negate || !acl_last || acl_last->negate || acl_last->token != sc) {
 	while (*acl)
 	    acl = &(*acl)->next;
 	*acl = calloc(1, sizeof(struct acl));

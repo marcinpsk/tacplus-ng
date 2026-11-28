@@ -481,6 +481,17 @@ static int conn_apply_tls_options(struct conn *conn)
     }
 }
 
+static int conn_connect_fail(struct conn *conn)
+{
+    SSL_free(conn->ssl);
+    conn->ssl = NULL;
+    SSL_CTX_free(conn->ctx);
+    conn->ctx = NULL;
+    close(conn->fd);
+    conn->fd = -1;
+    return -1;
+}
+
 int conn_connect(struct conn *conn)
 {
     if (conn->fd > -1)
@@ -492,18 +503,14 @@ int conn_connect(struct conn *conn)
     }
 
     if (su_bind(conn->fd, &conn->su_local)) {
-	close(conn->fd);
-	conn->fd = -1;
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     if (conn_update_timeout(conn))
-	return -1;
+	return conn_connect_fail(conn);
 
     if (su_connect(conn->fd, &conn->su_peer)) {
-	close(conn->fd);
-	conn->fd = -1;
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     if (!conn->tls_version) {
@@ -513,7 +520,7 @@ int conn_connect(struct conn *conn)
 
     conn->ctx = SSL_CTX_new((conn->socket_type == SOCK_STREAM) ? TLS_client_method() : DTLS_client_method());
     if (!conn->ctx) {
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     SSL_CTX_set_options(conn->ctx, SSL_OP_ALL);
@@ -521,23 +528,17 @@ int conn_connect(struct conn *conn)
     X509_VERIFY_PARAM_set_flags(SSL_CTX_get0_param(conn->ctx), X509_V_FLAG_PARTIAL_CHAIN);
 
     if (conn_apply_tls_options(conn)) {
-	SSL_CTX_free(conn->ctx);
-	conn->ctx = NULL;
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     if (conn->peer_cafile) {
 #if OPENSSL_VERSION_NUMBER < 0x30000000
 	if (SSL_CTX_load_verify_locations(conn->ctx, conn->peer_cafile, NULL) != 1) {
-	    SSL_CTX_free(conn->ctx);
-	    conn->ctx = NULL;
-	    return -1;
+	    return conn_connect_fail(conn);
 	}
 #else
 	if (SSL_CTX_load_verify_file(conn->ctx, conn->peer_cafile) != 1) {
-	    SSL_CTX_free(conn->ctx);
-	    conn->ctx = NULL;
-	    return -1;
+	    return conn_connect_fail(conn);
 	}
 #endif
 	SSL_CTX_set_verify_depth(conn->ctx, 8);
@@ -554,21 +555,15 @@ int conn_connect(struct conn *conn)
 
     if (conn->client_cert) {
 	if (!SSL_CTX_use_certificate_chain_file(conn->ctx, conn->client_cert)) {
-	    SSL_CTX_free(conn->ctx);
-	    conn->ctx = NULL;
-	    return -1;
+	    return conn_connect_fail(conn);
 	}
 
 	if (!SSL_CTX_use_PrivateKey_file(conn->ctx, conn->client_key ? conn->client_key : conn->client_cert, SSL_FILETYPE_PEM)) {
-	    SSL_CTX_free(conn->ctx);
-	    conn->ctx = NULL;
-	    return -1;
+	    return conn_connect_fail(conn);
 	}
 
 	if (!SSL_CTX_check_private_key(conn->ctx)) {
-	    SSL_CTX_free(conn->ctx);
-	    conn->ctx = NULL;
-	    return -1;
+	    return conn_connect_fail(conn);
 	}
     }
 #ifndef OPENSSL_NO_PSK
@@ -583,9 +578,7 @@ int conn_connect(struct conn *conn)
 
     conn->ssl = SSL_new(conn->ctx);
     if (!conn->ssl) {
-	SSL_CTX_free(conn->ctx);
-	conn->ctx = NULL;
-	return -1;
+	return conn_connect_fail(conn);
     }
     SSL_set_mtu(conn->ssl, 1456);
     SSL_set_app_data(conn->ssl, conn);
@@ -599,18 +592,14 @@ int conn_connect(struct conn *conn)
     }
     if (conn->alpn) {
 	if (SSL_set_alpn_protos(conn->ssl, conn->alpn, conn->alpn_len))
-	    return -1;
+	    return conn_connect_fail(conn);
     }
     if (!SSL_set_fd(conn->ssl, conn->fd)) {
-	SSL_CTX_free(conn->ctx);
-	SSL_free(conn->ssl);
-	close(conn->fd);
-	conn->fd = -1;
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     if (conn_update_timeout(conn))
-	return -1;
+	return conn_connect_fail(conn);
 
     if (conn->socket_type == SOCK_STREAM)
 	switch (conn->tls_version) {
@@ -652,20 +641,12 @@ int conn_connect(struct conn *conn)
     int res = SSL_connect(conn->ssl);
     if (res != 1) {
 	// SSL_get_error(res)
-	SSL_CTX_free(conn->ctx);
-	SSL_free(conn->ssl);
-	close(conn->fd);
-	conn->fd = -1;
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     if (conn->peer_cafile && (SSL_get_verify_result(conn->ssl) != X509_V_OK)) {
 	// SSL_get_error(res)
-	SSL_CTX_free(conn->ctx);
-	SSL_free(conn->ssl);
-	close(conn->fd);
-	conn->fd = -1;
-	return -1;
+	return conn_connect_fail(conn);
     }
 
     if (conn->alpn) {

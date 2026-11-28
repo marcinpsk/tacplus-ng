@@ -496,7 +496,10 @@ int main(int argc, char *argv[])
     if (common_data.parse_only)
 	exit(0);
 
-    conn_connect(conn);
+    if (conn_connect(conn)) {
+	fprintf(stderr, "Connection setup failed\n");
+	exit(-1);
+    }
     struct aaa *aaa = aaa_new(conn);
     aaa_set_tac_authen_pap(aaa, tac_authen_pap);
     aaa_set_tac_authen_svc(aaa, tac_authen_svc);

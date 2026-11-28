@@ -179,5 +179,55 @@ class MalformedReply(unittest.TestCase):
         self.assertEqual(lines, ["authc ack", "Message-Authenticator=...", "Reply-Message="])
 
 
+@unittest.skipUnless(tactester.binary(), "no tactester; run-tests builds it only with OpenSSL")
+class TlsSetupFailure(unittest.TestCase):
+    """tactester stops when it cannot set up TLS, and sends nothing in plain text."""
+
+    ADDRESS = "127.0.0.1"
+    CLIENT = """
+id = tactester {
+	server tacacs.tls {
+		protocol = tacacs.tls
+		destination address = @ADDRESS@
+		destination port = @PORT@
+		tls ciphers = NO-SUCH-CIPHER
+		timeout = 5
+		retry = 0
+	}
+}
+"""
+
+    def test_invalid_tls_ciphers(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(sock.close)
+        sock.bind((self.ADDRESS, 0))
+        sock.listen(1)
+        sock.settimeout(30)
+        received = []
+
+        def serve():
+            conn, _ = sock.accept()
+            with conn:
+                conn.settimeout(30)
+                received.append(conn.recv(4096))
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "tactester.cfg")
+            with open(cfg, "w") as f:
+                f.write(self.CLIENT.replace("@ADDRESS@", self.ADDRESS).replace("@PORT@", str(sock.getsockname()[1])))
+            p = subprocess.run([tactester.binary(), "-C", cfg, "-s", "tacacs.tls", "-m", "authc", "-u", "alice",
+                                "-p", "alicepw"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               stdin=subprocess.DEVNULL, timeout=30, env=sanitizer_env(), check=False)
+        t.join(30)
+        out = p.stdout.decode("utf-8", "replace")
+        self.assertEqual(received, [b""], out)
+        # exit(-1) after the message: a crash or a sanitizer report must not pass as the refusal
+        self.assertEqual(p.returncode, 255, out)
+        self.assertIn("Connection setup failed", out)
+        self.assertNotRegex(out, r"Sanitizer|runtime error:")
+
+
 if __name__ == "__main__":
     unittest.main()
